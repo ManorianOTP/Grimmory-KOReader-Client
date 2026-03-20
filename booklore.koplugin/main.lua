@@ -1,11 +1,15 @@
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local UIManager = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
+local Menu = require("ui/widget/menu")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local DataStorage = require("datastorage")
 local LuaSettings = require("luasettings")
 local NetworkMgr = require("ui/network/manager")
+local Device = require("device")
+local Screen = Device.screen
 local logger = require("logger")
+local json = require("json")
 local _ = require("gettext")
 
 local BookLoreApi = require("api")
@@ -38,9 +42,9 @@ function BookLore:addToMainMenu(menu_items)
                 end,
             },
             {
-                text = _("Test: Book Count"),
+                text = _("Browse Library"),
                 callback = function()
-                    self:testBookCount()
+                    self:browseLibrary()
                 end,
             },
         },
@@ -123,7 +127,7 @@ function BookLore:doLogin(server_url, username, password)
     end
 end
 
-function BookLore:testBookCount()
+function BookLore:browseLibrary()
     if not self.token then
         UIManager:show(InfoMessage:new{
             text = _("Not logged in. Please login first."),
@@ -131,22 +135,133 @@ function BookLore:testBookCount()
         return
     end
 
+    if not NetworkMgr:isWifiOn() then
+        NetworkMgr:turnOnWifi()
+    end
+
     local books, err = BookLoreApi:getBooks(self.server_url, self.token)
 
-    if books then
-        local count = 0
-        if type(books) == "table" then
-            count = #books
-        end
-
-        UIManager:show(InfoMessage:new{
-            text = _("Total books in library: ") .. tostring(count),
-        })
-    else
+    if not books then
         UIManager:show(InfoMessage:new{
             text = _("Failed to fetch books:\n") .. tostring(err),
         })
+        return
     end
+
+    if type(books) ~= "table" or #books == 0 then
+        UIManager:show(InfoMessage:new{
+            text = _("No books found."),
+        })
+        return
+    end
+
+    -- Sort by title
+    table.sort(books, function(a, b)
+        local title_a = a.metadata and a.metadata.title or ""
+        local title_b = b.metadata and b.metadata.title or ""
+        return title_a:lower() < title_b:lower()
+    end)
+
+    -- Build menu items
+    local item_table = {}
+    for _, book in ipairs(books) do
+        local meta = book.metadata or {}
+        local title = meta.title or book.fileName or "Untitled"
+        local authors = ""
+        if type(meta.authors) == "table" and #meta.authors > 0 then
+            authors = table.concat(meta.authors, ", ")
+        end
+
+        -- Right-aligned text: read status
+        local status = book.readStatus or ""
+
+        table.insert(item_table, {
+            text = title,
+            mandatory = status,
+            info = authors,
+            book_data = book,
+        })
+    end
+
+    -- Store reference so we can close it later
+    self.book_menu = Menu:new{
+        title = _("BookLore") .. " (" .. tostring(#books) .. " books)",
+        item_table = item_table,
+        width = Screen:getWidth(),
+        height = Screen:getHeight(),
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        onMenuChoice = function(menu_instance, item)
+            self:showBookDetail(item.book_data)
+        end,
+        close_callback = function()
+            UIManager:close(self.book_menu)
+        end,
+    }
+    UIManager:show(self.book_menu)
+end
+
+function BookLore:showBookDetail(book)
+    local meta = book.metadata or {}
+    local lines = {}
+
+    -- Title
+    table.insert(lines, meta.title or "Untitled")
+    table.insert(lines, "")
+
+    -- Authors
+    if type(meta.authors) == "table" and #meta.authors > 0 then
+        table.insert(lines, "By: " .. table.concat(meta.authors, ", "))
+    end
+
+    -- Series
+    if meta.seriesName then
+        local series_str = meta.seriesName
+        if meta.seriesNumber then
+            series_str = series_str .. " #" .. tostring(meta.seriesNumber)
+        end
+        if meta.seriesTotal then
+            series_str = series_str .. " of " .. tostring(meta.seriesTotal)
+        end
+        table.insert(lines, "Series: " .. series_str)
+    end
+
+    -- Publisher & date
+    if meta.publisher then
+        local pub_str = meta.publisher
+        if meta.publishedDate then
+            pub_str = pub_str .. " (" .. meta.publishedDate .. ")"
+        end
+        table.insert(lines, "Publisher: " .. pub_str)
+    end
+
+    -- Page count
+    if meta.pageCount then
+        table.insert(lines, "Pages: " .. tostring(meta.pageCount))
+    end
+
+    table.insert(lines, "")
+
+    -- Status & rating
+    if book.readStatus then
+        table.insert(lines, "Status: " .. book.readStatus)
+    end
+    if book.personalRating and book.personalRating > 0 then
+        table.insert(lines, "Rating: " .. tostring(book.personalRating) .. "/10")
+    end
+
+    -- File info
+    table.insert(lines, "")
+    table.insert(lines, "Format: " .. (book.bookType or "Unknown"))
+    if book.fileSizeKb then
+        local size_mb = string.format("%.1f", book.fileSizeKb / 1024)
+        table.insert(lines, "Size: " .. size_mb .. " MB")
+    end
+
+    UIManager:show(InfoMessage:new{
+        text = table.concat(lines, "\n"),
+    })
 end
 
 return BookLore
