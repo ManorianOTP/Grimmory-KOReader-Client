@@ -162,6 +162,15 @@ function BookLore:browseLibrary()
         return title_a:lower() < title_b:lower()
     end)
 
+    -- Cache for reuse when returning from detail view
+    self.cached_books = books
+    self:showLibraryMenu()
+end
+
+function BookLore:showLibraryMenu()
+    local books = self.cached_books
+    if not books then return end
+
     -- Build menu items
     local item_table = {}
     for _, book in ipairs(books) do
@@ -183,7 +192,6 @@ function BookLore:browseLibrary()
         })
     end
 
-    -- Store reference so we can close it later
     self.book_menu = Menu:new{
         title = _("BookLore") .. " (" .. tostring(#books) .. " books)",
         item_table = item_table,
@@ -193,6 +201,7 @@ function BookLore:browseLibrary()
         is_borderless = true,
         is_popout = false,
         onMenuChoice = function(menu_instance, item)
+            UIManager:close(self.book_menu)
             self:showBookDetail(item.book_data)
         end,
         close_callback = function()
@@ -204,15 +213,15 @@ end
 
 function BookLore:showBookDetail(book)
     local meta = book.metadata or {}
-    local lines = {}
 
-    -- Title
-    table.insert(lines, meta.title or "Untitled")
-    table.insert(lines, "")
+    -- Build detail lines as menu items
+    local item_table = {}
 
     -- Authors
     if type(meta.authors) == "table" and #meta.authors > 0 then
-        table.insert(lines, "By: " .. table.concat(meta.authors, ", "))
+        table.insert(item_table, {
+            text = "By: " .. table.concat(meta.authors, ", "),
+        })
     end
 
     -- Series
@@ -224,44 +233,80 @@ function BookLore:showBookDetail(book)
         if meta.seriesTotal then
             series_str = series_str .. " of " .. tostring(meta.seriesTotal)
         end
-        table.insert(lines, "Series: " .. series_str)
+        table.insert(item_table, {
+            text = "Series: " .. series_str,
+        })
     end
 
     -- Publisher & date
     if meta.publisher then
-        local pub_str = meta.publisher
+        local pub_str = "Publisher: " .. meta.publisher
         if meta.publishedDate then
             pub_str = pub_str .. " (" .. meta.publishedDate .. ")"
         end
-        table.insert(lines, "Publisher: " .. pub_str)
+        table.insert(item_table, { text = pub_str })
     end
 
     -- Page count
     if meta.pageCount then
-        table.insert(lines, "Pages: " .. tostring(meta.pageCount))
+        table.insert(item_table, {
+            text = "Pages: " .. tostring(meta.pageCount),
+        })
     end
 
-    table.insert(lines, "")
+    -- Spacer
+    table.insert(item_table, { text = "" })
 
     -- Status & rating
     if book.readStatus then
-        table.insert(lines, "Status: " .. book.readStatus)
+        table.insert(item_table, {
+            text = "Status: " .. book.readStatus,
+        })
     end
     if book.personalRating and book.personalRating > 0 then
-        table.insert(lines, "Rating: " .. tostring(book.personalRating) .. "/10")
+        table.insert(item_table, {
+            text = "Rating: " .. tostring(book.personalRating) .. "/10",
+        })
     end
 
     -- File info
-    table.insert(lines, "")
-    table.insert(lines, "Format: " .. (book.bookType or "Unknown"))
+    table.insert(item_table, { text = "" })
+    table.insert(item_table, {
+        text = "Format: " .. (book.bookType or "Unknown"),
+    })
     if book.fileSizeKb then
         local size_mb = string.format("%.1f", book.fileSizeKb / 1024)
-        table.insert(lines, "Size: " .. size_mb .. " MB")
+        table.insert(item_table, {
+            text = "Size: " .. size_mb .. " MB",
+        })
     end
 
-    UIManager:show(InfoMessage:new{
-        text = table.concat(lines, "\n"),
-    })
+    -- Library info
+    if book.libraryName then
+        table.insert(item_table, {
+            text = "Library: " .. book.libraryName,
+        })
+    end
+
+    local title = meta.title or book.fileName or "Untitled"
+
+    self.detail_menu = Menu:new{
+        title = title,
+        item_table = item_table,
+        width = Screen:getWidth(),
+        height = Screen:getHeight(),
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        onMenuChoice = function(menu_instance, item)
+            -- Items are informational, do nothing on tap
+        end,
+        close_callback = function()
+            UIManager:close(self.detail_menu)
+            self:showLibraryMenu()
+        end,
+    }
+    UIManager:show(self.detail_menu)
 end
 
 return BookLore
