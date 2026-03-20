@@ -138,4 +138,83 @@ function BookLoreApi:getBooks(server_url, token)
     return self:get(url, token)
 end
 
+--- Download a book's cover thumbnail to a file.
+-- Media endpoints use ?token= query param, NOT the Authorization header.
+-- Note: BookLore may return Content-Type: application/json despite
+-- serving image data — this is a known server bug. Treat as binary.
+-- The image format is detected from magic bytes and saved with the
+-- correct extension so KOReader's ImageWidget can load it.
+-- @param server_url string: base URL
+-- @param book_id number: book ID
+-- @param token string: JWT
+-- @param cache_dir string: directory to save the image in
+-- @return string|nil: file path on success, or nil on error
+-- @return string|nil: error message on failure
+function BookLoreApi:downloadCover(server_url, book_id, token, cache_dir)
+    local url = server_url .. "/api/v1/media/book/" .. tostring(book_id)
+        .. "/thumbnail?token=" .. token
+
+    -- Download to a temp file first
+    local tmp_path = cache_dir .. "/cover_" .. tostring(book_id) .. ".tmp"
+    local f, open_err = io.open(tmp_path, "wb")
+    if not f then
+        return nil, "Cannot write: " .. tostring(open_err)
+    end
+
+    local _, code = http.request{
+        url = url,
+        sink = ltn12.sink.file(f),  -- ltn12 closes f automatically
+    }
+
+    if code ~= 200 then
+        os.remove(tmp_path)
+        return nil, "HTTP " .. tostring(code)
+    end
+
+    -- Read magic bytes to detect format
+    local check = io.open(tmp_path, "rb")
+    if not check then
+        os.remove(tmp_path)
+        return nil, "Cannot reopen temp file"
+    end
+
+    local header = check:read(12)
+    local size = check:seek("end")
+    check:close()
+
+    if not header or not size or size == 0 then
+        os.remove(tmp_path)
+        return nil, "Empty response"
+    end
+
+    -- Detect image type from magic bytes
+    local ext = nil
+    if header:sub(1, 2) == "\xFF\xD8" then
+        ext = "jpg"
+    elseif header:sub(1, 4) == "\x89PNG" then
+        ext = "png"
+    elseif header:sub(1, 4) == "GIF8" then
+        ext = "gif"
+    elseif header:sub(1, 4) == "RIFF" and header:sub(9, 12) == "WEBP" then
+        ext = "webp"
+    end
+
+    if not ext then
+        -- Log the bytes for debugging
+        local hex = {}
+        for i = 1, math.min(#header, 8) do
+            table.insert(hex, string.format("%02X", header:byte(i)))
+        end
+        os.remove(tmp_path)
+        return nil, "Unknown image format. Header: " .. table.concat(hex, " ")
+    end
+
+    -- Rename to final path with correct extension
+    local final_path = cache_dir .. "/cover_" .. tostring(book_id) .. "." .. ext
+    os.remove(final_path)  -- remove old cached version if any
+    os.rename(tmp_path, final_path)
+
+    return final_path, nil
+end
+
 return BookLoreApi

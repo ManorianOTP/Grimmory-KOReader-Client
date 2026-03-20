@@ -1,8 +1,21 @@
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local InputContainer = require("ui/widget/container/inputcontainer")
+local FrameContainer = require("ui/widget/container/framecontainer")
+local CenterContainer = require("ui/widget/container/centercontainer")
 local UIManager = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
 local Menu = require("ui/widget/menu")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
+local VerticalGroup = require("ui/widget/verticalgroup")
+local VerticalSpan = require("ui/widget/verticalspan")
+local ImageWidget = require("ui/widget/imagewidget")
+local TextBoxWidget = require("ui/widget/textboxwidget")
+local TextWidget = require("ui/widget/textwidget")
+local Button = require("ui/widget/button")
+local Font = require("ui/font")
+local Geom = require("ui/geometry")
+local Size = require("ui/size")
+local Blitbuffer = require("ffi/blitbuffer")
 local DataStorage = require("datastorage")
 local LuaSettings = require("luasettings")
 local NetworkMgr = require("ui/network/manager")
@@ -213,100 +226,211 @@ end
 
 function BookLore:showBookDetail(book)
     local meta = book.metadata or {}
+    local title = meta.title or book.fileName or "Untitled"
+    local screen_w = Screen:getWidth()
+    local screen_h = Screen:getHeight()
+    local padding = Size.padding.large
 
-    -- Build detail lines as menu items
-    local item_table = {}
+    -- Ensure cover cache directory exists
+    local cache_dir = DataStorage:getDataDir() .. "/cache/booklore"
+    os.execute("mkdir -p " .. cache_dir)
+
+    -- Download cover thumbnail
+    local cover_widget = nil
+    if book.id then
+        local cover_path, err = BookLoreApi:downloadCover(
+            self.server_url, book.id, self.token, cache_dir
+        )
+        if cover_path then
+            local success, img = pcall(ImageWidget.new, ImageWidget, {
+                file = cover_path,
+                width = math.floor(screen_w * 0.4),
+                height = math.floor(screen_h * 0.3),
+                scale_factor = 0,  -- auto-scale to fit within bounds
+            })
+            if success and img then
+                cover_widget = img
+            else
+                logger.warn("BookLore: failed to load cover image:", img)
+            end
+        else
+            logger.dbg("BookLore: cover download failed:", err)
+        end
+    end
+
+    -- Build the content column
+    local content_w = screen_w - padding * 4
+    local content = VerticalGroup:new{ align = "center" }
+
+    -- Title (bold, centered)
+    local title_w = TextWidget:new{
+        text = title,
+        face = Font:getFace("tfont", 24),
+        bold = true,
+        max_width = content_w,
+    }
+    table.insert(content, CenterContainer:new{
+        dimen = Geom:new{ w = content_w, h = title_w:getSize().h },
+        title_w,
+    })
+    table.insert(content, VerticalSpan:new{ width = padding })
+
+    -- Cover image (centered)
+    if cover_widget then
+        table.insert(content, CenterContainer:new{
+            dimen = Geom:new{ w = content_w, h = cover_widget:getSize().h },
+            cover_widget,
+        })
+        table.insert(content, VerticalSpan:new{ width = padding })
+    end
+
+    -- Detail text
+    local lines = {}
 
     -- Authors
     if type(meta.authors) == "table" and #meta.authors > 0 then
-        table.insert(item_table, {
-            text = "By: " .. table.concat(meta.authors, ", "),
-        })
+        table.insert(lines, "By: " .. table.concat(meta.authors, ", "))
     end
 
     -- Series
     if meta.seriesName then
-        local series_str = meta.seriesName
+        local s = "Series: " .. meta.seriesName
         if meta.seriesNumber then
-            series_str = series_str .. " #" .. tostring(meta.seriesNumber)
+            s = s .. " #" .. tostring(meta.seriesNumber)
         end
         if meta.seriesTotal then
-            series_str = series_str .. " of " .. tostring(meta.seriesTotal)
+            s = s .. " of " .. tostring(meta.seriesTotal)
         end
-        table.insert(item_table, {
-            text = "Series: " .. series_str,
-        })
+        table.insert(lines, s)
     end
 
     -- Publisher & date
     if meta.publisher then
-        local pub_str = "Publisher: " .. meta.publisher
+        local p = "Publisher: " .. meta.publisher
         if meta.publishedDate then
-            pub_str = pub_str .. " (" .. meta.publishedDate .. ")"
+            p = p .. " (" .. meta.publishedDate .. ")"
         end
-        table.insert(item_table, { text = pub_str })
+        table.insert(lines, p)
     end
 
-    -- Page count
+    -- Pages & language
+    local page_lang = {}
     if meta.pageCount then
-        table.insert(item_table, {
-            text = "Pages: " .. tostring(meta.pageCount),
-        })
+        table.insert(page_lang, tostring(meta.pageCount) .. " pages")
+    end
+    if meta.language then
+        table.insert(page_lang, meta.language)
+    end
+    if #page_lang > 0 then
+        table.insert(lines, table.concat(page_lang, " · "))
     end
 
-    -- Spacer
-    table.insert(item_table, { text = "" })
+    table.insert(lines, "")
 
-    -- Status & rating
+    -- Read status & rating
     if book.readStatus then
-        table.insert(item_table, {
-            text = "Status: " .. book.readStatus,
-        })
+        table.insert(lines, "Status: " .. book.readStatus)
     end
     if book.personalRating and book.personalRating > 0 then
-        table.insert(item_table, {
-            text = "Rating: " .. tostring(book.personalRating) .. "/10",
-        })
+        table.insert(lines, "My rating: " .. tostring(book.personalRating) .. "/10")
     end
+
+    -- Community ratings
+    if meta.goodreadsRating then
+        local gr = "Goodreads: " .. tostring(meta.goodreadsRating)
+        if meta.goodreadsReviewCount then
+            gr = gr .. " (" .. tostring(meta.goodreadsReviewCount) .. " reviews)"
+        end
+        table.insert(lines, gr)
+    end
+    if meta.amazonRating then
+        local ar = "Amazon: " .. tostring(meta.amazonRating)
+        if meta.amazonReviewCount then
+            ar = ar .. " (" .. tostring(meta.amazonReviewCount) .. " reviews)"
+        end
+        table.insert(lines, ar)
+    end
+
+    -- Shelves
+    if type(book.shelves) == "table" and #book.shelves > 0 then
+        local shelf_names = {}
+        for _, shelf in ipairs(book.shelves) do
+            -- Shelf might be a string or table with name field
+            if type(shelf) == "table" then
+                table.insert(shelf_names, shelf.name or shelf.shelfName or "?")
+            else
+                table.insert(shelf_names, tostring(shelf))
+            end
+        end
+        table.insert(lines, "Shelves: " .. table.concat(shelf_names, ", "))
+    end
+
+    table.insert(lines, "")
 
     -- File info
-    table.insert(item_table, { text = "" })
-    table.insert(item_table, {
-        text = "Format: " .. (book.bookType or "Unknown"),
-    })
+    table.insert(lines, "Format: " .. (book.bookType or "Unknown"))
     if book.fileSizeKb then
-        local size_mb = string.format("%.1f", book.fileSizeKb / 1024)
-        table.insert(item_table, {
-            text = "Size: " .. size_mb .. " MB",
-        })
+        table.insert(lines, "Size: " .. string.format("%.1f", book.fileSizeKb / 1024) .. " MB")
     end
-
-    -- Library info
+    if meta.isbn13 then
+        table.insert(lines, "ISBN: " .. meta.isbn13)
+    end
     if book.libraryName then
-        table.insert(item_table, {
-            text = "Library: " .. book.libraryName,
-        })
+        table.insert(lines, "Library: " .. book.libraryName)
     end
 
-    local title = meta.title or book.fileName or "Untitled"
+    -- Last read
+    if book.lastReadTime then
+        -- Trim the timestamp to just the date
+        local date = tostring(book.lastReadTime):sub(1, 10)
+        table.insert(lines, "Last read: " .. date)
+    end
 
-    self.detail_menu = Menu:new{
-        title = title,
-        item_table = item_table,
-        width = Screen:getWidth(),
-        height = Screen:getHeight(),
-        covers_fullscreen = true,
-        is_borderless = true,
-        is_popout = false,
-        onMenuChoice = function(menu_instance, item)
-            -- Items are informational, do nothing on tap
-        end,
-        close_callback = function()
-            UIManager:close(self.detail_menu)
+    local detail_text = table.concat(lines, "\n")
+    local detail_widget = TextBoxWidget:new{
+        text = detail_text,
+        width = content_w,
+        face = Font:getFace("cfont", 20),
+    }
+    table.insert(content, detail_widget)
+
+    -- Back button
+    table.insert(content, VerticalSpan:new{ width = padding * 2 })
+    local back_btn = Button:new{
+        text = _("← Back to Library"),
+        radius = Size.radius.button,
+        padding = Size.padding.button,
+        callback = function()
+            UIManager:close(self.detail_widget)
+            if cover_widget and cover_widget.free then
+                cover_widget:free()
+            end
             self:showLibraryMenu()
         end,
     }
-    UIManager:show(self.detail_menu)
+    table.insert(content, CenterContainer:new{
+        dimen = Geom:new{ w = content_w, h = back_btn:getSize().h },
+        back_btn,
+    })
+
+    -- Wrap in a padded frame
+    local frame = FrameContainer:new{
+        width = screen_w,
+        height = screen_h,
+        background = Blitbuffer.COLOR_WHITE,
+        bordersize = 0,
+        padding = padding * 2,
+        padding_top = padding,
+        content,
+    }
+
+    -- InputContainer to capture all taps (prevents fallthrough)
+    self.detail_widget = InputContainer:new{
+        dimen = Geom:new{ w = screen_w, h = screen_h },
+    }
+    table.insert(self.detail_widget, frame)
+
+    UIManager:show(self.detail_widget)
 end
 
 return BookLore
