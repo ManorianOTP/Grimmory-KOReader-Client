@@ -7,8 +7,24 @@ local http = require("socket.http")
 local ltn12 = require("ltn12")
 local json = require("json")
 local logger = require("logger")
+local lfs = require("libs/libkoreader-lfs")
 
 local BookLoreApi = {}
+
+--- Recursively create directories using LuaFileSystem.
+-- Safe alternative to os.execute("mkdir -p ...") — no shell injection risk.
+-- @param path string: directory path to create
+local function mkdirs(path)
+    path = path:gsub("\\", "/")
+    local current = ""
+    for segment in path:gmatch("[^/]+") do
+        current = current .. "/" .. segment
+        local attr = lfs.attributes(current)
+        if not attr then
+            lfs.mkdir(current)
+        end
+    end
+end
 
 --- Perform a POST request with a JSON body.
 -- @param url string: full URL
@@ -105,7 +121,6 @@ function BookLoreApi:login(server_url, username, password)
         return nil, err
     end
 
-    -- BookLore returns accessToken (confirmed from external clients)
     local token = data.accessToken
     if not token then
         local keys = {}
@@ -119,20 +134,12 @@ function BookLoreApi:login(server_url, username, password)
 end
 
 --- Fetch the list of libraries.
--- @param server_url string: base URL
--- @param token string: JWT
--- @return table|nil: libraries array, or nil on error
--- @return string|nil: error message, or nil on success
 function BookLoreApi:getLibraries(server_url, token)
     local url = server_url .. "/api/v1/libraries"
     return self:get(url, token)
 end
 
 --- Fetch all books.
--- @param server_url string: base URL
--- @param token string: JWT
--- @return table|nil: books array, or nil on error
--- @return string|nil: error message, or nil on success
 function BookLoreApi:getBooks(server_url, token)
     local url = server_url .. "/api/v1/books"
     return self:get(url, token)
@@ -142,19 +149,10 @@ end
 -- Media endpoints use ?token= query param, NOT the Authorization header.
 -- Note: BookLore may return Content-Type: application/json despite
 -- serving image data — this is a known server bug. Treat as binary.
--- The image format is detected from magic bytes and saved with the
--- correct extension so KOReader's ImageWidget can load it.
--- @param server_url string: base URL
--- @param book_id number: book ID
--- @param token string: JWT
--- @param cache_dir string: directory to save the image in
--- @return string|nil: file path on success, or nil on error
--- @return string|nil: error message on failure
 function BookLoreApi:downloadCover(server_url, book_id, token, cache_dir)
     local url = server_url .. "/api/v1/media/book/" .. tostring(book_id)
         .. "/thumbnail?token=" .. token
 
-    -- Download to a temp file first
     local tmp_path = cache_dir .. "/cover_" .. tostring(book_id) .. ".tmp"
     local f, open_err = io.open(tmp_path, "wb")
     if not f then
@@ -163,7 +161,7 @@ function BookLoreApi:downloadCover(server_url, book_id, token, cache_dir)
 
     local _, code = http.request{
         url = url,
-        sink = ltn12.sink.file(f),  -- ltn12 closes f automatically
+        sink = ltn12.sink.file(f),
     }
 
     if code ~= 200 then
@@ -171,7 +169,6 @@ function BookLoreApi:downloadCover(server_url, book_id, token, cache_dir)
         return nil, "HTTP " .. tostring(code)
     end
 
-    -- Read magic bytes to detect format
     local check = io.open(tmp_path, "rb")
     if not check then
         os.remove(tmp_path)
@@ -187,7 +184,6 @@ function BookLoreApi:downloadCover(server_url, book_id, token, cache_dir)
         return nil, "Empty response"
     end
 
-    -- Detect image type from magic bytes
     local ext = nil
     if header:sub(1, 2) == "\xFF\xD8" then
         ext = "jpg"
@@ -200,7 +196,6 @@ function BookLoreApi:downloadCover(server_url, book_id, token, cache_dir)
     end
 
     if not ext then
-        -- Log the bytes for debugging
         local hex = {}
         for i = 1, math.min(#header, 8) do
             table.insert(hex, string.format("%02X", header:byte(i)))
@@ -209,12 +204,81 @@ function BookLoreApi:downloadCover(server_url, book_id, token, cache_dir)
         return nil, "Unknown image format. Header: " .. table.concat(hex, " ")
     end
 
-    -- Rename to final path with correct extension
     local final_path = cache_dir .. "/cover_" .. tostring(book_id) .. "." .. ext
-    os.remove(final_path)  -- remove old cached version if any
+    os.remove(final_path)
     os.rename(tmp_path, final_path)
 
     return final_path, nil
+end
+
+--- Download a book file to a local path.
+-- Uses the /api/v1/books/{id}/download endpoint with Bearer auth.
+-- Streams directly to disk via ltn12 sink.
+-- @param server_url string: base URL
+-- @param book_id number: book ID
+-- @param token string: JWT
+-- @param dest_path string: full destination file path
+-- @param expected_size_kb number|nil: expected size from API for truncation check
+-- @return boolean: true on success
+-- @return string|nil: error or warning message
+function BookLoreApi:downloadBook(server_url, book_id, token, dest_path, expected_size_kb)
+    local url = server_url .. "/api/v1/books/" .. tostring(book_id) .. "/download"
+
+    -- Ensure parent directory exists (safe, no shell)
+    local dir = dest_path:match("(.+)/[^/]+$")
+    if dir then
+        mkdirs(dir)
+    end
+
+    local f, open_err = io.open(dest_path, "wb")
+    if not f then
+        return false, "Cannot open for writing: " .. tostring(open_err)
+    end
+
+    logger.dbg("BookLore: downloading book", book_id, "to", dest_path)
+
+    local _, code = http.request{
+        url = url,
+        method = "GET",
+        headers = {
+            ["Authorization"] = "Bearer " .. token,
+        },
+        sink = ltn12.sink.file(f),
+    }
+
+    if code ~= 200 then
+        os.remove(dest_path)
+        return false, "HTTP " .. tostring(code)
+    end
+
+    -- Verify file was written
+    local check = io.open(dest_path, "rb")
+    if not check then
+        return false, "File not found after download"
+    end
+    local actual_size = check:seek("end")
+    check:close()
+
+    if not actual_size or actual_size == 0 then
+        os.remove(dest_path)
+        return false, "Downloaded file is empty"
+    end
+
+    -- Truncation check against server-reported size.
+    -- fileSizeKb is rounded, so allow 10% tolerance.
+    if expected_size_kb and expected_size_kb > 0 then
+        local expected_bytes = expected_size_kb * 1024
+        if actual_size < expected_bytes * 0.90 then
+            logger.warn("BookLore: download may be truncated.",
+                "Expected ~" .. tostring(expected_size_kb) .. "KB,",
+                "got " .. tostring(math.floor(actual_size / 1024)) .. "KB")
+        end
+    end
+
+    logger.info("BookLore: downloaded book", book_id, "→", dest_path,
+        string.format("(%.1f KB)", actual_size / 1024))
+
+    return true, nil
 end
 
 return BookLoreApi
