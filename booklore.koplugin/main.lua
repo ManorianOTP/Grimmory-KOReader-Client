@@ -8,12 +8,15 @@ local UIManager = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
 local Menu = require("ui/widget/menu")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
+local InputDialog = require("ui/widget/inputdialog")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local ImageWidget = require("ui/widget/imagewidget")
 local TextBoxWidget = require("ui/widget/textboxwidget")
 local TextWidget = require("ui/widget/textwidget")
+local LineWidget = require("ui/widget/linewidget")
 local Button = require("ui/widget/button")
+local GestureRange = require("ui/gesturerange")
 local Font = require("ui/font")
 local Geom = require("ui/geometry")
 local Size = require("ui/size")
@@ -26,6 +29,7 @@ local Screen = Device.screen
 local logger = require("logger")
 local json = require("json")
 local util = require("util")
+local lfs = require("libs/libkoreader-lfs")
 local _ = require("gettext")
 
 local BookLoreApi = require("api")
@@ -35,20 +39,13 @@ local BookLore = WidgetContainer:extend{
     is_doc_only = false,
 }
 
--- Where downloaded books live on Kindle's persistent user partition.
--- Flat directory — the registry handles the book→file mapping,
--- not the filesystem hierarchy. This matches how KOReader's own
--- OPDS plugin works (download_dir + flat filenames).
 local DOWNLOAD_DIR = "/mnt/us/booklore/downloads"
 
---- Build a registry key scoped to both server and book.
--- Format: "server_url|book_id" — unique across multiple BookLore instances.
--- @param server_url string
--- @param book_id number
--- @return string
 local function registryKey(server_url, book_id)
     return server_url .. "|" .. tostring(book_id)
 end
+
+-- ─── Initialisation ──────────────────────────────────────────────────
 
 function BookLore:init()
     self.settings = LuaSettings:open(
@@ -57,19 +54,15 @@ function BookLore:init()
     self.server_url = self.settings:readSetting("server_url", "http://192.168.1.144:6060")
     self.username = self.settings:readSetting("username", "")
 
-    -- Reload persisted token if it's still fresh (< 20h old).
-    -- BookLore JWTs expire at ~24h; 20h gives comfortable margin.
     local saved_token = self.settings:readSetting("token")
     local saved_token_time = self.settings:readSetting("token_time", 0)
-    local TOKEN_MAX_AGE = 20 * 60 * 60  -- 20 hours in seconds
+    local TOKEN_MAX_AGE = 20 * 60 * 60
     if saved_token and (os.time() - saved_token_time) < TOKEN_MAX_AGE then
         self.token = saved_token
     else
         self.token = nil
     end
 
-    -- Download registry: maps "server_url|book_id" → { path, server_id,
-    -- server_url }. Tracks which books are downloaded and where they live.
     self.download_registry = LuaSettings:open(
         DataStorage:getSettingsDir() .. "/booklore_downloads.lua"
     )
@@ -84,95 +77,67 @@ function BookLore:addToMainMenu(menu_items)
         sub_item_table = {
             {
                 text = _("Login"),
-                callback = function()
-                    self:showLoginDialog()
-                end,
+                callback = function() self:showLoginDialog() end,
             },
             {
                 text = _("Browse Library"),
-                callback = function()
-                    self:browseLibrary()
-                end,
+                callback = function() self:browseLibrary() end,
             },
         },
     }
 end
 
+-- ─── Login ───────────────────────────────────────────────────────────
+
 function BookLore:showLoginDialog()
     self.login_dialog = MultiInputDialog:new{
         title = _("BookLore Login"),
         fields = {
-            {
-                text = self.server_url,
-                hint = _("Server URL"),
-            },
-            {
-                text = self.username,
-                hint = _("Username"),
-            },
-            {
-                text = "",
-                hint = _("Password"),
-                text_type = "password",
-            },
+            { text = self.server_url, hint = _("Server URL") },
+            { text = self.username, hint = _("Username") },
+            { text = "", hint = _("Password"), text_type = "password" },
         },
-        buttons = {
+        buttons = {{
             {
-                {
-                    text = _("Cancel"),
-                    id = "close",
-                    callback = function()
-                        UIManager:close(self.login_dialog)
-                    end,
-                },
-                {
-                    text = _("Login"),
-                    is_enter_default = true,
-                    callback = function()
-                        local fields = self.login_dialog:getFields()
-                        local server = fields[1]
-                        local user = fields[2]
-                        local pass = fields[3]
-                        UIManager:close(self.login_dialog)
-                        self:doLogin(server, user, pass)
-                    end,
-                },
+                text = _("Cancel"), id = "close",
+                callback = function() UIManager:close(self.login_dialog) end,
             },
-        },
+            {
+                text = _("Login"), is_enter_default = true,
+                callback = function()
+                    local f = self.login_dialog:getFields()
+                    UIManager:close(self.login_dialog)
+                    self:doLogin(f[1], f[2], f[3])
+                end,
+            },
+        }},
     }
     UIManager:show(self.login_dialog)
     self.login_dialog:onShowKeyboard()
 end
 
 function BookLore:doLogin(server_url, username, password)
-    if not NetworkMgr:isWifiOn() then
-        NetworkMgr:turnOnWifi()
-    end
+    if not NetworkMgr:isWifiOn() then NetworkMgr:turnOnWifi() end
 
     local token, err = BookLoreApi:login(server_url, username, password)
-
     if token then
         self.token = token
         self.server_url = server_url
         self.username = username
-
         self.settings:saveSetting("server_url", server_url)
         self.settings:saveSetting("username", username)
         self.settings:saveSetting("token", token)
         self.settings:saveSetting("token_time", os.time())
         self.settings:flush()
-
-        UIManager:show(InfoMessage:new{
-            text = _("Logged in successfully."),
-        })
-        logger.info("BookLore: authenticated as", username)
+        UIManager:show(InfoMessage:new{ text = _("Logged in successfully.") })
     else
         UIManager:show(InfoMessage:new{
             text = _("Login failed:\n") .. tostring(err),
         })
-        logger.warn("BookLore: login failed:", err)
     end
 end
+
+-- ─── Data loading ────────────────────────────────────────────────────
 
 function BookLore:browseLibrary()
     if not self.token then
@@ -181,15 +146,10 @@ function BookLore:browseLibrary()
         })
         return
     end
-
-    if not NetworkMgr:isWifiOn() then
-        NetworkMgr:turnOnWifi()
-    end
+    if not NetworkMgr:isWifiOn() then NetworkMgr:turnOnWifi() end
 
     local books, err = BookLoreApi:getBooks(self.server_url, self.token)
-
     if not books then
-        -- If the server rejected our token, clear it and prompt re-login.
         if err and err:match("^HTTP 401") then
             self.token = nil
             self.settings:delSetting("token")
@@ -207,84 +167,960 @@ function BookLore:browseLibrary()
     end
 
     if type(books) ~= "table" or #books == 0 then
-        UIManager:show(InfoMessage:new{
-            text = _("No books found."),
-        })
+        UIManager:show(InfoMessage:new{ text = _("No books found.") })
         return
     end
 
     table.sort(books, function(a, b)
-        local title_a = a.metadata and a.metadata.title or ""
-        local title_b = b.metadata and b.metadata.title or ""
-        return title_a:lower() < title_b:lower()
+        local ta = a.metadata and a.metadata.title or ""
+        local tb = b.metadata and b.metadata.title or ""
+        return ta:lower() < tb:lower()
     end)
 
     self.cached_books = books
-    self:showLibraryMenu()
+
+    local shelves = BookLoreApi:get(
+        self.server_url .. "/api/v1/shelves", self.token)
+    self.cached_shelves = (type(shelves) == "table") and shelves or {}
+
+    local libraries = BookLoreApi:get(
+        self.server_url .. "/api/v1/libraries", self.token)
+    self.cached_libraries = (type(libraries) == "table") and libraries or {}
+
+    self.shelf_books = {}
+    self.unshelved_books = {}
+    for _, book in ipairs(books) do
+        local on_shelf = false
+        if type(book.shelves) == "table" then
+            for _, shelf in ipairs(book.shelves) do
+                local sid = type(shelf) == "table" and (shelf.id or shelf.shelfId) or nil
+                if sid then
+                    on_shelf = true
+                    if not self.shelf_books[sid] then self.shelf_books[sid] = {} end
+                    table.insert(self.shelf_books[sid], book)
+                end
+            end
+        end
+        if not on_shelf then table.insert(self.unshelved_books, book) end
+    end
+
+    -- Ensure cover cache directory exists
+    self.cover_cache_dir = DataStorage:getDataDir() .. "/cache/booklore"
+    lfs.mkdir(self.cover_cache_dir)
+
+    self:showDashboard()
 end
 
-function BookLore:showLibraryMenu()
+-- ─── UI helpers ──────────────────────────────────────────────────────
+
+--- Build the top bar: [☰] [Search…                           ]
+-- @param on_menu function: called when ☰ is tapped
+-- @param on_search function: called when search is tapped
+-- @return widget: the top bar row
+function BookLore:buildTopBar(on_menu, on_search, on_close)
+    local screen_w = Screen:getWidth()
+    local padding = Size.padding.large
+
+    local menu_btn = Button:new{
+        text = " ☰ ",
+        callback = on_menu,
+        radius = 0,
+        no_focus = true,
+        padding_h = Size.padding.large,
+        padding_v = Size.padding.default,
+    }
+
+    local close_btn = Button:new{
+        text = " ✕ ",
+        callback = on_close or function()
+            self:closeAllViews()
+        end,
+        radius = 0,
+        no_focus = true,
+        padding_h = Size.padding.large,
+        padding_v = Size.padding.default,
+    }
+
+    local btn_space = menu_btn:getSize().w + close_btn:getSize().w + padding * 4
+    local search_w = screen_w - btn_space
+
+    local search_btn = Button:new{
+        text = _("Title, Author, Series, or ISBN…"),
+        callback = on_search,
+        radius = Size.radius.button,
+        text_font_face = "cfont",
+        text_font_size = 18,
+        width = search_w,
+        padding_v = Size.padding.default,
+    }
+
+    local row = HorizontalGroup:new{
+        align = "center",
+        menu_btn,
+        HorizontalSpan:new{ width = padding },
+        search_btn,
+        HorizontalSpan:new{ width = padding },
+        close_btn,
+    }
+
+    return FrameContainer:new{
+        width = screen_w,
+        bordersize = 0,
+        padding = padding,
+        padding_top = Size.padding.default,
+        padding_bottom = Size.padding.default,
+        background = Blitbuffer.COLOR_WHITE,
+        row,
+    }
+end
+
+--- Build a single cover card (cover image + title + author).
+-- @param book table: book data
+-- @param card_w number: card width in pixels
+-- @param on_tap function: called when tapped
+-- @return widget, number: the card widget and its height
+function BookLore:buildCoverCard(book, card_w, on_tap)
+    local cover_h = math.floor(card_w * 1.4)
+    local meta = book.metadata or {}
+    local title = meta.title or book.fileName or "Untitled"
+    local authors = ""
+    if type(meta.authors) == "table" and #meta.authors > 0 then
+        authors = meta.authors[1]
+        if #meta.authors > 1 then authors = authors .. " …" end
+    end
+
+    -- Try to load cover from cache (download if needed)
+    local cover_widget = nil
+    if book.id and self.token and self.cover_cache_dir then
+        local path = BookLoreApi:downloadCover(
+            self.server_url, book.id, self.token, self.cover_cache_dir
+        )
+        if path then
+            local ok, img = pcall(ImageWidget.new, ImageWidget, {
+                file = path,
+                width = card_w,
+                height = cover_h,
+                scale_factor = 0,
+            })
+            if ok and img then cover_widget = img end
+        end
+    end
+
+    -- Fallback: gray placeholder
+    if not cover_widget then
+        cover_widget = FrameContainer:new{
+            width = card_w,
+            height = cover_h,
+            background = Blitbuffer.gray(0.85),
+            bordersize = 1,
+            CenterContainer:new{
+                dimen = Geom:new{ w = card_w - 4, h = cover_h - 4 },
+                TextBoxWidget:new{
+                    text = title,
+                    width = card_w - 20,
+                    face = Font:getFace("cfont", 16),
+                },
+            },
+        }
+    end
+
+    -- Title label
+    local title_widget = TextWidget:new{
+        text = title,
+        face = Font:getFace("cfont", 16),
+        max_width = card_w,
+    }
+
+    -- Author label
+    local author_widget = TextWidget:new{
+        text = authors,
+        face = Font:getFace("cfont", 14),
+        fgcolor = Blitbuffer.gray(0.4),
+        max_width = card_w,
+    }
+
+    local card_content = VerticalGroup:new{
+        align = "left",
+        cover_widget,
+        VerticalSpan:new{ width = Size.padding.small },
+        title_widget,
+        author_widget,
+    }
+
+    local total_h = cover_h + Size.padding.small
+        + title_widget:getSize().h + author_widget:getSize().h
+
+    -- Wrap in tappable InputContainer
+    local card = InputContainer:new{
+        dimen = Geom:new{ w = card_w, h = total_h },
+    }
+    table.insert(card, card_content)
+
+    card.ges_events = {
+        Tap = {
+            GestureRange:new{
+                ges = "tap",
+                range = card.dimen,
+            },
+        },
+    }
+    card.onTap = function()
+        if on_tap then on_tap(book) end
+        return true
+    end
+
+    return card, total_h
+end
+
+--- Build a horizontal row of cover cards.
+-- @param books table: array of books to show
+-- @param max_cards number: max cards in the row
+-- @param on_tap function(book): called when a card is tapped
+-- @return widget: the row
+function BookLore:buildCoverRow(books, max_cards, on_tap)
+    local screen_w = Screen:getWidth()
+    local padding = Size.padding.large
+    local gap = Size.padding.default
+    local n = math.min(max_cards, #books)
+    if n == 0 then return nil end
+
+    local card_w = math.floor((screen_w - padding * 2 - gap * (n - 1)) / n)
+
+    local row = HorizontalGroup:new{ align = "top" }
+    for i = 1, n do
+        if i > 1 then
+            table.insert(row, HorizontalSpan:new{ width = gap })
+        end
+        local card = self:buildCoverCard(books[i], card_w, on_tap)
+        table.insert(row, card)
+    end
+
+    return CenterContainer:new{
+        dimen = Geom:new{ w = screen_w, h = row:getSize().h },
+        row,
+    }
+end
+
+--- Build a section header ("Continue Reading", "Recently Added", etc.)
+function BookLore:buildSectionHeader(text)
+    local screen_w = Screen:getWidth()
+    local padding = Size.padding.large
+    return FrameContainer:new{
+        width = screen_w,
+        bordersize = 0,
+        padding = padding,
+        padding_top = Size.padding.large,
+        padding_bottom = Size.padding.small,
+        background = Blitbuffer.COLOR_WHITE,
+        TextWidget:new{
+            text = text,
+            face = Font:getFace("tfont", 22),
+            bold = true,
+        },
+    }
+end
+
+-- ─── Dashboard ───────────────────────────────────────────────────────
+
+function BookLore:showDashboard()
     local books = self.cached_books
     if not books then return end
+    local screen_w = Screen:getWidth()
+    local screen_h = Screen:getHeight()
 
+    local on_tap_book = function(book)
+        if self.dashboard_widget then
+            UIManager:close(self.dashboard_widget)
+        end
+        self._back_from_detail = function() self:showDashboard() end
+        self:showBookDetail(book)
+    end
+
+    -- Top bar
+    local top_bar = self:buildTopBar(
+        function()  -- ☰
+            self:showSidebar()
+        end,
+        function()  -- Search
+            if self.dashboard_widget then
+                UIManager:close(self.dashboard_widget)
+            end
+            self:showSearch()
+        end,
+        function()  -- ✕ Close plugin
+            self:closeAllViews()
+        end
+    )
+
+    -- Build content
+    local content = VerticalGroup:new{ align = "left" }
+    table.insert(content, top_bar)
+
+    -- Continue Reading: books with lastReadTime, most recent first
+    local reading = {}
+    for _, book in ipairs(books) do
+        if book.lastReadTime and book.lastReadTime ~= "" then
+            table.insert(reading, book)
+        end
+    end
+    table.sort(reading, function(a, b)
+        return (a.lastReadTime or "") > (b.lastReadTime or "")
+    end)
+
+    if #reading > 0 then
+        table.insert(content, self:buildSectionHeader(_("Continue Reading")))
+        local row = self:buildCoverRow(reading, 3, on_tap_book)
+        if row then table.insert(content, row) end
+    end
+
+    -- Recently Added: by addedOn, most recent first
+    local recent = {}
+    for _, book in ipairs(books) do
+        if book.addedOn and book.addedOn ~= "" then
+            table.insert(recent, book)
+        end
+    end
+    table.sort(recent, function(a, b)
+        return (a.addedOn or "") > (b.addedOn or "")
+    end)
+
+    if #recent > 0 then
+        table.insert(content, self:buildSectionHeader(_("Recently Added")))
+        local row = self:buildCoverRow(recent, 3, on_tap_book)
+        if row then table.insert(content, row) end
+    end
+
+    -- Fallback if no reading history or recently added
+    if #reading == 0 and #recent == 0 then
+        table.insert(content, self:buildSectionHeader(_("All Books")))
+        local row = self:buildCoverRow(books, 3, on_tap_book)
+        if row then table.insert(content, row) end
+    end
+
+    -- Full-screen frame
+    local frame = FrameContainer:new{
+        width = screen_w,
+        height = screen_h,
+        background = Blitbuffer.COLOR_WHITE,
+        bordersize = 0,
+        padding = 0,
+        content,
+    }
+
+    self.dashboard_widget = InputContainer:new{
+        dimen = Geom:new{ w = screen_w, h = screen_h },
+    }
+    table.insert(self.dashboard_widget, frame)
+
+    UIManager:show(self.dashboard_widget)
+    UIManager:setDirty("all", "ui")
+end
+
+-- ─── Sidebar overlay ─────────────────────────────────────────────────
+
+--- Close all active views (dashboard, book list, filters, detail).
+-- Called before navigating from the sidebar to avoid stale widgets.
+function BookLore:closeAllViews()
+    if self.detail_widget then
+        UIManager:close(self.detail_widget)
+        self.detail_widget = nil
+    end
+    if self.book_list_widget then
+        UIManager:close(self.book_list_widget)
+        self.book_list_widget = nil
+    end
+    if self.filter_menu then
+        UIManager:close(self.filter_menu)
+        self.filter_menu = nil
+    end
+    if self.filter_values_menu then
+        UIManager:close(self.filter_values_menu)
+        self.filter_values_menu = nil
+    end
+    if self.dashboard_widget then
+        UIManager:close(self.dashboard_widget)
+        self.dashboard_widget = nil
+    end
+    -- Force full e-ink repaint so the screen doesn't show ghost content
+    UIManager:setDirty("all", "full")
+end
+
+function BookLore:showSidebar()
+    local books = self.cached_books
+    if not books then return end
+    local screen_w = Screen:getWidth()
+    local screen_h = Screen:getHeight()
+    local sidebar_w = math.floor(screen_w * 0.70)
+    local dismiss_w = screen_w - sidebar_w
+    local padding = Size.padding.large
+    local item_h = Screen:scaleBySize(40)
+
+    local close_sidebar = function()
+        if self.sidebar_widget then
+            UIManager:close(self.sidebar_widget)
+            UIManager:setDirty("all", "full")
+        end
+    end
+
+    local navigate = function(book_list, title)
+        close_sidebar()
+        self:closeAllViews()
+        self:showBookList(book_list, title,
+            function() self:showDashboard() end)
+    end
+
+    -- Build sidebar content as a VerticalGroup
+    local sidebar_content = VerticalGroup:new{ align = "left" }
+    local indent = Size.padding.large
+
+    -- Track clickable items: { y_offset, height, callback } for each.
+    -- y_offset is relative to sidebar_content top.
+    local clickable_items = {}
+    local cumulative_h = 0
+
+    -- Helper: add a section header (bold, smaller font, not clickable)
+    local function addHeader(text)
+        local widget = FrameContainer:new{
+            width = sidebar_w,
+            bordersize = 0,
+            padding_left = indent,
+            padding_right = indent,
+            padding_top = padding,
+            padding_bottom = Size.padding.small,
+            background = Blitbuffer.COLOR_WHITE,
+            TextWidget:new{
+                text = text,
+                face = Font:getFace("tfont", 14),
+                bold = true,
+            },
+        }
+        table.insert(sidebar_content, widget)
+        cumulative_h = cumulative_h + widget:getSize().h
+    end
+
+    -- Helper: add a clickable sidebar item with icon, left-aligned
+    local function addItem(icon, text, count, callback)
+        local icon_w = TextWidget:new{
+            text = icon .. "  ",
+            face = Font:getFace("cfont", 20),
+        }
+        local label_w = TextWidget:new{
+            text = text,
+            face = Font:getFace("cfont", 20),
+            max_width = sidebar_w - indent * 4 - icon_w:getSize().w,
+        }
+
+        local left_part = HorizontalGroup:new{
+            align = "center",
+            icon_w,
+            label_w,
+        }
+
+        local row_content
+        if count then
+            local count_w = TextWidget:new{
+                text = tostring(count),
+                face = Font:getFace("cfont", 18),
+            }
+            local spacer_w = sidebar_w - indent * 2
+                - left_part:getSize().w - count_w:getSize().w
+            if spacer_w < 0 then spacer_w = 0 end
+
+            row_content = HorizontalGroup:new{
+                align = "center",
+                left_part,
+                HorizontalSpan:new{ width = spacer_w },
+                count_w,
+            }
+        else
+            row_content = left_part
+        end
+
+        local row_widget = FrameContainer:new{
+            width = sidebar_w,
+            bordersize = 0,
+            padding_left = indent,
+            padding_right = indent,
+            padding_top = Size.padding.small,
+            padding_bottom = Size.padding.small,
+            background = Blitbuffer.COLOR_WHITE,
+            row_content,
+        }
+
+        local h = row_widget:getSize().h
+        table.insert(clickable_items, {
+            y_offset = cumulative_h,
+            height = h,
+            callback = callback,
+        })
+
+        table.insert(sidebar_content, row_widget)
+        cumulative_h = cumulative_h + h
+    end
+
+    -- Helper: add a thin separator line
+    local function addSeparator()
+        local sep = CenterContainer:new{
+            dimen = Geom:new{ w = sidebar_w, h = Size.padding.default },
+            LineWidget:new{
+                dimen = Geom:new{ w = sidebar_w - indent * 2, h = 1 },
+                background = Blitbuffer.gray(0.85),
+            },
+        }
+        table.insert(sidebar_content, sep)
+        cumulative_h = cumulative_h + sep:getSize().h
+    end
+
+    -- ── HOME ──
+    addHeader(_("HOME"))
+    addItem("⌂", _("Dashboard"), nil, function()
+        close_sidebar()
+        self:closeAllViews()
+        self:showDashboard()
+    end)
+    addItem("▤", _("All Books"), #books, function()
+        navigate(books, _("All Books"))
+    end)
+
+    -- ── LIBRARIES ──
+    local lib_books = {}
+    for _, book in ipairs(books) do
+        local lid = book.libraryId or 0
+        if not lib_books[lid] then lib_books[lid] = {} end
+        table.insert(lib_books[lid], book)
+    end
+
+    addSeparator()
+    addHeader(_("LIBRARIES"))
+
+    if #self.cached_libraries > 0 then
+        for _, lib in ipairs(self.cached_libraries) do
+            local lid = lib.id
+            local name = lib.name or "Library"
+            local count = lib_books[lid] and #lib_books[lid] or 0
+            addItem("▦", name, count, function()
+                navigate(lib_books[lid] or {}, name)
+            end)
+        end
+    else
+        local lib_names = {}
+        for _, book in ipairs(books) do
+            local lid = book.libraryId or 0
+            if not lib_names[lid] then
+                lib_names[lid] = book.libraryName or "Library"
+            end
+        end
+        for lid, name in pairs(lib_names) do
+            local count = lib_books[lid] and #lib_books[lid] or 0
+            addItem("▦", name, count, function()
+                navigate(lib_books[lid] or {}, name)
+            end)
+        end
+    end
+
+    -- ── SHELVES ──
+    addSeparator()
+    addHeader(_("SHELVES"))
+
+    addItem("◇", _("Unshelved"), #self.unshelved_books, function()
+        navigate(self.unshelved_books, _("Unshelved"))
+    end)
+    for _, shelf in ipairs(self.cached_shelves) do
+        local name = shelf.name or shelf.shelfName or "?"
+        local sid = shelf.id or shelf.shelfId
+        local count = self.shelf_books[sid] and #self.shelf_books[sid] or 0
+        -- Use heart for Favorites, box for others
+        local icon = "□"
+        if name:lower() == "favorites" then icon = "♡" end
+        addItem(icon, name, count, function()
+            navigate(self.shelf_books[sid] or {}, name)
+        end)
+    end
+
+    -- ── MAGIC SHELVES ──
+    addSeparator()
+    addHeader(_("MAGIC SHELVES"))
+
+    -- Sidebar left panel
+    local sidebar_panel = FrameContainer:new{
+        width = sidebar_w,
+        height = screen_h,
+        background = Blitbuffer.COLOR_WHITE,
+        bordersize = 0,
+        padding = 0,
+        sidebar_content,
+    }
+
+    self.sidebar_widget = InputContainer:new{
+        dimen = Geom:new{ w = screen_w, h = screen_h },
+    }
+    table.insert(self.sidebar_widget, sidebar_panel)
+
+    -- Single tap handler for the entire sidebar area.
+    -- On tap, we check y against clickable_items to find which row
+    -- was hit, then invert that exact row and fire its callback.
+    self.sidebar_widget.ges_events = {
+        TapSidebar = {
+            GestureRange:new{
+                ges = "tap",
+                range = Geom:new{
+                    x = 0, y = 0,
+                    w = sidebar_w, h = screen_h,
+                },
+            },
+        },
+        TapDismiss = {
+            GestureRange:new{
+                ges = "tap",
+                range = Geom:new{
+                    x = sidebar_w, y = 0,
+                    w = dismiss_w, h = screen_h,
+                },
+            },
+        },
+    }
+
+    self.sidebar_widget.onTapDismiss = function()
+        close_sidebar()
+        return true
+    end
+
+    self.sidebar_widget.onTapSidebar = function(this, arg, ges)
+        local tap_y = ges.pos.y
+        for _, item in ipairs(clickable_items) do
+            if tap_y >= item.y_offset and tap_y < item.y_offset + item.height then
+                -- Invert this row directly in the framebuffer.
+                -- Do NOT call forceRePaint — it would re-render the
+                -- sidebar widgets on top and overwrite the inversion.
+                local inv_x = 0
+                local inv_y = item.y_offset
+                local inv_w = sidebar_w
+                local inv_h = item.height
+
+                Screen.bb:invertRect(inv_x, inv_y, inv_w, inv_h)
+                UIManager:setDirty(nil, "fast", Geom:new{
+                    x = inv_x, y = inv_y, w = inv_w, h = inv_h,
+                })
+
+                -- After a short delay (for the invert to be visible),
+                -- invert back and fire the callback.
+                local cb = item.callback
+                UIManager:scheduleIn(0.15, function()
+                    Screen.bb:invertRect(inv_x, inv_y, inv_w, inv_h)
+                    UIManager:setDirty(nil, "ui", Geom:new{
+                        x = inv_x, y = inv_y, w = inv_w, h = inv_h,
+                    })
+                    if cb then cb() end
+                end)
+                return true
+            end
+        end
+        return true
+    end
+
+    UIManager:show(self.sidebar_widget)
+    UIManager:setDirty("all", "ui")
+end
+
+-- ─── Book list ───────────────────────────────────────────────────────
+
+function BookLore:showBookList(books, title, back_callback)
+    local screen_w = Screen:getWidth()
+    local screen_h = Screen:getHeight()
+
+    -- Build top bar
+    local top_bar = self:buildTopBar(
+        function()  -- ☰
+            self:showSidebar()
+        end,
+        function()  -- Search
+            if self.book_list_widget then
+                UIManager:close(self.book_list_widget)
+            end
+            self:showSearchWithin(books, title, back_callback)
+        end,
+        function()  -- ✕ Close plugin
+            self:closeAllViews()
+        end
+    )
+    local bar_h = top_bar:getSize().h
+
+    -- Build menu items
     local item_table = {}
+
+    -- Filter option at top of list
+    table.insert(item_table, {
+        text = _("Filter…"),
+        mandatory = "",
+        book_data = nil,
+        is_filter = true,
+    })
+
     for _, book in ipairs(books) do
         local meta = book.metadata or {}
-        local title = meta.title or book.fileName or "Untitled"
+        local book_title = meta.title or book.fileName or "Untitled"
         local authors = ""
         if type(meta.authors) == "table" and #meta.authors > 0 then
             authors = table.concat(meta.authors, ", ")
         end
-
         local status = book.readStatus or ""
-        local local_path = self:getLocalPath(book)
-        if local_path then
+        if self:getLocalPath(book) then
             status = "● " .. status
         end
-
         table.insert(item_table, {
-            text = title,
+            text = book_title,
             mandatory = status,
             info = authors,
             book_data = book,
         })
     end
 
-    self.book_menu = Menu:new{
-        title = _("BookLore") .. " (" .. tostring(#books) .. " books)",
+    self._back_from_detail = function()
+        self:showBookList(books, title, back_callback)
+    end
+
+    -- Guard flag: when onMenuChoice fires and navigates, prevent
+    -- close_callback from also navigating (both can fire when
+    -- closing the parent widget triggers Menu cleanup).
+    local navigated = false
+
+    -- Menu fills remaining height below top bar
+    local menu_h = screen_h - bar_h
+
+    local book_menu = Menu:new{
+        title = title .. " (" .. tostring(#books) .. ")",
+        item_table = item_table,
+        width = screen_w,
+        height = menu_h,
+        covers_fullscreen = false,
+        is_borderless = true,
+        is_popout = false,
+        onMenuChoice = function(menu_instance, item)
+            navigated = true
+            if item.is_filter then
+                UIManager:close(self.book_list_widget)
+                self:showFilterMenu(books, title, back_callback)
+            elseif item.book_data then
+                UIManager:close(self.book_list_widget)
+                self:showBookDetail(item.book_data)
+            end
+        end,
+        close_callback = function()
+            UIManager:close(self.book_list_widget)
+            if not navigated and back_callback then
+                back_callback()
+            end
+        end,
+    }
+
+    -- Stack top bar + menu vertically
+    local layout = VerticalGroup:new{
+        align = "left",
+        top_bar,
+        book_menu,
+    }
+
+    self.book_list_widget = InputContainer:new{
+        dimen = Geom:new{ w = screen_w, h = screen_h },
+    }
+    table.insert(self.book_list_widget, layout)
+
+    UIManager:show(self.book_list_widget)
+    UIManager:setDirty("all", "ui")
+end
+
+-- ─── Filters ─────────────────────────────────────────────────────────
+
+function BookLore:showFilterMenu(books, parent_title, back_callback)
+    local item_table = {
+        {
+            text = _("Author"), mandatory = "",
+            callback = function()
+                UIManager:close(self.filter_menu)
+                self:showFilterValues(books, parent_title, back_callback, "author")
+            end,
+        },
+        {
+            text = _("Series"), mandatory = "",
+            callback = function()
+                UIManager:close(self.filter_menu)
+                self:showFilterValues(books, parent_title, back_callback, "series")
+            end,
+        },
+        {
+            text = _("Read Status"), mandatory = "",
+            callback = function()
+                UIManager:close(self.filter_menu)
+                self:showFilterValues(books, parent_title, back_callback, "readStatus")
+            end,
+        },
+        {
+            text = _("Category"), mandatory = "",
+            callback = function()
+                UIManager:close(self.filter_menu)
+                self:showFilterValues(books, parent_title, back_callback, "category")
+            end,
+        },
+    }
+
+    self.filter_menu = Menu:new{
+        title = _("Filter: ") .. parent_title,
         item_table = item_table,
         width = Screen:getWidth(),
         height = Screen:getHeight(),
         covers_fullscreen = true,
         is_borderless = true,
         is_popout = false,
-        onMenuChoice = function(menu_instance, item)
-            UIManager:close(self.book_menu)
-            self:showBookDetail(item.book_data)
-        end,
         close_callback = function()
-            UIManager:close(self.book_menu)
+            UIManager:close(self.filter_menu)
+            self:showBookList(books, parent_title, back_callback)
         end,
     }
-    UIManager:show(self.book_menu)
+    UIManager:show(self.filter_menu)
 end
 
---- Build the local filesystem path for a downloaded book.
---
--- Uses the server's original fileName, sanitized through KOReader's
--- util.getSafeFilename (the same function the built-in OPDS plugin uses).
--- All downloads go into a flat directory. The registry — not the
--- filesystem hierarchy — is what maps books back to the server.
---
--- BookLore server-side stores books on disk at:
---   libraryPath / fileSubPath / fileName
--- with MariaDB tracking the path components. But the server path is
--- irrelevant on the client: BookLore identifies books by `id` in its
--- REST API, and kosync matches by partial MD5 of file content. Neither
--- cares about local paths, so we keep it flat and simple.
---
--- @param book table: book data from the API
--- @return string: local file path
+function BookLore:showFilterValues(books, parent_title, back_callback, filter_type)
+    local value_map = {}
+    for _, book in ipairs(books) do
+        local meta = book.metadata or {}
+        local values = {}
+        if filter_type == "author" then
+            if type(meta.authors) == "table" then
+                for _, a in ipairs(meta.authors) do table.insert(values, a) end
+            end
+        elseif filter_type == "series" then
+            if meta.seriesName and meta.seriesName ~= "" then
+                table.insert(values, meta.seriesName)
+            end
+        elseif filter_type == "readStatus" then
+            table.insert(values, book.readStatus or "Unset")
+        elseif filter_type == "category" then
+            if type(meta.categories) == "table" then
+                for _, c in ipairs(meta.categories) do table.insert(values, c) end
+            end
+        end
+        for _, val in ipairs(values) do
+            if not value_map[val] then value_map[val] = {} end
+            table.insert(value_map[val], book)
+        end
+    end
+
+    local names = {}
+    for name, _ in pairs(value_map) do table.insert(names, name) end
+    table.sort(names, function(a, b) return a:lower() < b:lower() end)
+
+    if #names == 0 then
+        UIManager:show(InfoMessage:new{ text = _("No values for this filter.") })
+        self:showBookList(books, parent_title, back_callback)
+        return
+    end
+
+    local item_table = {}
+    for _, name in ipairs(names) do
+        local subset = value_map[name]
+        table.insert(item_table, {
+            text = name,
+            mandatory = tostring(#subset),
+            callback = function()
+                UIManager:close(self.filter_values_menu)
+                if filter_type == "series" then
+                    table.sort(subset, function(a, b)
+                        local na = (a.metadata or {}).seriesNumber or 999
+                        local nb = (b.metadata or {}).seriesNumber or 999
+                        return na < nb
+                    end)
+                end
+                self:showBookList(subset, name, function()
+                    self:showFilterValues(books, parent_title, back_callback, filter_type)
+                end)
+            end,
+        })
+    end
+
+    local filter_label = filter_type:sub(1,1):upper() .. filter_type:sub(2)
+    if filter_type == "readStatus" then filter_label = "Read Status" end
+
+    self.filter_values_menu = Menu:new{
+        title = filter_label,
+        item_table = item_table,
+        width = Screen:getWidth(),
+        height = Screen:getHeight(),
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        close_callback = function()
+            UIManager:close(self.filter_values_menu)
+            self:showFilterMenu(books, parent_title, back_callback)
+        end,
+    }
+    UIManager:show(self.filter_values_menu)
+end
+
+-- ─── Search ──────────────────────────────────────────────────────────
+
+function BookLore:showSearchWithin(books, parent_title, back_callback)
+    self.search_dialog = InputDialog:new{
+        title = _("Search in ") .. parent_title,
+        input_hint = _("Title, author, or series…"),
+        buttons = {{
+            {
+                text = _("Cancel"), id = "close",
+                callback = function()
+                    UIManager:close(self.search_dialog)
+                    self:showBookList(books, parent_title, back_callback)
+                end,
+            },
+            {
+                text = _("Search"), is_enter_default = true,
+                callback = function()
+                    local query = self.search_dialog:getInputText()
+                    UIManager:close(self.search_dialog)
+                    if not query or query == "" then
+                        self:showBookList(books, parent_title, back_callback)
+                        return
+                    end
+                    local q = query:lower()
+                    local results = {}
+                    for _, book in ipairs(books) do
+                        local meta = book.metadata or {}
+                        local t = (meta.title or book.fileName or ""):lower()
+                        local a = ""
+                        if type(meta.authors) == "table" then
+                            a = table.concat(meta.authors, " "):lower()
+                        end
+                        local s = (meta.seriesName or ""):lower()
+                        if t:find(q, 1, true) or a:find(q, 1, true) or s:find(q, 1, true) then
+                            table.insert(results, book)
+                        end
+                    end
+                    if #results == 0 then
+                        UIManager:show(InfoMessage:new{
+                            text = _("No results for: ") .. query,
+                        })
+                        self:showBookList(books, parent_title, back_callback)
+                    else
+                        self:showBookList(results, _("Search: ") .. query, function()
+                            self:showBookList(books, parent_title, back_callback)
+                        end)
+                    end
+                end,
+            },
+        }},
+    }
+    UIManager:show(self.search_dialog)
+    self.search_dialog:onShowKeyboard()
+end
+
+function BookLore:showSearch()
+    self:showSearchWithin(
+        self.cached_books,
+        _("All Books"),
+        function() self:showDashboard() end
+    )
+end
+
+-- ─── Download infrastructure ─────────────────────────────────────────
+
 function BookLore:buildDestPath(book)
     local raw_name = book.fileName or ("book_" .. tostring(book.id))
     local safe_name = util.getSafeFilename(raw_name, DOWNLOAD_DIR)
@@ -292,11 +1128,6 @@ function BookLore:buildDestPath(book)
     return util.fixUtf8(path, "_")
 end
 
---- Look up whether a book has been downloaded.
--- Checks the registry, then verifies the file still exists on disk.
--- Clears stale entries if the file was deleted externally.
--- @param book table: book data from the API
--- @return string|nil: local file path if downloaded, nil otherwise
 function BookLore:getLocalPath(book)
     if not book.id then return nil end
     local key = registryKey(self.server_url, book.id)
@@ -307,7 +1138,6 @@ function BookLore:getLocalPath(book)
             f:close()
             return entry.path
         else
-            logger.dbg("BookLore: stale registry entry for book", book.id)
             self.download_registry:delSetting(key)
             self.download_registry:flush()
             return nil
@@ -316,11 +1146,6 @@ function BookLore:getLocalPath(book)
     return nil
 end
 
---- Register a downloaded book.
--- Stores only what's needed to map a local file back to the server:
--- the path on disk, the server's book ID, and which server it came from.
--- @param book table: book data from the API
--- @param path string: local file path
 function BookLore:registerDownload(book, path)
     local key = registryKey(self.server_url, book.id)
     self.download_registry:saveSetting(key, {
@@ -331,36 +1156,23 @@ function BookLore:registerDownload(book, path)
     self.download_registry:flush()
 end
 
---- Download a book from BookLore to local storage.
--- Closes and rebuilds the detail view, then forces e-ink to repaint.
--- @param book table: book data from the API
 function BookLore:refreshDetailView(book)
     if self.detail_widget then
         UIManager:close(self.detail_widget)
     end
     self:showBookDetail(book)
-    -- Force a full screen refresh so e-ink actually repaints.
     UIManager:setDirty(self.detail_widget, "ui")
 end
 
---- Download a book from BookLore to local storage.
--- Updates the detail view button through three states:
---   "Download (X MB)" → "Downloading…" → "Read"
--- @param book table: book data from the API
 function BookLore:downloadBook(book)
     if not self.token then
         UIManager:show(InfoMessage:new{ text = _("Not logged in.") })
         return
     end
-
-    if not NetworkMgr:isWifiOn() then
-        NetworkMgr:turnOnWifi()
-    end
+    if not NetworkMgr:isWifiOn() then NetworkMgr:turnOnWifi() end
 
     local dest = self:buildDestPath(book)
 
-    -- Set downloading state and rebuild the view so the button
-    -- shows "Downloading…" before luasocket blocks.
     self._downloading_id = book.id
     self:refreshDetailView(book)
 
@@ -368,9 +1180,7 @@ function BookLore:downloadBook(book)
         local ok, err = BookLoreApi:downloadBook(
             self.server_url, book.id, self.token, dest, book.fileSizeKb
         )
-
         self._downloading_id = nil
-
         if ok then
             self:registerDownload(book, dest)
             self:refreshDetailView(book)
@@ -383,8 +1193,6 @@ function BookLore:downloadBook(book)
     end)
 end
 
---- Open a downloaded book in KOReader's reader.
--- @param file_path string: path to the local book file
 function BookLore:openBook(file_path)
     if self.detail_widget then
         UIManager:close(self.detail_widget)
@@ -394,10 +1202,11 @@ function BookLore:openBook(file_path)
         UIManager:close(self.book_menu)
         self.book_menu = nil
     end
-
     local ReaderUI = require("apps/reader/readerui")
     ReaderUI:showReader(file_path)
 end
+
+-- ─── Book detail ─────────────────────────────────────────────────────
 
 function BookLore:showBookDetail(book)
     local meta = book.metadata or {}
@@ -406,30 +1215,20 @@ function BookLore:showBookDetail(book)
     local screen_h = Screen:getHeight()
     local padding = Size.padding.large
 
-    -- Cover cache
-    local cache_dir = DataStorage:getDataDir() .. "/cache/booklore"
-    local lfs = require("libs/libkoreader-lfs")
-    lfs.mkdir(cache_dir)
-
+    -- Cover
     local cover_widget = nil
-    if book.id then
-        local cover_path, cover_err = BookLoreApi:downloadCover(
-            self.server_url, book.id, self.token, cache_dir
+    if book.id and self.cover_cache_dir then
+        local cover_path = BookLoreApi:downloadCover(
+            self.server_url, book.id, self.token, self.cover_cache_dir
         )
         if cover_path then
-            local success, img = pcall(ImageWidget.new, ImageWidget, {
+            local ok, img = pcall(ImageWidget.new, ImageWidget, {
                 file = cover_path,
                 width = math.floor(screen_w * 0.4),
                 height = math.floor(screen_h * 0.3),
                 scale_factor = 0,
             })
-            if success and img then
-                cover_widget = img
-            else
-                logger.warn("BookLore: failed to load cover image:", img)
-            end
-        else
-            logger.dbg("BookLore: cover download failed:", cover_err)
+            if ok and img then cover_widget = img end
         end
     end
 
@@ -449,7 +1248,6 @@ function BookLore:showBookDetail(book)
     })
     table.insert(content, VerticalSpan:new{ width = padding })
 
-    -- Cover
     if cover_widget then
         table.insert(content, CenterContainer:new{
             dimen = Geom:new{ w = content_w, h = cover_widget:getSize().h },
@@ -458,105 +1256,51 @@ function BookLore:showBookDetail(book)
         table.insert(content, VerticalSpan:new{ width = padding })
     end
 
-    -- Detail text
+    -- Detail lines
     local lines = {}
-
     if type(meta.authors) == "table" and #meta.authors > 0 then
         table.insert(lines, "By: " .. table.concat(meta.authors, ", "))
     end
-
     if meta.seriesName then
         local s = "Series: " .. meta.seriesName
-        if meta.seriesNumber then
-            s = s .. " #" .. tostring(meta.seriesNumber)
-        end
-        if meta.seriesTotal then
-            s = s .. " of " .. tostring(meta.seriesTotal)
-        end
+        if meta.seriesNumber then s = s .. " #" .. tostring(meta.seriesNumber) end
+        if meta.seriesTotal then s = s .. " of " .. tostring(meta.seriesTotal) end
         table.insert(lines, s)
     end
-
     if meta.publisher then
         local p = "Publisher: " .. meta.publisher
-        if meta.publishedDate then
-            p = p .. " (" .. meta.publishedDate .. ")"
-        end
+        if meta.publishedDate then p = p .. " (" .. meta.publishedDate .. ")" end
         table.insert(lines, p)
     end
-
-    local page_lang = {}
-    if meta.pageCount then
-        table.insert(page_lang, tostring(meta.pageCount) .. " pages")
-    end
-    if meta.language then
-        table.insert(page_lang, meta.language)
-    end
-    if #page_lang > 0 then
-        table.insert(lines, table.concat(page_lang, " · "))
-    end
-
+    local pl = {}
+    if meta.pageCount then table.insert(pl, tostring(meta.pageCount) .. " pages") end
+    if meta.language then table.insert(pl, meta.language) end
+    if #pl > 0 then table.insert(lines, table.concat(pl, " · ")) end
     table.insert(lines, "")
-
-    if book.readStatus then
-        table.insert(lines, "Status: " .. book.readStatus)
-    end
+    if book.readStatus then table.insert(lines, "Status: " .. book.readStatus) end
     if book.personalRating and book.personalRating > 0 then
-        table.insert(lines, "My rating: " .. tostring(book.personalRating) .. "/10")
+        table.insert(lines, "Rating: " .. tostring(book.personalRating) .. "/10")
     end
-
-    if meta.goodreadsRating then
-        local gr = "Goodreads: " .. tostring(meta.goodreadsRating)
-        if meta.goodreadsReviewCount then
-            gr = gr .. " (" .. tostring(meta.goodreadsReviewCount) .. " reviews)"
-        end
-        table.insert(lines, gr)
-    end
-    if meta.amazonRating then
-        local ar = "Amazon: " .. tostring(meta.amazonRating)
-        if meta.amazonReviewCount then
-            ar = ar .. " (" .. tostring(meta.amazonReviewCount) .. " reviews)"
-        end
-        table.insert(lines, ar)
-    end
-
     if type(book.shelves) == "table" and #book.shelves > 0 then
-        local shelf_names = {}
-        for _, shelf in ipairs(book.shelves) do
-            if type(shelf) == "table" then
-                table.insert(shelf_names, shelf.name or shelf.shelfName or "?")
-            else
-                table.insert(shelf_names, tostring(shelf))
-            end
+        local sn = {}
+        for _, sh in ipairs(book.shelves) do
+            table.insert(sn, type(sh) == "table" and (sh.name or sh.shelfName or "?") or tostring(sh))
         end
-        table.insert(lines, "Shelves: " .. table.concat(shelf_names, ", "))
+        table.insert(lines, "Shelves: " .. table.concat(sn, ", "))
     end
-
     table.insert(lines, "")
-
     table.insert(lines, "Format: " .. (book.bookType or "Unknown"))
     if book.fileSizeKb then
-        table.insert(lines, "Size: " .. string.format("%.1f", book.fileSizeKb / 1024) .. " MB")
-    end
-    if meta.isbn13 then
-        table.insert(lines, "ISBN: " .. meta.isbn13)
-    end
-    if book.libraryName then
-        table.insert(lines, "Library: " .. book.libraryName)
-    end
-    if book.lastReadTime then
-        local date = tostring(book.lastReadTime):sub(1, 10)
-        table.insert(lines, "Last read: " .. date)
+        table.insert(lines, "Size: " .. string.format("%.1f MB", book.fileSizeKb / 1024))
     end
 
-    local detail_text = table.concat(lines, "\n")
-    local detail_widget = TextBoxWidget:new{
-        text = detail_text,
+    table.insert(content, TextBoxWidget:new{
+        text = table.concat(lines, "\n"),
         width = content_w,
         face = Font:getFace("cfont", 20),
-    }
-    table.insert(content, detail_widget)
+    })
 
-    -- Buttons
+    -- Action buttons
     table.insert(content, VerticalSpan:new{ width = padding * 2 })
 
     local local_path = self:getLocalPath(book)
@@ -564,17 +1308,13 @@ function BookLore:showBookDetail(book)
 
     local action_btn
     if local_path then
-        -- Already downloaded
         action_btn = Button:new{
             text = _("Read"),
             radius = Size.radius.button,
             padding = Size.padding.button,
-            callback = function()
-                self:openBook(local_path)
-            end,
+            callback = function() self:openBook(local_path) end,
         }
     elseif is_downloading then
-        -- Download in progress — button is inert
         action_btn = Button:new{
             text = _("Downloading…"),
             radius = Size.radius.button,
@@ -582,7 +1322,6 @@ function BookLore:showBookDetail(book)
             enabled = false,
         }
     else
-        -- Not downloaded yet
         local dl_label = _("Download")
         if book.fileSizeKb then
             dl_label = dl_label .. string.format(" (%.1f MB)", book.fileSizeKb / 1024)
@@ -591,9 +1330,7 @@ function BookLore:showBookDetail(book)
             text = dl_label,
             radius = Size.radius.button,
             padding = Size.padding.button,
-            callback = function()
-                self:downloadBook(book)
-            end,
+            callback = function() self:downloadBook(book) end,
         }
     end
 
@@ -603,10 +1340,12 @@ function BookLore:showBookDetail(book)
         padding = Size.padding.button,
         callback = function()
             UIManager:close(self.detail_widget)
-            if cover_widget and cover_widget.free then
-                cover_widget:free()
-            end
-            self:showLibraryMenu()
+            self.detail_widget = nil
+            if cover_widget and cover_widget.free then cover_widget:free() end
+            -- Schedule navigation on next tick so close fully completes
+            UIManager:scheduleIn(0.1, function()
+                if self._back_from_detail then self._back_from_detail() end
+            end)
         end,
     }
 
@@ -635,8 +1374,8 @@ function BookLore:showBookDetail(book)
         dimen = Geom:new{ w = screen_w, h = screen_h },
     }
     table.insert(self.detail_widget, frame)
-
     UIManager:show(self.detail_widget)
+    UIManager:setDirty("all", "ui")
 end
 
 return BookLore
