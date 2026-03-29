@@ -6,6 +6,7 @@ local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
 local UIManager = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
+local ConfirmBox = require("ui/widget/confirmbox")
 local Menu = require("ui/widget/menu")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local InputDialog = require("ui/widget/inputdialog")
@@ -51,7 +52,7 @@ function BookLore:init()
     self.settings = LuaSettings:open(
         DataStorage:getSettingsDir() .. "/booklore.lua"
     )
-    self.server_url = self.settings:readSetting("server_url", "http://192.168.1.144:6060")
+    self.server_url = self.settings:readSetting("server_url", "http://192.168.1.50:6060")
     self.username = self.settings:readSetting("username", "")
 
     local saved_token = self.settings:readSetting("token")
@@ -83,8 +84,427 @@ function BookLore:addToMainMenu(menu_items)
                 text = _("Browse Library"),
                 callback = function() self:browseLibrary() end,
             },
+            {
+                text = _("Tailscale"),
+                sub_item_table = {
+                    {
+                        text = _("Status"),
+                        callback = function() self:showTailscaleStatus() end,
+                    },
+                    {
+                        text = _("Connect"),
+                        callback = function() self:tailscaleConnect() end,
+                    },
+                    {
+                        text = _("Disconnect"),
+                        callback = function() self:tailscaleDisconnect() end,
+                    },
+                },
+            },
         },
     }
+end
+
+-- ─── Tailscale ───────────────────────────────────────────────────────
+
+local TAILSCALE_BIN_DIR = "/mnt/us/extensions/tailscale/bin"
+local TAILSCALE_CMD = TAILSCALE_BIN_DIR .. "/tailscale"
+local TAILSCALED_CMD = TAILSCALE_BIN_DIR .. "/tailscaled"
+local TAILSCALE_STATE = TAILSCALE_BIN_DIR .. "/tailscaled.state"
+
+--- Run a shell command and capture its stdout + exit code.
+-- @param cmd string: shell command
+-- @return string: stdout output (trimmed)
+-- @return number: exit code
+local function shellExec(cmd)
+    local handle = io.popen(cmd .. " 2>&1; echo __EXIT_$?")
+    if not handle then return "", -1 end
+    local raw = handle:read("*a")
+    handle:close()
+    local code = tonumber(raw:match("__EXIT_(%d+)%s*$")) or -1
+    local output = raw:gsub("__EXIT_%d+%s*$", ""):gsub("^%s+", ""):gsub("%s+$", "")
+    return output, code
+end
+
+--- Check whether the tailscale binary exists on disk.
+local function isTailscaleInstalled()
+    local f = io.open(TAILSCALE_CMD, "r")
+    if f then f:close() return true end
+    return false
+end
+
+--- Check whether tailscaled is currently running.
+-- BusyBox pgrep may not support -x; try multiple detection methods.
+local function isTailscaledRunning()
+    -- Method 1: pidof (usually reliable on BusyBox)
+    local _out, code = shellExec("pidof tailscaled")
+    if code == 0 then return true end
+    -- Method 2: check the socket file
+    local f = io.open("/var/run/tailscale/tailscaled.sock")
+    if f then f:close() return true end
+    -- Method 3: pgrep without -x
+    _out, code = shellExec("pgrep tailscaled")
+    return code == 0
+end
+
+--- Start the tailscaled daemon in userspace-networking mode.
+-- Returns immediately; the daemon runs in the background.
+-- @return boolean: true if launch succeeded
+-- @return string|nil: error message
+function BookLore:startTailscaled()
+    if isTailscaledRunning() then return true, nil end
+
+    -- Ensure socket dir exists and clean up stale socket
+    shellExec("mkdir -p /var/run/tailscale")
+    shellExec("rm -f /var/run/tailscale/tailscaled.sock")
+
+    local log_path = TAILSCALE_BIN_DIR .. "/tailscaled_start_log.txt"
+    local cmd = TAILSCALED_CMD
+        .. " --state=" .. TAILSCALE_STATE
+        .. " > " .. log_path .. " 2>&1 &"
+    local _out, code = shellExec(cmd)
+    if code ~= 0 then
+        return false, "Failed to start tailscaled (exit " .. tostring(code) .. ")"
+    end
+
+    -- Give the daemon a moment to initialize
+    os.execute("sleep 3")
+
+    if not isTailscaledRunning() then
+        -- Show only the last 5 lines of the log, not the entire thing
+        local log_tail = shellExec("tail -5 " .. log_path)
+        return false, "tailscaled exited immediately.\n\n" .. (log_tail or "")
+    end
+
+    return true, nil
+end
+
+--- Install Tailscale from static ARM binaries.
+-- Downloads the latest stable release using KOReader's LuaSec HTTPS.
+-- BusyBox wget on Kindle cannot complete TLS handshakes with GitHub/pkgs.tailscale.com.
+function BookLore:tailscaleInstall()
+    if not NetworkMgr:isWifiOn() then NetworkMgr:turnOnWifi() end
+
+    UIManager:show(InfoMessage:new{
+        text = _("Installing Tailscale…\n\nFetching latest version…"),
+        timeout = 60,
+    })
+
+    UIManager:scheduleIn(0.2, function()
+        local https = require("ssl.https")
+        local ltn12 = require("ltn12")
+
+        -- Determine CPU architecture (confirmed armv7l on PW6)
+        local arch_raw = shellExec("uname -m")
+        local arch = "arm"
+        if arch_raw:match("aarch64") or arch_raw:match("arm64") then
+            arch = "arm64"
+        end
+
+        -- Fetch latest stable version tag from GitHub API
+        local api_url = "https://api.github.com/repos/tailscale/tailscale/releases/latest"
+        local resp_body = {}
+        local result, resp_code, resp_headers = https.request{
+            url = api_url,
+            sink = ltn12.sink.table(resp_body),
+            headers = {
+                ["User-Agent"] = "KOReader-BookLore/1.0",
+            },
+        }
+
+        if not result or resp_code ~= 200 then
+            UIManager:show(InfoMessage:new{
+                text = _("Failed to fetch latest Tailscale version.\n\n"
+                    .. "HTTP ") .. tostring(resp_code),
+                width = Screen:getWidth() * 0.9,
+            })
+            return
+        end
+
+        local api_json = table.concat(resp_body)
+        local version = api_json:match('"tag_name"%s*:%s*"v([^"]+)"')
+
+        if not version then
+            UIManager:show(InfoMessage:new{
+                text = _("Could not parse version from GitHub response.\n\n"
+                    .. "First 200 chars:\n") .. api_json:sub(1, 200),
+                width = Screen:getWidth() * 0.9,
+            })
+            return
+        end
+
+        logger.info("BookLore: installing Tailscale", version, "for", arch)
+
+        -- Download the static binary tarball
+        local tarball = "tailscale_" .. version .. "_" .. arch .. ".tgz"
+        local url = "https://pkgs.tailscale.com/stable/" .. tarball
+        local tmp_dir = "/mnt/us/tailscale_install"
+        local tmp_tgz = tmp_dir .. "/" .. tarball
+
+        shellExec("rm -rf " .. tmp_dir)
+        shellExec("mkdir -p " .. tmp_dir)
+
+        local f, open_err = io.open(tmp_tgz, "wb")
+        if not f then
+            shellExec("rm -rf " .. tmp_dir)
+            UIManager:show(InfoMessage:new{
+                text = _("Cannot create temp file:\n") .. tostring(open_err),
+            })
+            return
+        end
+
+        logger.info("BookLore: downloading", url)
+
+        local dl_result, dl_code = https.request{
+            url = url,
+            sink = ltn12.sink.file(f),  -- closes f automatically
+            headers = {
+                ["User-Agent"] = "KOReader-BookLore/1.0",
+            },
+        }
+
+        if not dl_result or dl_code ~= 200 then
+            shellExec("rm -rf " .. tmp_dir)
+            UIManager:show(InfoMessage:new{
+                text = _("Download failed.\n\nURL: ") .. url
+                    .. "\n\nHTTP " .. tostring(dl_code),
+                width = Screen:getWidth() * 0.9,
+            })
+            return
+        end
+
+        -- Verify file size (ARM tarball is ~25+ MB; < 1 MB is suspect)
+        local size_out = shellExec("wc -c < " .. tmp_tgz)
+        local file_size = tonumber(size_out) or 0
+        if file_size < 1048576 then
+            shellExec("rm -rf " .. tmp_dir)
+            UIManager:show(InfoMessage:new{
+                text = _("Downloaded file too small — likely a server error.\n"
+                    .. "Size: ") .. tostring(math.floor(file_size / 1024)) .. " KB",
+            })
+            return
+        end
+
+        logger.info("BookLore: downloaded", string.format("%.1f MB", file_size / 1048576))
+
+        -- Extract tarball
+        local tar_out, tar_code = shellExec("cd " .. tmp_dir .. " && tar xzf " .. tarball)
+        if tar_code ~= 0 then
+            shellExec("rm -rf " .. tmp_dir)
+            UIManager:show(InfoMessage:new{
+                text = _("Failed to extract tarball.\n\n") .. (tar_out or ""),
+            })
+            return
+        end
+
+        -- The tarball extracts to tailscale_{version}_{arch}/
+        local extract_dir = tmp_dir .. "/tailscale_" .. version .. "_" .. arch
+
+        -- Verify extracted binaries exist
+        local check_f = io.open(extract_dir .. "/tailscale", "r")
+        if not check_f then
+            shellExec("rm -rf " .. tmp_dir)
+            UIManager:show(InfoMessage:new{
+                text = _("Extracted archive does not contain expected binaries.\n"
+                    .. "Expected: ") .. extract_dir .. "/tailscale",
+            })
+            return
+        end
+        check_f:close()
+
+        -- Create target directory and install binaries
+        shellExec("mkdir -p " .. TAILSCALE_BIN_DIR)
+        shellExec("cp " .. extract_dir .. "/tailscale " .. TAILSCALE_CMD)
+        shellExec("cp " .. extract_dir .. "/tailscaled " .. TAILSCALED_CMD)
+        shellExec("chmod +x " .. TAILSCALE_CMD)
+        shellExec("chmod +x " .. TAILSCALED_CMD)
+
+        -- Clean up
+        shellExec("rm -rf " .. tmp_dir)
+
+        -- Final verification
+        if isTailscaleInstalled() then
+            logger.info("BookLore: Tailscale", version, "installed successfully")
+            UIManager:show(InfoMessage:new{
+                text = _("Tailscale ") .. version .. _(" installed successfully.\n\n"
+                    .. "Use Connect to join your tailnet."),
+            })
+        else
+            UIManager:show(InfoMessage:new{
+                text = _("Installation failed — binary not found after copy."),
+            })
+        end
+    end)
+end
+
+--- Prompt to install Tailscale if not present.
+-- If already installed, calls the provided callback immediately.
+-- @param then_do function: called after installation succeeds or if already installed
+function BookLore:ensureTailscaleInstalled(then_do)
+    if isTailscaleInstalled() then
+        if then_do then then_do() end
+        return
+    end
+
+    UIManager:show(ConfirmBox:new{
+        text = _("Tailscale is not installed.\n\n"
+            .. "Download and install the latest stable release?\n"
+            .. "(Requires Wi-Fi — approx. 30 MB)"),
+        ok_text = _("Install"),
+        cancel_text = _("Cancel"),
+        ok_callback = function()
+            self:tailscaleInstall()
+        end,
+    })
+end
+
+function BookLore:showTailscaleStatus()
+    if not isTailscaleInstalled() then
+        self:ensureTailscaleInstalled()
+        return
+    end
+
+    if not isTailscaledRunning() then
+        UIManager:show(InfoMessage:new{
+            text = _("Tailscale is installed but the daemon is not running.\n\n"
+                .. "Use Connect to start it."),
+        })
+        return
+    end
+
+    local output, code = shellExec(TAILSCALE_CMD .. " status")
+    if code ~= 0 then
+        local msg = output ~= "" and output or "Unknown error."
+        UIManager:show(InfoMessage:new{
+            text = _("tailscale status failed:\n") .. msg,
+            width = Screen:getWidth() * 0.9,
+        })
+        return
+    end
+    UIManager:show(InfoMessage:new{
+        text = output,
+        width = Screen:getWidth() * 0.9,
+    })
+end
+
+function BookLore:tailscaleConnect()
+    if not isTailscaleInstalled() then
+        self:ensureTailscaleInstalled()
+        return
+    end
+
+    if not NetworkMgr:isWifiOn() then NetworkMgr:turnOnWifi() end
+
+    -- Start daemon if not running
+    if not isTailscaledRunning() then
+        UIManager:show(InfoMessage:new{
+            text = _("Starting tailscaled…"),
+            timeout = 3,
+        })
+
+        UIManager:scheduleIn(0.2, function()
+            local ok, err = self:startTailscaled()
+            if not ok then
+                UIManager:show(InfoMessage:new{
+                    text = _("Failed to start tailscaled:\n") .. tostring(err),
+                    width = Screen:getWidth() * 0.9,
+                })
+                return
+            end
+            -- Daemon is running, now bring tailscale up
+            self:_tailscaleUp()
+        end)
+        return
+    end
+
+    -- Daemon already running — check if already connected
+    local status_out, status_code = shellExec(TAILSCALE_CMD .. " status")
+    if status_code == 0
+        and not status_out:match("Logged out")
+        and not status_out:match("stopped") then
+        UIManager:show(InfoMessage:new{
+            text = _("Tailscale is already connected.\n\n") .. status_out,
+            width = Screen:getWidth() * 0.9,
+        })
+        return
+    end
+
+    self:_tailscaleUp()
+end
+
+--- Internal: run `tailscale up` and handle the auth URL flow.
+function BookLore:_tailscaleUp()
+    UIManager:show(InfoMessage:new{
+        text = _("Connecting to Tailscale…"),
+        timeout = 3,
+    })
+
+    UIManager:scheduleIn(0.2, function()
+        local output, code = shellExec(
+            TAILSCALE_CMD .. " up --timeout=30s --accept-routes")
+        if code == 0 then
+            UIManager:show(InfoMessage:new{
+                text = _("Tailscale connected successfully."),
+            })
+        else
+            -- Look for an auth URL in the output
+            local auth_url = output:match("(https://login%.tailscale%.com/[^%s]+)")
+            if auth_url then
+                -- Try to show a QR code for easy scanning
+                local qr_ok, QRMessage = pcall(require, "ui/widget/qrmessage")
+                if qr_ok and QRMessage then
+                    -- Show instructions first, then QR on dismiss
+                    UIManager:show(InfoMessage:new{
+                        text = _("Tailscale authentication required.\n\n"
+                            .. "Scan the QR code on the next screen "
+                            .. "with your phone to log in.\n\n"
+                            .. "Tap anywhere to show the QR code."),
+                        dismiss_callback = function()
+                            UIManager:show(QRMessage:new{
+                                text = auth_url,
+                                width = Screen:getWidth() * 0.9,
+                                height = Screen:getHeight() * 0.9,
+                            })
+                        end,
+                    })
+                else
+                    -- Fallback: plain text
+                    UIManager:show(InfoMessage:new{
+                        text = _("Auth required. Visit this URL on another device:\n\n")
+                            .. auth_url,
+                        width = Screen:getWidth() * 0.9,
+                    })
+                end
+            else
+                local msg = output ~= "" and output or "Unknown error."
+                UIManager:show(InfoMessage:new{
+                    text = _("Tailscale connect failed:\n") .. msg,
+                    width = Screen:getWidth() * 0.9,
+                })
+            end
+        end
+    end)
+end
+
+function BookLore:tailscaleDisconnect()
+    if not isTailscaleInstalled() then
+        UIManager:show(InfoMessage:new{
+            text = _("Tailscale is not installed."),
+        })
+        return
+    end
+
+    local output, code = shellExec(TAILSCALE_CMD .. " down")
+    if code == 0 then
+        UIManager:show(InfoMessage:new{
+            text = _("Tailscale disconnected."),
+        })
+    else
+        local msg = output ~= "" and output or "Unknown error."
+        UIManager:show(InfoMessage:new{
+            text = _("Tailscale disconnect failed:\n") .. msg,
+        })
+    end
 end
 
 -- ─── Login ───────────────────────────────────────────────────────────
