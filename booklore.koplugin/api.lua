@@ -11,6 +11,10 @@ local lfs = require("libs/libkoreader-lfs")
 
 local BookLoreApi = {}
 
+local function redactToken(url)
+    return (url:gsub("token=[^&]+", "token=REDACTED"))
+end
+
 --- Recursively create directories using LuaFileSystem.
 -- Safe alternative to os.execute("mkdir -p ...") — no shell injection risk.
 -- @param path string: directory path to create
@@ -53,7 +57,7 @@ function BookLoreApi:post(url, body, token)
     }
 
     local raw = table.concat(response_body)
-    logger.dbg("BookLore POST", url, "→", code)
+    logger.dbg("BookLore POST", redactToken(url), "→", code)
     logger.dbg("BookLore response body:", raw)
 
     if code ~= 200 then
@@ -89,7 +93,7 @@ function BookLoreApi:get(url, token)
     }
 
     local raw = table.concat(response_body)
-    logger.dbg("BookLore GET", url, "→", code)
+    logger.dbg("BookLore GET", redactToken(url), "→", code)
     logger.dbg("BookLore response body:", raw)
 
     if code ~= 200 then
@@ -149,7 +153,15 @@ end
 -- Media endpoints use ?token= query param, NOT the Authorization header.
 -- Note: BookLore may return Content-Type: application/json despite
 -- serving image data — this is a known server bug. Treat as binary.
-function BookLoreApi:downloadCover(server_url, book_id, token, cache_dir)
+function BookLoreApi:downloadCover(server_url, book_id, cover_updated_on, token, cache_dir)
+    local stamp = tostring(cover_updated_on or "0"):gsub("[^%w]", "")
+    local basename = "cover_" .. tostring(book_id) .. "_" .. stamp
+    for _, ext in ipairs({ "jpg", "png", "gif", "webp" }) do
+        if lfs.attributes(cache_dir .. "/" .. basename .. "." .. ext, "mode") == "file" then
+            return cache_dir .. "/" .. basename .. "." .. ext, nil
+        end
+    end
+
     local url = server_url .. "/api/v1/media/book/" .. tostring(book_id)
         .. "/thumbnail?token=" .. token
 
@@ -204,7 +216,7 @@ function BookLoreApi:downloadCover(server_url, book_id, token, cache_dir)
         return nil, "Unknown image format. Header: " .. table.concat(hex, " ")
     end
 
-    local final_path = cache_dir .. "/cover_" .. tostring(book_id) .. "." .. ext
+    local final_path = cache_dir .. "/" .. basename .. "." .. ext
     os.remove(final_path)
     os.rename(tmp_path, final_path)
 
@@ -252,12 +264,11 @@ function BookLoreApi:downloadBook(server_url, book_id, token, dest_path, expecte
     end
 
     -- Verify file was written
-    local check = io.open(dest_path, "rb")
-    if not check then
+    local attr = lfs.attributes(dest_path)
+    if not attr then
         return false, "File not found after download"
     end
-    local actual_size = check:seek("end")
-    check:close()
+    local actual_size = attr.size
 
     if not actual_size or actual_size == 0 then
         os.remove(dest_path)
