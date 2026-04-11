@@ -32,6 +32,7 @@ local json = require("json")
 local util = require("util")
 local lfs = require("libs/libkoreader-lfs")
 local _ = require("gettext")
+local T = require("ffi/util").template
 
 local BookLoreApi = require("api")
 
@@ -40,7 +41,6 @@ local BookLore = WidgetContainer:extend{
     is_doc_only = false,
 }
 
-local DOWNLOAD_DIR = "/mnt/us/booklore/downloads"
 
 local function registryKey(server_url, book_id)
     return server_url .. "|" .. tostring(book_id)
@@ -66,6 +66,11 @@ function BookLore:init()
 
     self.download_registry = LuaSettings:open(
         DataStorage:getSettingsDir() .. "/booklore_downloads.lua"
+    )
+
+    self.download_dir = self.settings:readSetting(
+        "download_dir",
+        DataStorage:getFullDataDir() .. "/booklore/downloads"
     )
 
     self.ui.menu:registerToMainMenu(self)
@@ -126,11 +131,15 @@ local function shellExec(cmd)
     return output, code
 end
 
---- Check whether the tailscale binary exists on disk.
+--- Check whether both tailscale binaries exist on disk.
 local function isTailscaleInstalled()
-    local f = io.open(TAILSCALE_CMD, "r")
-    if f then f:close() return true end
-    return false
+    local f1 = io.open(TAILSCALE_CMD, "r")
+    if not f1 then return false end
+    f1:close()
+    local f2 = io.open(TAILSCALED_CMD, "r")
+    if not f2 then return false end
+    f2:close()
+    return true
 end
 
 --- Check whether tailscaled is currently running.
@@ -148,11 +157,10 @@ local function isTailscaledRunning()
 end
 
 --- Start the tailscaled daemon in userspace-networking mode.
--- Returns immediately; the daemon runs in the background.
--- @return boolean: true if launch succeeded
--- @return string|nil: error message
-function BookLore:startTailscaled()
-    if isTailscaledRunning() then return true, nil end
+-- Async: result delivered via on_done(ok, err) after a 3-second UIManager delay.
+-- @param on_done function(boolean, string|nil)
+function BookLore:startTailscaled(on_done)
+    if isTailscaledRunning() then return on_done(true, nil) end
 
     -- Ensure socket dir exists and clean up stale socket
     shellExec("mkdir -p /var/run/tailscale")
@@ -164,18 +172,24 @@ function BookLore:startTailscaled()
         .. " > " .. log_path .. " 2>&1 &"
     local _out, code = shellExec(cmd)
     if code ~= 0 then
-        return false, "Failed to start tailscaled (exit " .. tostring(code) .. ")"
+        return on_done(false, "Failed to start tailscaled (exit " .. tostring(code) .. ")")
     end
 
-    -- Give the daemon a moment to initialize
-    os.execute("sleep 3")
+    UIManager:scheduleIn(3, function()
+        if not isTailscaledRunning() then
+            local log_tail = shellExec("tail -5 " .. log_path)
+            return on_done(false, "tailscaled exited immediately.\n\n" .. (log_tail or ""))
+        end
+        on_done(true, nil)
+    end)
+end
 
-    if not isTailscaledRunning() then
-        -- Show only the last 5 lines of the log, not the entire thing
-        local log_tail = shellExec("tail -5 " .. log_path)
-        return false, "tailscaled exited immediately.\n\n" .. (log_tail or "")
+--- Run a shell command and return false + message on non-zero exit.
+local function checkedExec(cmd)
+    local out, code = shellExec(cmd)
+    if code ~= 0 then
+        return false, cmd .. " failed (exit " .. tostring(code) .. "): " .. (out or "")
     end
-
     return true, nil
 end
 
@@ -214,8 +228,7 @@ function BookLore:tailscaleInstall()
 
         if not result or resp_code ~= 200 then
             UIManager:show(InfoMessage:new{
-                text = _("Failed to fetch latest Tailscale version.\n\n"
-                    .. "HTTP ") .. tostring(resp_code),
+                text = T(_("Failed to fetch latest Tailscale version.\n\nHTTP %1"), tostring(resp_code)),
                 width = Screen:getWidth() * 0.9,
             })
             return
@@ -226,8 +239,7 @@ function BookLore:tailscaleInstall()
 
         if not version then
             UIManager:show(InfoMessage:new{
-                text = _("Could not parse version from GitHub response.\n\n"
-                    .. "First 200 chars:\n") .. api_json:sub(1, 200),
+                text = T(_("Could not parse version from GitHub response.\n\nFirst 200 chars:\n%1"), api_json:sub(1, 200)),
                 width = Screen:getWidth() * 0.9,
             })
             return
@@ -248,7 +260,7 @@ function BookLore:tailscaleInstall()
         if not f then
             shellExec("rm -rf " .. tmp_dir)
             UIManager:show(InfoMessage:new{
-                text = _("Cannot create temp file:\n") .. tostring(open_err),
+                text = T(_("Cannot create temp file:\n%1"), tostring(open_err)),
             })
             return
         end
@@ -266,8 +278,7 @@ function BookLore:tailscaleInstall()
         if not dl_result or dl_code ~= 200 then
             shellExec("rm -rf " .. tmp_dir)
             UIManager:show(InfoMessage:new{
-                text = _("Download failed.\n\nURL: ") .. url
-                    .. "\n\nHTTP " .. tostring(dl_code),
+                text = T(_("Download failed.\n\nURL: %1\n\nHTTP %2"), url, tostring(dl_code)),
                 width = Screen:getWidth() * 0.9,
             })
             return
@@ -279,8 +290,7 @@ function BookLore:tailscaleInstall()
         if file_size < 1048576 then
             shellExec("rm -rf " .. tmp_dir)
             UIManager:show(InfoMessage:new{
-                text = _("Downloaded file too small — likely a server error.\n"
-                    .. "Size: ") .. tostring(math.floor(file_size / 1024)) .. " KB",
+                text = T(_("Downloaded file too small — likely a server error.\nSize: %1 KB"), tostring(math.floor(file_size / 1024))),
             })
             return
         end
@@ -292,7 +302,7 @@ function BookLore:tailscaleInstall()
         if tar_code ~= 0 then
             shellExec("rm -rf " .. tmp_dir)
             UIManager:show(InfoMessage:new{
-                text = _("Failed to extract tarball.\n\n") .. (tar_out or ""),
+                text = T(_("Failed to extract tarball.\n\n%1"), tar_out or ""),
             })
             return
         end
@@ -305,29 +315,53 @@ function BookLore:tailscaleInstall()
         if not check_f then
             shellExec("rm -rf " .. tmp_dir)
             UIManager:show(InfoMessage:new{
-                text = _("Extracted archive does not contain expected binaries.\n"
-                    .. "Expected: ") .. extract_dir .. "/tailscale",
+                text = T(_("Extracted archive does not contain expected binaries.\nExpected: %1"), extract_dir .. "/tailscale"),
             })
             return
         end
         check_f:close()
 
         -- Create target directory and install binaries
-        shellExec("mkdir -p " .. TAILSCALE_BIN_DIR)
-        shellExec("cp " .. extract_dir .. "/tailscale " .. TAILSCALE_CMD)
-        shellExec("cp " .. extract_dir .. "/tailscaled " .. TAILSCALED_CMD)
-        shellExec("chmod +x " .. TAILSCALE_CMD)
-        shellExec("chmod +x " .. TAILSCALED_CMD)
+        local ok, cerr
+        ok, cerr = checkedExec("mkdir -p " .. TAILSCALE_BIN_DIR)
+        if not ok then
+            shellExec("rm -rf " .. tmp_dir)
+            UIManager:show(InfoMessage:new{ text = cerr })
+            return
+        end
+        ok, cerr = checkedExec("cp " .. extract_dir .. "/tailscale " .. TAILSCALE_CMD)
+        if not ok then
+            shellExec("rm -rf " .. tmp_dir)
+            UIManager:show(InfoMessage:new{ text = cerr })
+            return
+        end
+        ok, cerr = checkedExec("cp " .. extract_dir .. "/tailscaled " .. TAILSCALED_CMD)
+        if not ok then
+            shellExec("rm -rf " .. tmp_dir)
+            UIManager:show(InfoMessage:new{ text = cerr })
+            return
+        end
+        ok, cerr = checkedExec("chmod +x " .. TAILSCALE_CMD)
+        if not ok then
+            shellExec("rm -rf " .. tmp_dir)
+            UIManager:show(InfoMessage:new{ text = cerr })
+            return
+        end
+        ok, cerr = checkedExec("chmod +x " .. TAILSCALED_CMD)
+        if not ok then
+            shellExec("rm -rf " .. tmp_dir)
+            UIManager:show(InfoMessage:new{ text = cerr })
+            return
+        end
 
-        -- Clean up
+        -- Clean up (best-effort; install already succeeded)
         shellExec("rm -rf " .. tmp_dir)
 
         -- Final verification
         if isTailscaleInstalled() then
             logger.info("BookLore: Tailscale", version, "installed successfully")
             UIManager:show(InfoMessage:new{
-                text = _("Tailscale ") .. version .. _(" installed successfully.\n\n"
-                    .. "Use Connect to join your tailnet."),
+                text = T(_("Tailscale %1 installed successfully.\n\nUse Connect to join your tailnet."), version),
             })
         else
             UIManager:show(InfoMessage:new{
@@ -376,7 +410,7 @@ function BookLore:showTailscaleStatus()
     if code ~= 0 then
         local msg = output ~= "" and output or "Unknown error."
         UIManager:show(InfoMessage:new{
-            text = _("tailscale status failed:\n") .. msg,
+            text = T(_("tailscale status failed:\n%1"), msg),
             width = Screen:getWidth() * 0.9,
         })
         return
@@ -403,16 +437,17 @@ function BookLore:tailscaleConnect()
         })
 
         UIManager:scheduleIn(0.2, function()
-            local ok, err = self:startTailscaled()
-            if not ok then
-                UIManager:show(InfoMessage:new{
-                    text = _("Failed to start tailscaled:\n") .. tostring(err),
-                    width = Screen:getWidth() * 0.9,
-                })
-                return
-            end
-            -- Daemon is running, now bring tailscale up
-            self:_tailscaleUp()
+            self:startTailscaled(function(ok, err)
+                if not ok then
+                    UIManager:show(InfoMessage:new{
+                        text = T(_("Failed to start tailscaled:\n%1"), tostring(err)),
+                        width = Screen:getWidth() * 0.9,
+                    })
+                    return
+                end
+                -- Daemon is running, now bring tailscale up
+                self:_tailscaleUp()
+            end)
         end)
         return
     end
@@ -423,7 +458,7 @@ function BookLore:tailscaleConnect()
         and not status_out:match("Logged out")
         and not status_out:match("stopped") then
         UIManager:show(InfoMessage:new{
-            text = _("Tailscale is already connected.\n\n") .. status_out,
+            text = T(_("Tailscale is already connected.\n\n%1"), status_out),
             width = Screen:getWidth() * 0.9,
         })
         return
@@ -470,15 +505,14 @@ function BookLore:_tailscaleUp()
                 else
                     -- Fallback: plain text
                     UIManager:show(InfoMessage:new{
-                        text = _("Auth required. Visit this URL on another device:\n\n")
-                            .. auth_url,
+                        text = T(_("Auth required. Visit this URL on another device:\n\n%1"), auth_url),
                         width = Screen:getWidth() * 0.9,
                     })
                 end
             else
                 local msg = output ~= "" and output or "Unknown error."
                 UIManager:show(InfoMessage:new{
-                    text = _("Tailscale connect failed:\n") .. msg,
+                    text = T(_("Tailscale connect failed:\n%1"), msg),
                     width = Screen:getWidth() * 0.9,
                 })
             end
@@ -502,7 +536,7 @@ function BookLore:tailscaleDisconnect()
     else
         local msg = output ~= "" and output or "Unknown error."
         UIManager:show(InfoMessage:new{
-            text = _("Tailscale disconnect failed:\n") .. msg,
+            text = T(_("Tailscale disconnect failed:\n%1"), msg),
         })
     end
 end
@@ -552,7 +586,7 @@ function BookLore:doLogin(server_url, username, password)
         UIManager:show(InfoMessage:new{ text = _("Logged in successfully.") })
     else
         UIManager:show(InfoMessage:new{
-            text = _("Login failed:\n") .. tostring(err),
+            text = T(_("Login failed:\n%1"), tostring(err)),
         })
     end
 end
@@ -580,7 +614,7 @@ function BookLore:browseLibrary()
             })
         else
             UIManager:show(InfoMessage:new{
-                text = _("Failed to fetch books:\n") .. tostring(err),
+                text = T(_("Failed to fetch books:\n%1"), tostring(err)),
             })
         end
         return
@@ -702,7 +736,7 @@ end
 function BookLore:buildCoverCard(book, card_w, on_tap)
     local cover_h = math.floor(card_w * 1.4)
     local meta = book.metadata or {}
-    local title = meta.title or book.fileName or "Untitled"
+    local title = meta.title or book.fileName or _("Untitled")
     local authors = ""
     if type(meta.authors) == "table" and #meta.authors > 0 then
         authors = meta.authors[1]
@@ -713,7 +747,7 @@ function BookLore:buildCoverCard(book, card_w, on_tap)
     local cover_widget = nil
     if book.id and self.token and self.cover_cache_dir then
         local path = BookLoreApi:downloadCover(
-            self.server_url, book.id, self.token, self.cover_cache_dir
+            self.server_url, book.id, book.coverUpdatedOn, self.token, self.cover_cache_dir
         )
         if path then
             local ok, img = pcall(ImageWidget.new, ImageWidget, {
@@ -1130,10 +1164,15 @@ function BookLore:showSidebar()
                 lib_names[lid] = book.libraryName or "Library"
             end
         end
+        local sorted = {}
         for lid, name in pairs(lib_names) do
-            local count = lib_books[lid] and #lib_books[lid] or 0
-            addItem("▦", name, count, function()
-                navigate(lib_books[lid] or {}, name)
+            table.insert(sorted, { lid = lid, name = name })
+        end
+        table.sort(sorted, function(a, b) return a.name:lower() < b.name:lower() end)
+        for _, entry in ipairs(sorted) do
+            local count = lib_books[entry.lid] and #lib_books[entry.lid] or 0
+            addItem("▦", entry.name, count, function()
+                navigate(lib_books[entry.lid] or {}, entry.name)
             end)
         end
     end
@@ -1278,7 +1317,7 @@ function BookLore:showBookList(books, title, back_callback)
 
     for _, book in ipairs(books) do
         local meta = book.metadata or {}
-        local book_title = meta.title or book.fileName or "Untitled"
+        local book_title = meta.title or book.fileName or _("Untitled")
         local authors = ""
         if type(meta.authors) == "table" and #meta.authors > 0 then
             authors = table.concat(meta.authors, ", ")
@@ -1308,7 +1347,7 @@ function BookLore:showBookList(books, title, back_callback)
     local menu_h = screen_h - bar_h
 
     local book_menu = Menu:new{
-        title = title .. " (" .. tostring(#books) .. ")",
+        title = T(_("%1 (%2)"), title, tostring(#books)),
         item_table = item_table,
         width = screen_w,
         height = menu_h,
@@ -1384,7 +1423,7 @@ function BookLore:showFilterMenu(books, parent_title, back_callback)
     }
 
     self.filter_menu = Menu:new{
-        title = _("Filter: ") .. parent_title,
+        title = T(_("Filter: %1"), parent_title),
         item_table = item_table,
         width = Screen:getWidth(),
         height = Screen:getHeight(),
@@ -1458,7 +1497,7 @@ function BookLore:showFilterValues(books, parent_title, back_callback, filter_ty
     end
 
     local filter_label = filter_type:sub(1,1):upper() .. filter_type:sub(2)
-    if filter_type == "readStatus" then filter_label = "Read Status" end
+    if filter_type == "readStatus" then filter_label = _("Read Status") end
 
     self.filter_values_menu = Menu:new{
         title = filter_label,
@@ -1480,7 +1519,7 @@ end
 
 function BookLore:showSearchWithin(books, parent_title, back_callback)
     self.search_dialog = InputDialog:new{
-        title = _("Search in ") .. parent_title,
+        title = T(_("Search in %1"), parent_title),
         input_hint = _("Title, author, or series…"),
         buttons = {{
             {
@@ -1515,11 +1554,11 @@ function BookLore:showSearchWithin(books, parent_title, back_callback)
                     end
                     if #results == 0 then
                         UIManager:show(InfoMessage:new{
-                            text = _("No results for: ") .. query,
+                            text = T(_("No results for: %1"), query),
                         })
                         self:showBookList(books, parent_title, back_callback)
                     else
-                        self:showBookList(results, _("Search: ") .. query, function()
+                        self:showBookList(results, T(_("Search: %1"), query), function()
                             self:showBookList(books, parent_title, back_callback)
                         end)
                     end
@@ -1543,8 +1582,8 @@ end
 
 function BookLore:buildDestPath(book)
     local raw_name = book.fileName or ("book_" .. tostring(book.id))
-    local safe_name = util.getSafeFilename(raw_name, DOWNLOAD_DIR)
-    local path = DOWNLOAD_DIR .. "/" .. safe_name
+    local safe_name = util.getSafeFilename(raw_name, self.download_dir)
+    local path = self.download_dir .. "/" .. safe_name
     return util.fixUtf8(path, "_")
 end
 
@@ -1553,9 +1592,7 @@ function BookLore:getLocalPath(book)
     local key = registryKey(self.server_url, book.id)
     local entry = self.download_registry:readSetting(key)
     if entry and entry.path then
-        local f = io.open(entry.path, "rb")
-        if f then
-            f:close()
+        if lfs.attributes(entry.path, "mode") == "file" then
             return entry.path
         else
             self.download_registry:delSetting(key)
@@ -1606,7 +1643,7 @@ function BookLore:downloadBook(book)
             self:refreshDetailView(book)
         else
             UIManager:show(InfoMessage:new{
-                text = _("Download failed:\n") .. tostring(err),
+                text = T(_("Download failed:\n%1"), tostring(err)),
             })
             self:refreshDetailView(book)
         end
@@ -1630,7 +1667,7 @@ end
 
 function BookLore:showBookDetail(book)
     local meta = book.metadata or {}
-    local title = meta.title or book.fileName or "Untitled"
+    local title = meta.title or book.fileName or _("Untitled")
     local screen_w = Screen:getWidth()
     local screen_h = Screen:getHeight()
     local padding = Size.padding.large
@@ -1639,7 +1676,7 @@ function BookLore:showBookDetail(book)
     local cover_widget = nil
     if book.id and self.cover_cache_dir then
         local cover_path = BookLoreApi:downloadCover(
-            self.server_url, book.id, self.token, self.cover_cache_dir
+            self.server_url, book.id, book.coverUpdatedOn, self.token, self.cover_cache_dir
         )
         if cover_path then
             local ok, img = pcall(ImageWidget.new, ImageWidget, {
@@ -1679,39 +1716,46 @@ function BookLore:showBookDetail(book)
     -- Detail lines
     local lines = {}
     if type(meta.authors) == "table" and #meta.authors > 0 then
-        table.insert(lines, "By: " .. table.concat(meta.authors, ", "))
+        table.insert(lines, T(_("By: %1"), table.concat(meta.authors, ", ")))
     end
-    if meta.seriesName then
-        local s = "Series: " .. meta.seriesName
-        if meta.seriesNumber then s = s .. " #" .. tostring(meta.seriesNumber) end
-        if meta.seriesTotal then s = s .. " of " .. tostring(meta.seriesTotal) end
+    if meta.seriesName and meta.seriesName ~= "" then
+        local s
+        if meta.seriesNumber and meta.seriesTotal then
+            s = T(_("Series: %1 #%2 of %3"), meta.seriesName, tostring(meta.seriesNumber), tostring(meta.seriesTotal))
+        elseif meta.seriesNumber then
+            s = T(_("Series: %1 #%2"), meta.seriesName, tostring(meta.seriesNumber))
+        else
+            s = T(_("Series: %1"), meta.seriesName)
+        end
         table.insert(lines, s)
     end
-    if meta.publisher then
-        local p = "Publisher: " .. meta.publisher
-        if meta.publishedDate then p = p .. " (" .. meta.publishedDate .. ")" end
-        table.insert(lines, p)
+    if meta.publisher and meta.publisher ~= "" then
+        if meta.publishedDate and meta.publishedDate ~= "" then
+            table.insert(lines, T(_("Publisher: %1 (%2)"), meta.publisher, meta.publishedDate))
+        else
+            table.insert(lines, T(_("Publisher: %1"), meta.publisher))
+        end
     end
     local pl = {}
-    if meta.pageCount then table.insert(pl, tostring(meta.pageCount) .. " pages") end
-    if meta.language then table.insert(pl, meta.language) end
+    if meta.pageCount then table.insert(pl, T(_("%1 pages"), tostring(meta.pageCount))) end
+    if meta.language and meta.language ~= "" then table.insert(pl, meta.language) end
     if #pl > 0 then table.insert(lines, table.concat(pl, " · ")) end
     table.insert(lines, "")
-    if book.readStatus then table.insert(lines, "Status: " .. book.readStatus) end
+    if book.readStatus then table.insert(lines, T(_("Status: %1"), book.readStatus)) end
     if book.personalRating and book.personalRating > 0 then
-        table.insert(lines, "Rating: " .. tostring(book.personalRating) .. "/10")
+        table.insert(lines, T(_("Rating: %1/10"), tostring(book.personalRating)))
     end
     if type(book.shelves) == "table" and #book.shelves > 0 then
         local sn = {}
         for _, sh in ipairs(book.shelves) do
             table.insert(sn, type(sh) == "table" and (sh.name or sh.shelfName or "?") or tostring(sh))
         end
-        table.insert(lines, "Shelves: " .. table.concat(sn, ", "))
+        table.insert(lines, T(_("Shelves: %1"), table.concat(sn, ", ")))
     end
     table.insert(lines, "")
-    table.insert(lines, "Format: " .. (book.bookType or "Unknown"))
+    table.insert(lines, T(_("Format: %1"), book.bookType or _("Unknown")))
     if book.fileSizeKb then
-        table.insert(lines, "Size: " .. string.format("%.1f MB", book.fileSizeKb / 1024))
+        table.insert(lines, T(_("Size: %1"), string.format("%.1f MB", book.fileSizeKb / 1024)))
     end
 
     table.insert(content, TextBoxWidget:new{
@@ -1742,9 +1786,11 @@ function BookLore:showBookDetail(book)
             enabled = false,
         }
     else
-        local dl_label = _("Download")
+        local dl_label
         if book.fileSizeKb then
-            dl_label = dl_label .. string.format(" (%.1f MB)", book.fileSizeKb / 1024)
+            dl_label = T(_("Download (%1 MB)"), string.format("%.1f", book.fileSizeKb / 1024))
+        else
+            dl_label = _("Download")
         end
         action_btn = Button:new{
             text = dl_label,
