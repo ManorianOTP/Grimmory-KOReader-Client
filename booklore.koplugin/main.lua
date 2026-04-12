@@ -1346,7 +1346,18 @@ function BookLore:showBookList(books, title, back_callback)
     -- Menu fills remaining height below top bar
     local menu_h = screen_h - bar_h
 
+    -- Create the top-level widget first so Menu can capture it as
+    -- show_parent at init time. Menu:init passes show_parent down to
+    -- its page-navigation buttons, so late assignment won't work — the
+    -- page buttons must see the correct parent when they're built, or
+    -- their setDirty calls won't find a widget in UIManager's window
+    -- stack and the screen won't refresh on next/prev page.
+    self.book_list_widget = InputContainer:new{
+        dimen = Geom:new{ w = screen_w, h = screen_h },
+    }
+
     local book_menu = Menu:new{
+        show_parent = self.book_list_widget,
         title = T(_("%1 (%2)"), title, tostring(#books)),
         item_table = item_table,
         width = screen_w,
@@ -1379,9 +1390,6 @@ function BookLore:showBookList(books, title, back_callback)
         book_menu,
     }
 
-    self.book_list_widget = InputContainer:new{
-        dimen = Geom:new{ w = screen_w, h = screen_h },
-    }
     table.insert(self.book_list_widget, layout)
 
     UIManager:show(self.book_list_widget)
