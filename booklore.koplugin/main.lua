@@ -156,7 +156,7 @@ local function isTailscaledRunning()
     return code == 0
 end
 
---- Start the tailscaled daemon in userspace-networking mode.
+--- Start the tailscaled daemon (TUN mode, the default).
 -- Async: result delivered via on_done(ok, err) after a 3-second UIManager delay.
 -- @param on_done function(boolean, string|nil)
 function BookLore:startTailscaled(on_done)
