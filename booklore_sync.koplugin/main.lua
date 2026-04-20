@@ -1,6 +1,7 @@
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local DataStorage = require("datastorage")
 local LuaSettings = require("luasettings")
+local MultiConfirmBox = require("ui/widget/multiconfirmbox")
 local UIManager = require("ui/uimanager")
 local Event = require("ui/event")
 local Math = require("optmath")
@@ -67,6 +68,7 @@ function BookLoreSync:onReaderReady()
     self.has_pages = self.ui.document.info.has_pages
     self.push_in_progress = false
     self.pulled = false
+    self.awaiting_decision = false
     self.cfi = nil
 
     if not self.has_pages then
@@ -95,7 +97,9 @@ end
 
 function BookLoreSync:onCloseDocument()
     if not self.enabled or not self.book_id then return end
-    self:pushProgress()
+    if not self.awaiting_decision then
+        self:pushProgress()
+    end
     if self.cfi then
         self.cfi.clearCache()
         self.cfi = nil
@@ -105,6 +109,7 @@ end
 function BookLoreSync:onPageUpdate()
     if not self.enabled or not self.book_id then return end
     if not self.pulled then return end
+    if self.awaiting_decision then return end
     if os.time() - self.last_push_time < 30 then return end
     UIManager:scheduleIn(0.1, function()
         self:pushProgress()
@@ -179,6 +184,7 @@ function BookLoreSync:pushProgress()
 end
 
 function BookLoreSync:pullProgress()
+    if self.awaiting_decision then return end
     local sink = {}
     local dummy, code = http.request{
         url = self.server_url .. "/api/v1/books/" .. tostring(self.book_id),
@@ -215,34 +221,59 @@ function BookLoreSync:pullProgress()
     logger.dbg("BookLoreSync: pull remote=", remote.percentage, "% local=", local_pct_100, "% cfi=", tostring(remote.cfi))
 
     if remote.percentage > local_pct_100 + 0.5 then
-        local navigated = false
-        if self.cfi and not self.has_pages and remote.cfi then
-            local ok_xp, xp = pcall(function()
-                return self.cfi.cfiToXPointer(remote.cfi)
-            end)
-            if ok_xp and xp then
-                self.ui:handleEvent(Event:new("GotoXPointer", xp))
-                logger.dbg("BookLoreSync: synced via CFI", remote.cfi, "->", xp)
-                navigated = true
-            else
-                logger.warn("BookLoreSync: CFI-to-XPointer failed:", tostring(xp))
-            end
-        end
-
-        if not navigated then
-            local target = remote.percentage / 100
-            if self.has_pages then
-                local page_count = self.ui.document:getPageCount()
-                local target_page = Math.round(target * page_count)
-                self.ui:handleEvent(Event:new("GotoPage", target_page))
-            else
-                self.ui:handleEvent(Event:new("GotoPercent", target))
-            end
-            logger.dbg("BookLoreSync: synced to server position", remote.percentage, "%")
-        end
+        local delta = math.floor((remote.percentage - local_pct_100) * 10) / 10
+        logger.warn("BookLoreSync: server is ahead by", delta, "%, showing conflict prompt")
+        self.awaiting_decision = true
+        self:showConflictPrompt(remote, local_pct_100, delta)
+        return
     end
 
     self.pulled = true
+end
+
+function BookLoreSync:showConflictPrompt(remote, local_pct_100, delta)
+    local self_ref = self
+    UIManager:show(MultiConfirmBox:new{
+        text = string.format(
+            _("Server is %.1f%% ahead (server: %.1f%%, local: %.1f%%).\n\nJump ahead to the server position, or push your local position to the server?"),
+            delta, remote.percentage, local_pct_100),
+        choice1_text = _("Jump Ahead"),
+        choice1_callback = function()
+            local navigated = false
+            if self_ref.cfi and not self_ref.has_pages and remote.cfi then
+                local ok_xp, xp = pcall(function()
+                    return self_ref.cfi.cfiToXPointer(remote.cfi)
+                end)
+                if ok_xp and xp then
+                    self_ref.ui:handleEvent(Event:new("GotoXPointer", xp))
+                    logger.dbg("BookLoreSync: jumped ahead via CFI", remote.cfi, "->", xp)
+                    navigated = true
+                else
+                    logger.warn("BookLoreSync: CFI-to-XPointer failed:", tostring(xp))
+                end
+            end
+            if not navigated then
+                local target = remote.percentage / 100
+                if self_ref.has_pages then
+                    local page_count = self_ref.ui.document:getPageCount()
+                    local target_page = Math.round(target * page_count)
+                    self_ref.ui:handleEvent(Event:new("GotoPage", target_page))
+                else
+                    self_ref.ui:handleEvent(Event:new("GotoPercent", target))
+                end
+                logger.dbg("BookLoreSync: jumped to server position", remote.percentage, "%")
+            end
+            self_ref.awaiting_decision = false
+            self_ref.pulled = true
+        end,
+        choice2_text = _("Sync Here"),
+        choice2_callback = function()
+            self_ref.last_push_time = 0
+            self_ref:pushProgress()
+            self_ref.awaiting_decision = false
+            self_ref.pulled = true
+        end,
+    })
 end
 
 return BookLoreSync
