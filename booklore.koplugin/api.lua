@@ -108,11 +108,12 @@ function BookLoreApi:get(url, token)
     return decoded, nil
 end
 
---- Authenticate with BookLore and obtain a JWT.
+--- Authenticate with BookLore and obtain access + refresh tokens. (ref: DL-007)
 -- @param server_url string: base URL, e.g. "http://192.168.1.144:6060"
 -- @param username string
 -- @param password string
--- @return string|nil: JWT token, or nil on error
+-- @return string|nil: access token, or nil on error
+-- @return string|nil: refresh token, or nil on error
 -- @return string|nil: error message, or nil on success
 function BookLoreApi:login(server_url, username, password)
     local url = server_url .. "/api/v1/auth/login"
@@ -122,7 +123,7 @@ function BookLoreApi:login(server_url, username, password)
     })
 
     if not data then
-        return nil, err
+        return nil, nil, err
     end
 
     local token = data.accessToken
@@ -131,15 +132,60 @@ function BookLoreApi:login(server_url, username, password)
         for k, _ in pairs(data) do
             table.insert(keys, k)
         end
-        return nil, "No accessToken in response. Keys: " .. table.concat(keys, ", ")
+        return nil, nil, "No accessToken in response. Keys: " .. table.concat(keys, ", ")
     end
 
-    return token, nil
+    local refresh_token = data.refreshToken
+    if not refresh_token then
+        local keys = {}
+        for k, _ in pairs(data) do
+            table.insert(keys, k)
+        end
+        return nil, nil, "No refreshToken in response. Keys: " .. table.concat(keys, ", ")
+    end
+
+    return token, refresh_token, nil
 end
 
---- Fetch the list of libraries.
+--- Exchange a refresh token for a new access+refresh pair. (ref: DL-005, DL-007)
+-- Endpoint shape is an M-confidence assumption: POST /api/v1/auth/refresh
+-- with JSON body {refreshToken}; response mirrors login (rotating refresh).
+function BookLoreApi:refreshToken(server_url, refresh_token)
+    local url = server_url .. "/api/v1/auth/refresh"
+    local data, err = self:post(url, {
+        refreshToken = refresh_token,
+    })
+
+    if not data then
+        return nil, nil, err
+    end
+
+    local new_access = data.accessToken
+    if not new_access then
+        local keys = {}
+        for k, _ in pairs(data) do table.insert(keys, k) end
+        return nil, nil, "No accessToken in refresh response. Keys: " .. table.concat(keys, ", ")
+    end
+
+    local new_refresh = data.refreshToken
+    if not new_refresh then
+        local keys = {}
+        for k, _ in pairs(data) do table.insert(keys, k) end
+        return nil, nil, "No refreshToken in refresh response. Keys: " .. table.concat(keys, ", ")
+    end
+
+    return new_access, new_refresh, nil
+end
+
+--- Fetch the list of libraries. (ref: DL-001)
 function BookLoreApi:getLibraries(server_url, token)
     local url = server_url .. "/api/v1/libraries"
+    return self:get(url, token)
+end
+
+--- Fetch all shelves. (ref: DL-001)
+function BookLoreApi:getShelves(server_url, token)
+    local url = server_url .. "/api/v1/shelves"
     return self:get(url, token)
 end
 

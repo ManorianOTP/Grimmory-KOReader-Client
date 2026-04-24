@@ -55,14 +55,14 @@ function BookLore:init()
     self.server_url = self.settings:readSetting("server_url", "http://192.168.1.50:6060")
     self.username = self.settings:readSetting("username", "")
 
-    local saved_token = self.settings:readSetting("token")
-    local saved_token_time = self.settings:readSetting("token_time", 0)
-    local TOKEN_MAX_AGE = 20 * 60 * 60
-    if saved_token and (os.time() - saved_token_time) < TOKEN_MAX_AGE then
-        self.token = saved_token
-    else
-        self.token = nil
-    end
+    -- Token state is loaded as-is; expiry is determined reactively by the
+    -- refresh flow in apiCall (401-driven) and pre-emptively by token_time
+    -- against PREEMPTIVE_REFRESH_SECS. A client-side age heuristic
+    -- (DL-008, rejected) would discard a valid refresh token and force a
+    -- manual re-login that silent renewal makes unnecessary. (ref: DL-003)
+    self.token = self.settings:readSetting("token")
+    self.refresh_token = self.settings:readSetting("refresh_token")
+    self.token_time = self.settings:readSetting("token_time")
 
     self.download_registry = LuaSettings:open(
         DataStorage:getSettingsDir() .. "/booklore_downloads.lua"
@@ -573,15 +573,23 @@ end
 function BookLore:doLogin(server_url, username, password)
     if not NetworkMgr:isWifiOn() then NetworkMgr:turnOnWifi() end
 
-    local token, err = BookLoreApi:login(server_url, username, password)
-    if token then
+    local token, refresh_token, err = BookLoreApi:login(server_url, username, password)
+    if token and refresh_token then
         self.token = token
+        self.refresh_token = refresh_token
+        -- token_time seeds the pre-emptive refresh threshold in apiCall. (ref: DL-002)
+        self.token_time = os.time()
         self.server_url = server_url
         self.username = username
         self.settings:saveSetting("server_url", server_url)
         self.settings:saveSetting("username", username)
         self.settings:saveSetting("token", token)
-        self.settings:saveSetting("token_time", os.time())
+        -- Refresh token persisted: revocable and scoped, not reusable across services.
+        -- Storing credentials (DL-010, rejected) trades revocability for convenience;
+        -- refresh tokens carry lower blast-radius on exfiltration than passwords.
+        -- (ref: DL-004, DL-010)
+        self.settings:saveSetting("refresh_token", refresh_token)
+        self.settings:saveSetting("token_time", self.token_time)
         self.settings:flush()
         UIManager:show(InfoMessage:new{ text = _("Logged in successfully.") })
     else
@@ -593,8 +601,183 @@ end
 
 -- ─── Data loading ────────────────────────────────────────────────────
 
+-- 50 min chosen so long reading sessions refresh well before the 10-hour
+-- server access-token TTL without excessive refresh calls for short
+-- sessions. (ref: DL-002)
+local PREEMPTIVE_REFRESH_SECS = 50 * 60
+
+-- Any BookLoreApi method routed through apiCall MUST be registered here --
+-- unregistered calls fail at runtime with unmapped-api-method.
+local METHOD_ARG_LAYOUT = {
+    getBooks      = "token-second",
+    getShelves    = "token-second",
+    getLibraries  = "token-second",
+    downloadBook  = "download-book",
+    downloadCover = "download-cover",
+}
+
+-- _performRefresh: exchanges the stored refresh_token for a rotated pair.
+-- Single-flight: if another call is already inside this function, return
+-- refresh-in-progress immediately. Actual wait loops are not portable on
+-- KOReader without coroutines; callers treat the transient error by
+-- surfacing Session-expired and letting the user retry. (ref: DL-005, DL-006)
+function BookLore:_performRefresh()
+    if self._refreshing then
+        return false, "refresh-in-progress"
+    end
+    self._refreshing = true
+
+    local ok, inner_success, inner_err = pcall(function()
+        local new_access, new_refresh, ref_err = BookLoreApi:refreshToken(
+            self.server_url, self.refresh_token)
+
+        if not new_access or not new_refresh then
+            return false, ref_err or "refresh failed"
+        end
+
+        self.token = new_access
+        self.refresh_token = new_refresh
+        self.token_time = os.time()
+
+        self.settings:saveSetting("token", new_access)
+        self.settings:saveSetting("refresh_token", new_refresh)
+        self.settings:saveSetting("token_time", self.token_time)
+        self.settings:flush()
+
+        return true, nil
+    end)
+
+    if ok then
+        self._refreshing = false
+        if inner_success == false then
+            -- Refresh call returned failure; clear all token state.
+            -- delSetting, not saveSetting(k, nil), so keys are absent
+            -- on next init rather than present-but-nil. (ref: DL-005)
+            self.token = nil
+            self.refresh_token = nil
+            self.token_time = nil
+            self.settings:delSetting("token")
+            self.settings:delSetting("refresh_token")
+            self.settings:delSetting("token_time")
+            self.settings:flush()
+            return false, inner_err
+        end
+        return true, nil
+    else
+        -- pcall caught a Lua error; inner_success holds the error object.
+        self._refreshing = false
+        self.token = nil
+        self.refresh_token = nil
+        self.token_time = nil
+        self.settings:delSetting("token")
+        self.settings:delSetting("refresh_token")
+        self.settings:delSetting("token_time")
+        self.settings:flush()
+        return false, tostring(inner_success)
+    end
+end
+
+-- apiCall: token-injecting, refresh-aware dispatcher for BookLoreApi methods.
+-- Call sites pass only method-specific args (no server_url, no token) and
+-- this helper splices self.token into the slot METHOD_ARG_LAYOUT specifies.
+-- unpack (NOT table.unpack) is used because KOReader on Kindle is LuaJIT/5.1
+-- where table.unpack does not exist. (ref: DL-001, DL-011)
+function BookLore:apiCall(method_name, ...)
+    local extra_args = {...}
+
+    -- G1: unknown-api-method
+    if type(BookLoreApi[method_name]) ~= "function" then
+        return nil, "unknown-api-method:" .. tostring(method_name)
+    end
+
+    -- G2: unmapped-api-method
+    if METHOD_ARG_LAYOUT[method_name] == nil then
+        logger.warn("BookLore:apiCall unmapped method", method_name,
+            "-- add entry to METHOD_ARG_LAYOUT")
+        return nil, "unmapped-api-method:" .. tostring(method_name)
+    end
+
+    -- G3: not-logged-in
+    if not self.token and not self.refresh_token then
+        return nil, "not-logged-in"
+    end
+
+    -- Pre-emptive refresh when token is stale or absent but refresh token exists
+    if self.refresh_token and (
+        not self.token
+        or not self.token_time
+        or (os.time() - self.token_time) > PREEMPTIVE_REFRESH_SECS
+    ) then
+        local ok, ref_err = self:_performRefresh()
+        if not ok then
+            return nil, ref_err
+        end
+    end
+
+    local function dispatch()
+        local layout = METHOD_ARG_LAYOUT[method_name]
+        if layout == "token-second" then
+            return BookLoreApi[method_name](BookLoreApi, self.server_url, self.token, unpack(extra_args))
+        elseif layout == "download-book" then
+            -- extra_args: book_id, dest_path, expected_size_kb
+            return BookLoreApi:downloadBook(self.server_url, extra_args[1], self.token, extra_args[2], extra_args[3])
+        elseif layout == "download-cover" then
+            -- extra_args: book_id, cover_updated_on, cache_dir
+            return BookLoreApi:downloadCover(self.server_url, extra_args[1], extra_args[2], self.token, extra_args[3])
+        end
+    end
+
+    local result, err = dispatch()
+
+    -- 401 handling — anchored match covers both "HTTP 401:" (get/post)
+    -- and bare "HTTP 401" (downloadCover/downloadBook) formats.
+    if err and err:match("^HTTP 401") then
+        if self.refresh_token then
+            -- Case A: refresh token present — attempt silent renewal then retry once
+            local ok, ref_err = self:_performRefresh()
+            if not ok then
+                if ref_err ~= "refresh-in-progress" then
+                    self.token = nil
+                    self.refresh_token = nil
+                    self.token_time = nil
+                    self.settings:delSetting("token")
+                    self.settings:delSetting("refresh_token")
+                    self.settings:delSetting("token_time")
+                    self.settings:flush()
+                    UIManager:show(InfoMessage:new{ text = _("Session expired. Please login again.") })
+                end
+                return nil, ref_err
+            end
+            result, err = dispatch()
+            if err and err:match("^HTTP 401") then
+                self.token = nil
+                self.refresh_token = nil
+                self.token_time = nil
+                self.settings:delSetting("token")
+                self.settings:delSetting("refresh_token")
+                self.settings:delSetting("token_time")
+                self.settings:flush()
+                UIManager:show(InfoMessage:new{ text = _("Session expired. Please login again.") })
+                return nil, err
+            end
+        else
+            -- Case B: legacy install — no refresh token; clear and prompt re-login
+            self.token = nil
+            self.token_time = nil
+            self.settings:delSetting("token")
+            self.settings:delSetting("refresh_token")
+            self.settings:delSetting("token_time")
+            self.settings:flush()
+            UIManager:show(InfoMessage:new{ text = _("Session expired. Please login again.") })
+            return nil, err
+        end
+    end
+
+    return result, err
+end
+
 function BookLore:browseLibrary()
-    if not self.token then
+    if not self.token and not self.refresh_token then
         UIManager:show(InfoMessage:new{
             text = _("Not logged in. Please login first."),
         })
@@ -602,17 +785,10 @@ function BookLore:browseLibrary()
     end
     if not NetworkMgr:isWifiOn() then NetworkMgr:turnOnWifi() end
 
-    local books, err = BookLoreApi:getBooks(self.server_url, self.token)
+    local books, err = self:apiCall("getBooks")
     if not books then
-        if err and err:match("^HTTP 401") then
-            self.token = nil
-            self.settings:delSetting("token")
-            self.settings:delSetting("token_time")
-            self.settings:flush()
-            UIManager:show(InfoMessage:new{
-                text = _("Session expired. Please login again."),
-            })
-        else
+        -- apiCall already surfaced Session-expired on 401 paths.
+        if not (err and (err:match("^HTTP 401") or err == "refresh-in-progress" or err == "not-logged-in")) then
             UIManager:show(InfoMessage:new{
                 text = T(_("Failed to fetch books:\n%1"), tostring(err)),
             })
@@ -633,12 +809,10 @@ function BookLore:browseLibrary()
 
     self.cached_books = books
 
-    local shelves = BookLoreApi:get(
-        self.server_url .. "/api/v1/shelves", self.token)
+    local shelves = self:apiCall("getShelves")
     self.cached_shelves = (type(shelves) == "table") and shelves or {}
 
-    local libraries = BookLoreApi:get(
-        self.server_url .. "/api/v1/libraries", self.token)
+    local libraries = self:apiCall("getLibraries")
     self.cached_libraries = (type(libraries) == "table") and libraries or {}
 
     self.shelf_books = {}
@@ -743,12 +917,12 @@ function BookLore:buildCoverCard(book, card_w, on_tap)
         if #meta.authors > 1 then authors = authors .. " …" end
     end
 
-    -- Try to load cover from cache (download if needed)
+    -- Try to load cover from cache (download if needed).
+    -- Guard accepts refresh_token alone: apiCall triggers a pre-emptive
+    -- refresh so the cover call has a live access token. (ref: DL-001, DL-006)
     local cover_widget = nil
-    if book.id and self.token and self.cover_cache_dir then
-        local path = BookLoreApi:downloadCover(
-            self.server_url, book.id, book.coverUpdatedOn, self.token, self.cover_cache_dir
-        )
+    if book.id and (self.token or self.refresh_token) and self.cover_cache_dir then
+        local path = self:apiCall("downloadCover", book.id, book.coverUpdatedOn, self.cover_cache_dir)
         if path then
             local ok, img = pcall(ImageWidget.new, ImageWidget, {
                 file = path,
@@ -1642,14 +1816,15 @@ function BookLore:downloadBook(book)
     self:refreshDetailView(book)
 
     UIManager:scheduleIn(0.1, function()
-        local ok, err = BookLoreApi:downloadBook(
-            self.server_url, book.id, self.token, dest, book.fileSizeKb
-        )
+        local ok, err = self:apiCall("downloadBook", book.id, dest, book.fileSizeKb)
         self._downloading_id = nil
         if ok then
             self:registerDownload(book, dest)
             self:refreshDetailView(book)
-        else
+        elseif not (err and (err:match("^HTTP 401") or err == "refresh-in-progress" or err == "not-logged-in")) then
+            -- Suppress double dialog when apiCall already surfaced auth
+            -- errors. Auto-login (DL-009, rejected) would interrupt the
+            -- reader; silent refresh in apiCall is preferred. (ref: DL-001, DL-006, DL-009)
             UIManager:show(InfoMessage:new{
                 text = T(_("Download failed:\n%1"), tostring(err)),
             })
@@ -1683,9 +1858,7 @@ function BookLore:showBookDetail(book)
     -- Cover
     local cover_widget = nil
     if book.id and self.cover_cache_dir then
-        local cover_path = BookLoreApi:downloadCover(
-            self.server_url, book.id, book.coverUpdatedOn, self.token, self.cover_cache_dir
-        )
+        local cover_path = self:apiCall("downloadCover", book.id, book.coverUpdatedOn, self.cover_cache_dir)
         if cover_path then
             local ok, img = pcall(ImageWidget.new, ImageWidget, {
                 file = cover_path,
