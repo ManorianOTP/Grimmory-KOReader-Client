@@ -91,7 +91,11 @@ function BookLoreSync:onReaderReady()
     end
 
     UIManager:scheduleIn(1, function()
-        self:pullProgress()
+        local ok, err = pcall(self.pullProgress, self)
+        if not ok then
+            logger.warn("BookLoreSync: pullProgress crashed:", tostring(err))
+            self.pulled = true
+        end
     end)
 end
 
@@ -210,7 +214,7 @@ function BookLoreSync:pullProgress()
     end
 
     local remote = book.epubProgress
-    if not remote or not remote.percentage then
+    if not remote or type(remote.percentage) ~= "number" then
         logger.dbg("BookLoreSync: no remote epubProgress, pull done")
         self.pulled = true
         return
@@ -240,7 +244,7 @@ function BookLoreSync:showConflictPrompt(remote, local_pct_100, delta)
         choice1_text = _("Jump Ahead"),
         choice1_callback = function()
             local navigated = false
-            if self_ref.cfi and not self_ref.has_pages and remote.cfi then
+            if self_ref.cfi and not self_ref.has_pages and type(remote.cfi) == "string" then
                 local ok_xp, xp = pcall(function()
                     return self_ref.cfi.cfiToXPointer(remote.cfi)
                 end)
