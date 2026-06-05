@@ -1801,6 +1801,14 @@ function BookLore:registerDownload(book, path)
 end
 
 function BookLore:refreshDetailView(book)
+    -- Preserve scroll position across a same-book rebuild (Show more / Reveal),
+    -- so the reader doesn't get bounced to the top. showBookDetail clamps and
+    -- only restores when the book is unchanged.
+    if self.detail_widget and self.detail_widget.cropping_widget
+            and self.detail_widget.cropping_widget.getScrolledOffset then
+        local off = self.detail_widget.cropping_widget:getScrolledOffset()
+        self._detail_scroll_y = off and off.y or 0
+    end
     if self.detail_widget then
         UIManager:close(self.detail_widget)
     end
@@ -1901,6 +1909,7 @@ function BookLore:showBookDetail(book)
     if not prev_book or prev_book.id ~= book.id then
         self._detail_desc_expanded = false
         self._detail_spoilers = {}
+        self._detail_scroll_y = 0
     end
 
     -- ── Local render helpers ────────────────────────────────────────
@@ -2182,7 +2191,7 @@ function BookLore:showBookDetail(book)
             rule()
             local long = #desc > 400
             if long and not self._detail_desc_expanded then
-                add(tbox((desc:sub(1, 400):gsub("%s+%S*$", "")) .. "…", 18))
+                add(tbox(util.fixUtf8(desc:sub(1, 400):gsub("%s+%S*$", ""), "") .. "…", 18))
                 add(Button:new{
                     text = _("Show more"),
                     callback = function()
@@ -2290,7 +2299,7 @@ function BookLore:showBookDetail(book)
                     end,
                 })
             else
-                add(tbox((rv.body or ""):sub(1, 300), 16))
+                add(tbox(util.fixUtf8((rv.body or ""):sub(1, 300), ""), 16))
             end
         end
         if #meta.bookReviews > 3 then
@@ -2310,6 +2319,7 @@ function BookLore:showBookDetail(book)
         self._detail_book = nil
         self._detail_desc_expanded = false
         self._detail_spoilers = {}
+        self._detail_scroll_y = 0
         -- Schedule navigation on next tick so close fully completes
         UIManager:scheduleIn(0.1, function()
             if self._back_from_detail then self._back_from_detail() end
@@ -2409,6 +2419,13 @@ function BookLore:showBookDetail(book)
         scroll_inner,
     }
     self.detail_widget.cropping_widget = scroll
+    -- Restore scroll position on a same-book rebuild (set in refreshDetailView).
+    -- Clamp to the new content height in case it shrank (Show less). initState
+    -- computes maxes lazily on first paint and won't clobber a pre-set offset.
+    if self._detail_scroll_y and self._detail_scroll_y > 0 and scroll.setScrolledOffset then
+        local max_y = math.max(0, scroll_inner:getSize().h - scroll_h)
+        scroll:setScrolledOffset(Geom:new{ x = 0, y = math.min(self._detail_scroll_y, max_y) })
+    end
 
     local frame = FrameContainer:new{
         width = screen_w,
