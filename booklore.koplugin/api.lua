@@ -54,6 +54,7 @@ function BookLoreApi:post(url, body, token)
         headers = headers,
         source = ltn12.source.string(request_body),
         sink = ltn12.sink.table(response_body),
+        redirect = false,
     }
 
     local raw = table.concat(response_body)
@@ -90,6 +91,7 @@ function BookLoreApi:get(url, token)
         method = "GET",
         headers = headers,
         sink = ltn12.sink.table(response_body),
+        redirect = false,
     }
 
     local raw = table.concat(response_body)
@@ -220,6 +222,7 @@ function BookLoreApi:downloadCover(server_url, book_id, cover_updated_on, token,
     local _, code = http.request{
         url = url,
         sink = ltn12.sink.file(f),
+        redirect = false,
     }
 
     if code ~= 200 then
@@ -302,6 +305,7 @@ function BookLoreApi:downloadBook(server_url, book_id, token, dest_path, expecte
             ["Authorization"] = "Bearer " .. token,
         },
         sink = ltn12.sink.file(f),
+        redirect = false,
     }
 
     if code ~= 200 then

@@ -1,0 +1,26 @@
+{
+  "content": [
+    {
+      "id": 1,
+      "metadata": {
+        "title": "Test Book One",
+        "authors": ["Author A"],
+        "seriesName": null
+      },
+      "fileSizeKb": 1024
+    },
+    {
+      "id": 2,
+      "metadata": {
+        "title": "Test Book Two",
+        "authors": ["Author B"],
+        "seriesName": "A Series"
+      },
+      "fileSizeKb": 512
+    }
+  ],
+  "totalPages": 1,
+  "number": 0,
+  "totalElements": 2,
+  "_captured_against": "BookLore v0.1.0"
+}

@@ -1,0 +1,13 @@
+{
+  "id": 1,
+  "status": 302,
+  "headers": { "Location": "/redirect/middle" },
+  "body": "{}",
+  "_note": "Single 302 hop served at /redirect/start. api.lua:get() returns nil,err for any non-200 status; socket.http does not follow redirects so a multi-hop chain is never observed by the client. The test asserts err contains 302.",
+  "_chain_if_followed": [
+    { "hop": 1, "from": "/redirect/start",  "status": 302, "Location": "/redirect/middle" },
+    { "hop": 2, "from": "/redirect/middle", "status": 302, "Location": "final" },
+    { "hop": 3, "from": "final",             "status": 200, "body": "{}" }
+  ],
+  "_captured_against": "BookLore v0.1.0"
+}

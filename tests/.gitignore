@@ -1,0 +1,5 @@
+# Recorded real-book fixtures are local-only; use synthetic lane for CI.
+fixtures/recorded/
+
+# busted cache
+.busted-cache/

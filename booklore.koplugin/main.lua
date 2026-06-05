@@ -796,6 +796,10 @@ function BookLore:browseLibrary()
         return
     end
 
+    if type(books) == "table" and type(books.content) == "table" then
+        books = books.content
+    end
+
     if type(books) ~= "table" or #books == 0 then
         UIManager:show(InfoMessage:new{ text = _("No books found.") })
         return
@@ -1804,7 +1808,7 @@ function BookLore:refreshDetailView(book)
 end
 
 function BookLore:downloadBook(book)
-    if not self.token then
+    if not self.token and not self.refresh_token then
         UIManager:show(InfoMessage:new{ text = _("Not logged in.") })
         return
     end

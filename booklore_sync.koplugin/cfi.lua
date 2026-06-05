@@ -97,15 +97,19 @@ end
 
 -- ── Public: initBook / clearCache ─────────────────────────────────────────────
 
-function cfi.initBook(file_path)
+-- initBook accepts an optional reader argument for testability.
+-- When reader is provided the ffi/archiver require is skipped.
+function cfi.initBook(file_path, reader)
     cfi.clearCache()
 
-    local ok, Ar = pcall(require, "ffi/archiver")
-    if not ok then
-        return nil, "ffi/archiver not available: " .. tostring(Ar)
+    if not reader then
+        local ok, Ar = pcall(require, "ffi/archiver")
+        if not ok then
+            return nil, "ffi/archiver not available: " .. tostring(Ar)
+        end
+        reader = Ar.Reader:new()
     end
 
-    local reader = Ar.Reader:new()
     local opened, open_err = pcall(function() reader:open(file_path) end)
     if not opened then
         return nil, "archiver open failed: " .. tostring(open_err)
@@ -296,37 +300,10 @@ local function walkDomForCFI(root_element, path_steps)
         local target_name = step.element_name
         local target_idx  = step.name_index
 
-        -- Count element children: absolute index (even) and per-name index
-        local abs_child_idx = 0   -- counts all child nodes (elements=even, text=odd)
-        local name_count    = 0   -- counts elements with target_name
+        local abs_child_idx = 0
+        local name_count    = 0
         local found_node    = nil
         local found_abs_idx = nil
-
-        for _, kid in ipairs(current.kids) do
-            if kid.type == "element" then
-                abs_child_idx = abs_child_idx + 2  -- elements get even indices
-                if kid.name == target_name then
-                    name_count = name_count + 1
-                    if name_count == target_idx then
-                        found_node    = kid
-                        found_abs_idx = abs_child_idx
-                    end
-                end
-            elseif kid.type == "text" then
-                abs_child_idx = abs_child_idx + 1  -- text nodes get odd indices (skip by 1 before next elem)
-                -- text nodes advance abs index but only by 1; next element gets next even
-                -- correct CFI: elements are at 2,4,6... text nodes at 1,3,5...
-                -- so after a text node abs_child_idx is odd; next element rounds up to next even
-                -- Implementation: track separately
-            end
-        end
-
-        -- Re-walk with correct even/odd accounting
-        abs_child_idx = 0
-        name_count    = 0
-        found_node    = nil
-        found_abs_idx = nil
-        local prev_was_text = false
 
         for _, kid in ipairs(current.kids) do
             if kid.type == "element" then
@@ -342,10 +319,8 @@ local function walkDomForCFI(root_element, path_steps)
                         found_abs_idx = abs_child_idx
                     end
                 end
-                prev_was_text = false
             elseif kid.type == "text" then
                 abs_child_idx = abs_child_idx + 1
-                prev_was_text = true
             end
         end
 
@@ -381,6 +356,8 @@ local function computeCFIPath(spine_href, path_steps, char_offset, text_node_ind
     if not xhtml or #xhtml == 0 then
         return nil, "XHTML not found in archive: " .. archive_path
     end
+    -- SLAXML v0.8 rejects DOCTYPE as non-whitespace root text; strip before parse.
+    xhtml = xhtml:gsub("<!DOCTYPE[^>]*>", "", 1)
 
     local ok, doc = pcall(function()
         return SLAXML:dom(xhtml, {stripWhitespace=true})
@@ -437,19 +414,15 @@ local function computeCFIPath(spine_href, path_steps, char_offset, text_node_ind
         -- In CFI, text nodes get odd indices: 1st text=1, after 1st element=3, etc.
         local target_text_idx = text_node_index or 1
         local text_count = 0
-        local text_cfi_idx = 0
         local text_content = nil
 
         for _, kid in ipairs(matched_node.kids or {}) do
             if kid.type == "text" then
-                text_cfi_idx = text_cfi_idx + 1  -- odd position
                 text_count = text_count + 1
                 if text_count == target_text_idx then
                     text_content = kid.value
                     break
                 end
-            elseif kid.type == "element" then
-                text_cfi_idx = text_cfi_idx + 2  -- even position for element
             end
         end
 
@@ -474,10 +447,7 @@ local function computeCFIPath(spine_href, path_steps, char_offset, text_node_ind
             end
             cfi_path = cfi_path .. "/" .. tostring(text_odd_idx) .. ":" .. tostring(utf16_units)
         else
-            -- Fallback: use all text content
-            local all_text = collectText(matched_node)
-            local utf16_units = byteOffsetToUtf16Units(all_text, char_offset)
-            cfi_path = cfi_path .. ":" .. tostring(utf16_units)
+            return nil, "text node " .. tostring(text_node_index) .. " not found"
         end
     end
 
@@ -583,6 +553,7 @@ function cfi.cfiToXPointer(cfi_string)
     if not xhtml or #xhtml == 0 then
         return nil, "XHTML not found: " .. archive_path
     end
+    xhtml = xhtml:gsub("<!DOCTYPE[^>]*>", "", 1)
 
     local ok, doc = pcall(function()
         return SLAXML:dom(xhtml, {stripWhitespace=true})

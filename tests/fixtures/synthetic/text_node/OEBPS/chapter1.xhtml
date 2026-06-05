@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head><title>Text Node</title></head>
+  <body>
+    <p>Hello<em>middle</em>world</p>
+    <p>Second<strong>bold</strong>paragraph</p>
+  </body>
+</html>
+<!-- Multiple text nodes within each paragraph:
+     p[1]: text()[1]="Hello", em[1], text()[2]="world"
+     p[2]: text()[1]="Second", strong[1], text()[2]="paragraph"
+     Exercises the /text()[N] form for N>1, which crengine requires
+     on reverse CFI->XPointer when multiple text siblings exist. -->

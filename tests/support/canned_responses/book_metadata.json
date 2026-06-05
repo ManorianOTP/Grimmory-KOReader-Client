@@ -1,0 +1,14 @@
+{
+  "id": 1,
+  "title": "Test Book One",
+  "fileName": "test_book_one.epub",
+  "fileSizeKb": 1024,
+  "metadata": {
+    "title": "Test Book One",
+    "authors": ["Author A"],
+    "publisher": "Test Publisher",
+    "publishedDate": "2024-01-01"
+  },
+  "epubProgress": null,
+  "_captured_against": "BookLore v0.1.0"
+}

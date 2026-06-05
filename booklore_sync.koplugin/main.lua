@@ -10,6 +10,8 @@ local ltn12 = require("ltn12")
 local json = require("json")
 local logger = require("logger")
 local _ = require("gettext")
+local Queue = require("queue")
+local NetworkMgr = require("ui/network/manager")
 
 local TOKEN_MAX_AGE = 20 * 60 * 60
 
@@ -47,9 +49,10 @@ function BookLoreSync:init()
 
     self.token = token
     self.enabled = true
-    self.last_push_time = 0
     self.book_id = nil
     self.has_pages = nil
+    self.queue = nil
+    self._flush_fn = nil
 end
 
 function BookLoreSync:onReaderReady()
@@ -70,6 +73,7 @@ function BookLoreSync:onReaderReady()
     self.pulled = false
     self.awaiting_decision = false
     self.cfi = nil
+    self.queue = Queue.new{}
 
     if not self.has_pages then
         local ok_req, cfi_mod = pcall(require, "cfi")
@@ -94,15 +98,38 @@ function BookLoreSync:onReaderReady()
         local ok, err = pcall(self.pullProgress, self)
         if not ok then
             logger.warn("BookLoreSync: pullProgress crashed:", tostring(err))
+            -- Intentional asymmetry with HTTP failure: a Lua crash here means
+            -- the network layer was never reached (e.g. a nil-index before the
+            -- http.request call). Server state is therefore unchanged, so it is
+            -- safe to open the push gate and allow the session to proceed.
+            -- Contrast with a non-200 HTTP response: the server DID respond but
+            -- with an unknown state, so the gate stays closed for the session to
+            -- avoid blindly overwriting server progress.
             self.pulled = true
         end
     end)
+    self._flush_fn = function() self:_periodicFlush() end
+    UIManager:scheduleIn(30, self._flush_fn)
 end
 
 function BookLoreSync:onCloseDocument()
     if not self.enabled or not self.book_id then return end
-    if not self.awaiting_decision then
-        self:pushProgress()
+    if self._flush_fn then UIManager:unschedule(self._flush_fn); self._flush_fn = nil end
+    if self.pulled and not self.awaiting_decision and self.queue then
+        local pct = self:getPercentage()
+        local pct_100 = math.floor(pct * 10000) / 100
+        local cfi_str = nil
+        if self.cfi and not self.has_pages then
+            local xp = self.ui.document:getXPointer()
+            if xp then
+                local ok_cfi, cfi_result = pcall(self.cfi.xpointerToCFI, xp)
+                if ok_cfi and cfi_result then
+                    cfi_str = cfi_result
+                end
+            end
+        end
+        pcall(function() self.queue:enqueue(self.book_id, self.server_url, pct_100, cfi_str) end)
+        pcall(function() self:_drainAll() end)
     end
     if self.cfi then
         self.cfi.clearCache()
@@ -112,12 +139,29 @@ end
 
 function BookLoreSync:onPageUpdate()
     if not self.enabled or not self.book_id then return end
-    if not self.pulled then return end
     if self.awaiting_decision then return end
-    if os.time() - self.last_push_time < 30 then return end
-    UIManager:scheduleIn(0.1, function()
-        self:pushProgress()
+    if not self.queue then return end
+    local pct = self:getPercentage()
+    local pct_100 = math.floor(pct * 10000) / 100
+    local cfi_str = nil
+    if self.cfi and not self.has_pages then
+        local xp = self.ui.document:getXPointer()
+        if xp then
+            local ok_cfi, cfi_result, cfi_err = pcall(self.cfi.xpointerToCFI, xp)
+            if ok_cfi and cfi_result then
+                cfi_str = cfi_result
+            else
+                local msg = ok_cfi and tostring(cfi_err) or tostring(cfi_result)
+                logger.warn("BookLoreSync: CFI generation failed:", msg)
+            end
+        end
+    end
+    local ok_q, err_q = pcall(function()
+        self.queue:enqueue(self.book_id, self.server_url, pct_100, cfi_str)
     end)
+    if not ok_q then
+        logger.warn("BookLoreSync: queue enqueue failed:", tostring(err_q))
+    end
 end
 
 function BookLoreSync:getPercentage()
@@ -125,6 +169,106 @@ function BookLoreSync:getPercentage()
         return Math.roundPercent(self.ui.paging:getLastPercent())
     else
         return Math.roundPercent(self.ui.rolling:getLastPercent())
+    end
+end
+
+function BookLoreSync:_periodicFlush()
+    if not self.enabled then return end
+    if not NetworkMgr:isWifiOn() then
+        if self._flush_fn then
+            UIManager:scheduleIn(30, self._flush_fn)
+        end
+        return
+    end
+    pcall(function() self:_drainAll() end)
+    if self._flush_fn then
+        UIManager:scheduleIn(30, self._flush_fn)
+    end
+end
+
+function BookLoreSync:_drainAll()
+    if not self.queue then return end
+    if self.queue:size() == 0 then return end
+    if not NetworkMgr:isWifiOn() then return end
+    if self.pulled and self.book_id then
+        self.queue:drainCurrentBook(self.book_id, function(entry)
+            return self:pushProgressBody(
+                entry.book_id or self.book_id,
+                entry.server_url or self.server_url,
+                entry.percentage,
+                entry.cfi
+            )
+        end)
+    end
+    self.queue:drainOthers(self.book_id, function(entry)
+        return self:pushProgressBody(
+            entry.book_id,
+            entry.server_url,
+            entry.percentage,
+            entry.cfi
+        )
+    end)
+end
+
+function BookLoreSync:pushProgressBody(book_id, server_url, percentage, cfi)
+    if not book_id or not server_url then return false end
+    local settings = LuaSettings:open(
+        DataStorage:getSettingsDir() .. "/booklore.lua"
+    )
+    local token = settings:readSetting("token")
+    if not token or token == "" then
+        logger.warn("BookLoreSync: pushProgressBody: no token")
+        return false
+    end
+
+    local body = json.encode({
+        bookId = book_id,
+        epubProgress = {
+            cfi = cfi,
+            percentage = percentage,
+        },
+    })
+
+    local sink = {}
+    local use_https = server_url:match("^https://") ~= nil
+    local request_fn = http.request
+    if use_https then
+        local ok_ssl, ssl_https = pcall(require, "ssl.https")
+        if ok_ssl then request_fn = ssl_https.request end
+    end
+    local ok_req, code = pcall(function()
+        local dummy, c = request_fn{
+            url = server_url .. "/api/v1/books/progress",
+            method = "POST",
+            headers = {
+                ["Authorization"] = "Bearer " .. token,
+                ["Content-Type"] = "application/json",
+                ["Content-Length"] = tostring(#body),
+            },
+            source = ltn12.source.string(body),
+            sink = ltn12.sink.table(sink),
+            create = function()
+                -- 3s socket timeout (DL-004) bounds connect+read so even when
+                -- the flusher fires while the user is mid-swipe, the freeze
+                -- is capped. NetworkMgr:isWifiOn() preflight already skips
+                -- this entirely when offline.
+                local s = require("socket").tcp()
+                s:settimeout(3)
+                return s
+            end,
+        }
+        return c
+    end)
+    if not ok_req then
+        logger.warn("BookLoreSync: pushProgressBody network error:", tostring(code))
+        return false
+    end
+    if code == 204 or code == 200 then
+        logger.dbg("BookLoreSync: pushed progress", percentage, "%", cfi and ("cfi=" .. cfi) or "no-cfi")
+        return true
+    else
+        logger.warn("BookLoreSync: push failed, HTTP", code)
+        return false
     end
 end
 
@@ -151,33 +295,7 @@ function BookLoreSync:pushProgress()
             end
         end
 
-        local body = json.encode({
-            bookId = self.book_id,
-            epubProgress = {
-                cfi = cfi_str,
-                percentage = pct_100,
-            },
-        })
-
-        local sink = {}
-        local dummy, code = http.request{
-            url = self.server_url .. "/api/v1/books/progress",
-            method = "POST",
-            headers = {
-                ["Authorization"] = "Bearer " .. self.token,
-                ["Content-Type"] = "application/json",
-                ["Content-Length"] = tostring(#body),
-            },
-            source = ltn12.source.string(body),
-            sink = ltn12.sink.table(sink),
-        }
-
-        if code == 204 or code == 200 then
-            self.last_push_time = os.time()
-            logger.dbg("BookLoreSync: pushed progress", pct_100, "%", cfi_str and ("cfi=" .. cfi_str) or "no-cfi")
-        else
-            logger.warn("BookLoreSync: push failed, HTTP", code)
-        end
+        self:pushProgressBody(self.book_id, self.server_url, pct_100, cfi_str)
     end)
 
     self.push_in_progress = false
@@ -200,16 +318,14 @@ function BookLoreSync:pullProgress()
     }
 
     if code ~= 200 then
-        logger.warn("BookLoreSync: pull failed, HTTP", code)
-        self.pulled = true
+        logger.warn("BookLoreSync: pull failed, HTTP", code, "-- push gate remains closed")
         return
     end
 
     local raw = table.concat(sink)
     local ok, book = pcall(json.decode, raw)
     if not ok or not book then
-        logger.warn("BookLoreSync: pull JSON decode failed")
-        self.pulled = true
+        logger.warn("BookLoreSync: pull JSON decode failed -- push gate remains closed")
         return
     end
 
@@ -217,6 +333,7 @@ function BookLoreSync:pullProgress()
     if not remote or type(remote.percentage) ~= "number" then
         logger.dbg("BookLoreSync: no remote epubProgress, pull done")
         self.pulled = true
+        UIManager:scheduleIn(0.1, function() pcall(self._drainAll, self) end)
         return
     end
 
@@ -233,6 +350,7 @@ function BookLoreSync:pullProgress()
     end
 
     self.pulled = true
+    UIManager:scheduleIn(0.1, function() pcall(self._drainAll, self) end)
 end
 
 function BookLoreSync:showConflictPrompt(remote, local_pct_100, delta)
