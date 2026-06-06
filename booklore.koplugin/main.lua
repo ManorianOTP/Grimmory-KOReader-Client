@@ -1923,7 +1923,15 @@ function BookLore:showBookDetail(book)
     local screen_w = Screen:getWidth()
     local screen_h = Screen:getHeight()
     local padding = Size.padding.large
-    local content_w = screen_w - padding * 4
+    -- Scroll body geometry: the vertical scrollbar eats getScrollbarWidth() on
+    -- the right, so the content area is screen_w minus that. We pad only on the
+    -- left (the scrollbar gives the right side its own visual margin); without
+    -- reserving the scrollbar width the content would overflow and add a
+    -- spurious horizontal scrollbar.
+    local scrollbar_w = ScrollableContainer:getScrollbarWidth()
+    local body_left_pad = padding
+    local inner_w = screen_w - scrollbar_w
+    local content_w = inner_w - body_left_pad
 
     -- Per-open transient view state. Preserved across a same-book rebuild
     -- (Show more / Reveal go through refreshDetailView), reset when the book
@@ -2314,6 +2322,11 @@ function BookLore:showBookDetail(book)
     -- ── 6. Description with Show more / Show less ───────────────────
     do
         local desc = meta.description
+        -- BookLore descriptions are HTML (<br />, <p>, entities, …); flatten to
+        -- plain text with real line breaks so TextBoxWidget renders them.
+        if type(desc) == "string" and desc ~= "" then
+            desc = util.htmlToPlainTextIfHtml(desc)
+        end
         if desc and desc ~= "" then
             rule()
             local long = #desc > 400
@@ -2526,9 +2539,10 @@ function BookLore:showBookDetail(book)
     -- ── Scrollable body between the two fixed bars ──────────────────
     local scroll_h = screen_h - top_bar:getSize().h - action_h
     local scroll_inner = FrameContainer:new{
-        width = screen_w,
+        width = inner_w,
         bordersize = 0,
-        padding = padding * 2,
+        padding = 0,
+        padding_left = body_left_pad,
         padding_top = padding,
         background = Blitbuffer.COLOR_WHITE,
         content,
