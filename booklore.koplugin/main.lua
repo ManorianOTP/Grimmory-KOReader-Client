@@ -37,6 +37,11 @@ local T = require("ffi/util").template
 
 local BookLoreApi = require("api")
 
+-- Absolute path to this plugin's directory, for loading bundled assets
+-- (icons/*.svg). Derived from this chunk's source so it works wherever the
+-- plugin is deployed on device.
+local PLUGIN_DIR = debug.getinfo(1, "S").source:sub(2):match("(.*[/\\])") or "./"
+
 local BookLore = WidgetContainer:extend{
     name = "booklore",
     is_doc_only = false,
@@ -611,6 +616,7 @@ local PREEMPTIVE_REFRESH_SECS = 50 * 60
 -- unregistered calls fail at runtime with unmapped-api-method.
 local METHOD_ARG_LAYOUT = {
     getBooks      = "token-second",
+    getBook       = "token-second",
     getShelves    = "token-second",
     getLibraries  = "token-second",
     downloadBook  = "download-book",
@@ -1896,6 +1902,24 @@ end
 --- nil-guarded; absent fields drop their row/section rather than error.
 function BookLore:showBookDetail(book)
     local meta = book.metadata or {}
+    book.metadata = meta   -- ensure enrichment below persists on the cached book
+
+    -- The list endpoint (getBooks) omits the description, so fetch the full
+    -- record once to get the blurb (and any other heavy fields the list view
+    -- drops), merging it into the cached book so reopens are instant. Guarded
+    -- by _enriched so Show more / Reveal rebuilds don't refetch.
+    if book.id and not meta._enriched and (self.token or self.refresh_token) then
+        local full = self:apiCall("getBook", book.id)
+        if type(full) == "table" and type(full.metadata) == "table" then
+            for k, v in pairs(full.metadata) do
+                if meta[k] == nil then meta[k] = v end
+            end
+            -- Mark enriched only on success, so a transient fetch failure
+            -- retries on the next open instead of permanently hiding the blurb.
+            meta._enriched = true
+        end
+    end
+
     local screen_w = Screen:getWidth()
     local screen_h = Screen:getHeight()
     local padding = Size.padding.large
@@ -1958,11 +1982,15 @@ function BookLore:showBookDetail(book)
     end
     -- Horizontal cover strip sized to content_w (mirrors buildCoverRow but
     -- computes card width from content_w, reusing buildCoverCard per card).
+    -- Always size cards on a fixed 3-column basis (not divided by the actual
+    -- count), so a strip with one or two related books shows normal-sized,
+    -- left-aligned cards instead of stretching one card across the full width.
     local function coverRow(books, on_tap)
+        local cols = 3
         local gapw = Size.padding.default
-        local n = math.min(3, #books)
+        local n = math.min(cols, #books)
         if n == 0 then return nil end
-        local card_w = math.floor((content_w - gapw * (n - 1)) / n)
+        local card_w = math.floor((content_w - gapw * (cols - 1)) / cols)
         local row = HorizontalGroup:new{ align = "top" }
         for i = 1, n do
             if i > 1 then table.insert(row, HorizontalSpan:new{ width = gapw }) end
@@ -2059,16 +2087,18 @@ function BookLore:showBookDetail(book)
         ident_add(tbox(txt, 18, { width = id_w }))
     end
     -- External ratings, directly under "Your rating", each on its own row with
-    -- an offline letter-badge "icon" (a Kindle has no network/brand-logo assets
-    -- here). No googleRating field exists in the BookLore payload, so Google is
-    -- not shown (only a googleId link, which is admin/non-reader).
+    -- a bundled SVG brand icon to the left of the name. No googleRating field
+    -- exists in the BookLore payload, so Google is not shown (only a googleId
+    -- link, which is admin/non-reader).
     do
+        local icon_sz = Screen:scaleBySize(22)
         local function pct(r) return math.floor(r / 5 * 100 + 0.5) end
         local function cnt(c)
             if not c then return "" end
             if c >= 1000 then return " (" .. fmtNum(math.floor(c / 100) / 10) .. "k)" end
             return " (" .. tostring(c) .. ")"
         end
+        -- Letter-badge fallback if the SVG asset is missing or fails to render.
         local function badge(letter)
             return FrameContainer:new{
                 bordersize = Size.border.default,
@@ -2082,32 +2112,45 @@ function BookLore:showBookDetail(book)
                 TextWidget:new{ text = letter, face = Font:getFace("cfont", 15), bold = true },
             }
         end
-        local function ratingRow(letter, label)
-            local b = badge(letter)
-            local bw = b:getSize().w
+        local function icon(name, letter)
+            local path = PLUGIN_DIR .. "icons/" .. name .. ".svg"
+            if lfs.attributes(path, "mode") == "file" then
+                local ok, img = pcall(ImageWidget.new, ImageWidget, {
+                    file = path,
+                    width = icon_sz,
+                    height = icon_sz,
+                    scale_factor = 0,
+                })
+                if ok and img then return img end
+            end
+            return badge(letter)
+        end
+        local function ratingRow(name, letter, label)
+            local ic = icon(name, letter)
+            local iw = ic:getSize().w
             ident_gap()
             ident_add(HorizontalGroup:new{
                 align = "center",
-                b,
+                ic,
                 HorizontalSpan:new{ width = Size.padding.default },
                 TextWidget:new{
                     text = label,
                     face = Font:getFace("cfont", 16),
-                    max_width = math.max(40, id_w - bw - Size.padding.default),
+                    max_width = math.max(40, id_w - iw - Size.padding.default),
                 },
             })
         end
         if meta.amazonRating then
-            ratingRow("a", "Amazon  " .. pct(meta.amazonRating) .. "%" .. cnt(meta.amazonReviewCount))
+            ratingRow("amazon", "a", "Amazon  " .. pct(meta.amazonRating) .. "%" .. cnt(meta.amazonReviewCount))
         end
         if meta.goodreadsRating then
-            ratingRow("G", "Goodreads  " .. pct(meta.goodreadsRating) .. "%" .. cnt(meta.goodreadsReviewCount))
+            ratingRow("goodreads", "G", "Goodreads  " .. pct(meta.goodreadsRating) .. "%" .. cnt(meta.goodreadsReviewCount))
         end
         if meta.hardcoverRating then
-            ratingRow("H", "Hardcover  " .. pct(meta.hardcoverRating) .. "%" .. cnt(meta.hardcoverReviewCount))
+            ratingRow("hardcover", "H", "Hardcover  " .. pct(meta.hardcoverRating) .. "%" .. cnt(meta.hardcoverReviewCount))
         end
         if meta.rating then
-            ratingRow("B", "BookLore  " .. fmtNum(meta.rating) .. "/5")
+            ratingRow("booklore", "B", "BookLore  " .. fmtNum(meta.rating) .. "/5")
         end
     end
 
@@ -2159,8 +2202,17 @@ function BookLore:showBookDetail(book)
             end
             local hgap, vgap = Size.padding.small, Size.padding.small
             local flow = VerticalGroup:new{ align = "left" }
+            -- First row leads with an inline "Genres" label, then the pills;
+            -- wrapped rows are pills only.
+            local label = TextWidget:new{
+                text = _("Genres"),
+                face = Font:getFace("cfont", 15),
+                fgcolor = Blitbuffer.gray(0.45),
+            }
             local row = HorizontalGroup:new{ align = "center" }
-            local row_w, first = 0, true
+            table.insert(row, label)
+            local row_w = label:getSize().w
+            local first = false   -- label holds the row start; first pill adds a gap
             for _, name in ipairs(cats) do
                 local c = chip(name)
                 local cw = c:getSize().w
@@ -2179,8 +2231,6 @@ function BookLore:showBookDetail(book)
             if #row > 0 then table.insert(flow, row) end
 
             gap(1)
-            add(tbox(_("Genres"), 14, { gray = 0.45 }))
-            add(VerticalSpan:new{ width = Size.padding.small })
             add(flow)
         end
     end
@@ -2213,10 +2263,19 @@ function BookLore:showBookDetail(book)
         if book.readStatus then
             infoRow(_("Read Status"), readStatusLabel(book.readStatus))
         end
+        -- Progress shape varies by BookLore version: usually an object with a
+        -- numeric .percentage, but some payloads return a bare number. Coerce
+        -- defensively — never pass a non-number to string.format.
         local prog = book.epubProgress or book.pdfProgress
             or book.cbxProgress or book.audiobookProgress
-        if prog and prog.percentage then
-            infoRow(_("Progress"), string.format("%.2f%%", prog.percentage))
+        local pct_val
+        if type(prog) == "table" and type(prog.percentage) == "number" then
+            pct_val = prog.percentage
+        elseif type(prog) == "number" then
+            pct_val = prog
+        end
+        if pct_val then
+            infoRow(_("Progress"), string.format("%.2f%%", pct_val))
         end
         if meta.publisher and meta.publisher ~= "" then
             if meta.publishedDate and meta.publishedDate ~= "" then

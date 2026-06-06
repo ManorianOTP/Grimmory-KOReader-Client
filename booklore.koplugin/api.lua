@@ -197,6 +197,16 @@ function BookLoreApi:getBooks(server_url, token)
     return self:get(url, token)
 end
 
+--- Fetch a single book with full metadata.
+-- The list endpoint (getBooks) omits description unless withDescription=true,
+-- so the detail page fetches the individual record to get the blurb (and any
+-- other heavy fields the list view drops). Arg order matches "token-second".
+function BookLoreApi:getBook(server_url, token, book_id)
+    local url = server_url .. "/api/v1/books/" .. tostring(book_id)
+        .. "?withDescription=true"
+    return self:get(url, token)
+end
+
 --- Download a book's cover thumbnail to a file.
 -- Media endpoints use ?token= query param, NOT the Authorization header.
 -- Note: BookLore may return Content-Type: application/json despite
