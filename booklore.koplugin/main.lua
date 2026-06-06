@@ -2016,7 +2016,24 @@ function BookLore:showBookDetail(book)
         face = Font:getFace("tfont", 22),
         bold = true,
     })
-    if meta.subtitle and meta.subtitle ~= "" then
+    -- Subheading: series name with "#X of Y" folded in (replaces the old
+    -- standalone bold series line below the cover).
+    if meta.seriesName and meta.seriesName ~= "" then
+        local num, tot = fmtNum(meta.seriesNumber), fmtNum(meta.seriesTotal)
+        local s = meta.seriesName
+        if num and tot then
+            s = s .. " #" .. num .. " of " .. tot
+        elseif num then
+            s = s .. " #" .. num
+        end
+        ident_gap()
+        ident_add(tbox(s, 18, { width = id_w, gray = 0.35 }))
+    end
+    -- Subtitle only if it adds something the title/series don't already say
+    -- (avoids the "Title / Title" duplicate seen for series-named books).
+    if meta.subtitle and meta.subtitle ~= ""
+            and meta.subtitle ~= (meta.title or "")
+            and meta.subtitle ~= meta.seriesName then
         ident_gap()
         ident_add(tbox(meta.subtitle, 18, { width = id_w, gray = 0.4 }))
     end
@@ -2041,6 +2058,58 @@ function BookLore:showBookDetail(book)
         ident_gap()
         ident_add(tbox(txt, 18, { width = id_w }))
     end
+    -- External ratings, directly under "Your rating", each on its own row with
+    -- an offline letter-badge "icon" (a Kindle has no network/brand-logo assets
+    -- here). No googleRating field exists in the BookLore payload, so Google is
+    -- not shown (only a googleId link, which is admin/non-reader).
+    do
+        local function pct(r) return math.floor(r / 5 * 100 + 0.5) end
+        local function cnt(c)
+            if not c then return "" end
+            if c >= 1000 then return " (" .. fmtNum(math.floor(c / 100) / 10) .. "k)" end
+            return " (" .. tostring(c) .. ")"
+        end
+        local function badge(letter)
+            return FrameContainer:new{
+                bordersize = Size.border.default,
+                radius = Size.radius.default,
+                padding_top = Size.padding.tiny,
+                padding_bottom = Size.padding.tiny,
+                padding_left = Size.padding.small,
+                padding_right = Size.padding.small,
+                margin = 0,
+                background = Blitbuffer.COLOR_WHITE,
+                TextWidget:new{ text = letter, face = Font:getFace("cfont", 15), bold = true },
+            }
+        end
+        local function ratingRow(letter, label)
+            local b = badge(letter)
+            local bw = b:getSize().w
+            ident_gap()
+            ident_add(HorizontalGroup:new{
+                align = "center",
+                b,
+                HorizontalSpan:new{ width = Size.padding.default },
+                TextWidget:new{
+                    text = label,
+                    face = Font:getFace("cfont", 16),
+                    max_width = math.max(40, id_w - bw - Size.padding.default),
+                },
+            })
+        end
+        if meta.amazonRating then
+            ratingRow("a", "Amazon  " .. pct(meta.amazonRating) .. "%" .. cnt(meta.amazonReviewCount))
+        end
+        if meta.goodreadsRating then
+            ratingRow("G", "Goodreads  " .. pct(meta.goodreadsRating) .. "%" .. cnt(meta.goodreadsReviewCount))
+        end
+        if meta.hardcoverRating then
+            ratingRow("H", "Hardcover  " .. pct(meta.hardcoverRating) .. "%" .. cnt(meta.hardcoverReviewCount))
+        end
+        if meta.rating then
+            ratingRow("B", "BookLore  " .. fmtNum(meta.rating) .. "/5")
+        end
+    end
 
     add(HorizontalGroup:new{
         align = "top",
@@ -2050,49 +2119,10 @@ function BookLore:showBookDetail(book)
     })
     prev_rendered = true
 
-    -- ── 2. Series line ──────────────────────────────────────────────
-    if meta.seriesName and meta.seriesName ~= "" then
-        local num, tot = fmtNum(meta.seriesNumber), fmtNum(meta.seriesTotal)
-        local s
-        if num and tot then
-            s = T(_("Series: %1 #%2 of %3"), meta.seriesName, num, tot)
-        elseif num then
-            s = T(_("Series: %1 #%2"), meta.seriesName, num)
-        else
-            s = T(_("Series: %1"), meta.seriesName)
-        end
-        gap(1)
-        add(tbox(s, 18, { bold = true }))
-    end
+    -- (Series number and external ratings now live in the identity column
+    -- above, grouped with the title and personal rating.)
 
-    -- ── 3. External ratings (0-5 doubles, shown as %) ───────────────
-    do
-        local function pct(r) return math.floor(r / 5 * 100 + 0.5) end
-        local function cnt(c)
-            if not c then return "" end
-            if c >= 1000 then return " (" .. fmtNum(math.floor(c / 100) / 10) .. "k)" end
-            return " (" .. tostring(c) .. ")"
-        end
-        local ext = {}
-        if meta.amazonRating then
-            table.insert(ext, "Amazon " .. pct(meta.amazonRating) .. "%" .. cnt(meta.amazonReviewCount))
-        end
-        if meta.goodreadsRating then
-            table.insert(ext, "Goodreads " .. pct(meta.goodreadsRating) .. "%" .. cnt(meta.goodreadsReviewCount))
-        end
-        if meta.hardcoverRating then
-            table.insert(ext, "Hardcover " .. pct(meta.hardcoverRating) .. "%" .. cnt(meta.hardcoverReviewCount))
-        end
-        if meta.rating then
-            table.insert(ext, "BookLore " .. fmtNum(meta.rating) .. "/5")
-        end
-        if #ext > 0 then
-            gap(1)
-            add(tbox(table.concat(ext, "  ·  "), 16))
-        end
-    end
-
-    -- ── 4. Genres (categories + tags, de-duped, plain comma list) ───
+    -- ── Genres (categories + tags, de-duped) as wrapped pill chips ──
     do
         local cats, seen = {}, {}
         local function collect(arr)
@@ -2112,8 +2142,46 @@ function BookLore:showBookDetail(book)
             cats = t
         end
         if #cats > 0 then
+            -- One bordered, rounded pill per genre, packed left-to-right and
+            -- wrapped to new rows when the next pill would exceed content_w.
+            local function chip(text)
+                return FrameContainer:new{
+                    bordersize = Size.border.default,
+                    radius = Size.radius.button,
+                    padding_top = Size.padding.small,
+                    padding_bottom = Size.padding.small,
+                    padding_left = Size.padding.default,
+                    padding_right = Size.padding.default,
+                    margin = 0,
+                    background = Blitbuffer.COLOR_WHITE,
+                    TextWidget:new{ text = text, face = Font:getFace("cfont", 15) },
+                }
+            end
+            local hgap, vgap = Size.padding.small, Size.padding.small
+            local flow = VerticalGroup:new{ align = "left" }
+            local row = HorizontalGroup:new{ align = "center" }
+            local row_w, first = 0, true
+            for _, name in ipairs(cats) do
+                local c = chip(name)
+                local cw = c:getSize().w
+                local addw = first and cw or (hgap + cw)
+                if not first and row_w + addw > content_w then
+                    table.insert(flow, row)
+                    table.insert(flow, VerticalSpan:new{ width = vgap })
+                    row = HorizontalGroup:new{ align = "center" }
+                    row_w, first, addw = 0, true, cw
+                end
+                if not first then table.insert(row, HorizontalSpan:new{ width = hgap }) end
+                table.insert(row, c)
+                row_w = row_w + addw
+                first = false
+            end
+            if #row > 0 then table.insert(flow, row) end
+
             gap(1)
-            add(tbox(T(_("Genres: %1"), table.concat(cats, ", ")), 16))
+            add(tbox(_("Genres"), 14, { gray = 0.45 }))
+            add(VerticalSpan:new{ width = Size.padding.small })
+            add(flow)
         end
     end
 
