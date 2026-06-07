@@ -2012,7 +2012,10 @@ function BookLore:showBookDetail(book)
         local row = HorizontalGroup:new{ align = "top" }
         for i, b in ipairs(books) do
             if i > 1 then table.insert(row, HorizontalSpan:new{ width = gapw }) end
-            table.insert(row, self:buildCoverCard(b, card_w, on_tap))
+            -- buildCoverCard returns (card, height); keep only the card, else
+            -- the extra return turns this into table.insert(row, card, height).
+            local card = self:buildCoverCard(b, card_w, on_tap)
+            table.insert(row, card)
         end
         local sz = row:getSize()
         if sz.w <= content_w then
