@@ -2363,7 +2363,9 @@ function BookLore:showBookDetail(book)
             if long and not self._detail_desc_expanded then
                 add(tbox(util.fixUtf8(desc:sub(1, 400):gsub("%s+%S*$", ""), "") .. "…", 18))
                 add(Button:new{
-                    text = _("Show more"),
+                    text = _("Show more") .. "  ▼",
+                    radius = Size.radius.button,
+                    padding = Size.padding.button,
                     callback = function()
                         self._detail_desc_expanded = true
                         self:refreshDetailView(self._detail_book)
@@ -2373,7 +2375,9 @@ function BookLore:showBookDetail(book)
                 add(tbox(desc, 18))
                 if long then
                     add(Button:new{
-                        text = _("Show less"),
+                        text = _("Show less") .. "  ▲",
+                        radius = Size.radius.button,
+                        padding = Size.padding.button,
                         callback = function()
                             self._detail_desc_expanded = false
                             self:refreshDetailView(self._detail_book)
