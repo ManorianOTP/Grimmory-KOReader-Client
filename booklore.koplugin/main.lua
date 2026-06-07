@@ -2,6 +2,7 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local CenterContainer = require("ui/widget/container/centercontainer")
+local ScrollableContainer = require("ui/widget/container/scrollablecontainer")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
 local UIManager = require("ui/uimanager")
@@ -35,6 +36,11 @@ local _ = require("gettext")
 local T = require("ffi/util").template
 
 local BookLoreApi = require("api")
+
+-- Absolute path to this plugin's directory, for loading bundled assets
+-- (icons/*.svg). Derived from this chunk's source so it works wherever the
+-- plugin is deployed on device.
+local PLUGIN_DIR = debug.getinfo(1, "S").source:sub(2):match("(.*[/\\])") or "./"
 
 local BookLore = WidgetContainer:extend{
     name = "booklore",
@@ -609,8 +615,10 @@ local PREEMPTIVE_REFRESH_SECS = 50 * 60
 -- Any BookLoreApi method routed through apiCall MUST be registered here --
 -- unregistered calls fail at runtime with unmapped-api-method.
 local METHOD_ARG_LAYOUT = {
-    getBooks      = "token-second",
-    getShelves    = "token-second",
+    getBooks           = "token-second",
+    getBook            = "token-second",
+    getRecommendations = "token-second",
+    getShelves         = "token-second",
     getLibraries  = "token-second",
     downloadBook  = "download-book",
     downloadCover = "download-cover",
@@ -1800,6 +1808,14 @@ function BookLore:registerDownload(book, path)
 end
 
 function BookLore:refreshDetailView(book)
+    -- Preserve scroll position across a same-book rebuild (Show more / Reveal),
+    -- so the reader doesn't get bounced to the top. showBookDetail clamps and
+    -- only restores when the book is unchanged.
+    if self.detail_widget and self.detail_widget.cropping_widget
+            and self.detail_widget.cropping_widget.getScrolledOffset then
+        local off = self.detail_widget.cropping_widget:getScrolledOffset()
+        self._detail_scroll_y = off and off.y or 0
+    end
     if self.detail_widget then
         UIManager:close(self.detail_widget)
     end
@@ -1852,109 +1868,638 @@ end
 
 -- ─── Book detail ─────────────────────────────────────────────────────
 
+--- Format a Float-ish value, dropping a trailing ".0" (e.g. 1.0 -> "1").
+local function fmtNum(x)
+    if x == nil then return nil end
+    return (tostring(x):gsub("%.0$", ""))
+end
+
+local READ_STATUS_LABEL = nil
+local function readStatusLabel(status)
+    if not READ_STATUS_LABEL then
+        READ_STATUS_LABEL = {
+            UNREAD = _("Unread"),
+            READING = _("Reading"),
+            RE_READING = _("Re-reading"),
+            READ = _("Read"),
+            PARTIALLY_READ = _("Partially read"),
+            PAUSED = _("Paused"),
+            WONT_READ = _("Won't read"),
+            ABANDONED = _("Abandoned"),
+        }
+    end
+    return READ_STATUS_LABEL[status] or status
+end
+
+--- Render an enriched, scrollable book-detail page (mirrors the BookLore web
+--- details page, reformatted for a grayscale e-ink Paperwhite).
+---
+--- Layout: fixed top bar + a single vertical ScrollableContainer + a fixed
+--- bottom action bar. All metadata is flattened into one scroll (no tabs).
+--- Read Status / Personal Rating / Shelves are DISPLAY-ONLY: api.lua exposes
+--- no write endpoints, so editing is deliberately out of scope here.
+--- "More in Series" / "More by Author" / "Reviews" are derived with ZERO extra
+--- network from self.cached_books and meta.bookReviews. Every field is
+--- nil-guarded; absent fields drop their row/section rather than error.
 function BookLore:showBookDetail(book)
     local meta = book.metadata or {}
-    local title = meta.title or book.fileName or _("Untitled")
+    book.metadata = meta   -- ensure enrichment below persists on the cached book
+
+    -- The list endpoint (getBooks) omits the description, so fetch the full
+    -- record once to get the blurb (and any other heavy fields the list view
+    -- drops), merging it into the cached book so reopens are instant. Guarded
+    -- by _enriched so Show more / Reveal rebuilds don't refetch.
+    if book.id and not meta._enriched and (self.token or self.refresh_token) then
+        local full = self:apiCall("getBook", book.id)
+        if type(full) == "table" and type(full.metadata) == "table" then
+            for k, v in pairs(full.metadata) do
+                if meta[k] == nil then meta[k] = v end
+            end
+            -- Mark enriched only on success, so a transient fetch failure
+            -- retries on the next open instead of permanently hiding the blurb.
+            meta._enriched = true
+        end
+    end
+
     local screen_w = Screen:getWidth()
     local screen_h = Screen:getHeight()
     local padding = Size.padding.large
+    -- Scroll body geometry: the vertical scrollbar eats getScrollbarWidth() on
+    -- the right, so the content area is screen_w minus that. We pad only on the
+    -- left (the scrollbar gives the right side its own visual margin); without
+    -- reserving the scrollbar width the content would overflow and add a
+    -- spurious horizontal scrollbar.
+    local scrollbar_w = ScrollableContainer:getScrollbarWidth()
+    local body_left_pad = padding
+    local inner_w = screen_w - scrollbar_w
+    local content_w = inner_w - body_left_pad
 
-    -- Cover
+    -- Per-open transient view state. Preserved across a same-book rebuild
+    -- (Show more / Reveal go through refreshDetailView), reset when the book
+    -- changes (tapping a series/author sibling).
+    local prev_book = self._detail_book
+    self._detail_book = book
+    if not prev_book or prev_book.id ~= book.id then
+        self._detail_desc_expanded = false
+        self._detail_spoilers = {}
+        self._detail_scroll_y = 0
+        self._detail_recs = nil
+        self._detail_recs_id = nil
+    end
+
+    -- Create the page widget early so the horizontally-scrollable cover strips
+    -- built below can reference it as their show_parent. cropping_widget and
+    -- the page scroll are attached near the end of this function.
+    self.detail_widget = InputContainer:new{
+        dimen = Geom:new{ w = screen_w, h = screen_h },
+    }
+
+    -- ── Local render helpers ────────────────────────────────────────
+    local content = VerticalGroup:new{ align = "left" }
+    local prev_rendered = false
+
+    local function tbox(text, size, opts)
+        opts = opts or {}
+        return TextBoxWidget:new{
+            text = text,
+            width = opts.width or content_w,
+            face = Font:getFace(opts.font or "cfont", size),
+            fgcolor = opts.gray and Blitbuffer.gray(opts.gray) or nil,
+            bold = opts.bold,
+        }
+    end
+    local function add(widget) table.insert(content, widget) end
+    local function gap(n) add(VerticalSpan:new{ width = padding * (n or 1) }) end
+    -- Horizontal separator, only between two sections that both rendered.
+    local function rule()
+        if not prev_rendered then return end
+        gap(1)
+        add(LineWidget:new{
+            dimen = Geom:new{ w = content_w, h = Size.line.thin },
+            background = Blitbuffer.gray(0.7),
+        })
+        gap(1)
+    end
+    -- Section header sized to content_w (the global buildSectionHeader is
+    -- full screen_w and self-padded; nesting it inside the padded scroll
+    -- body would double-pad it).
+    local function sectionHeader(text)
+        return FrameContainer:new{
+            width = content_w,
+            bordersize = 0,
+            padding = 0,
+            padding_top = padding,
+            padding_bottom = Size.padding.small,
+            background = Blitbuffer.COLOR_WHITE,
+            TextWidget:new{
+                text = text,
+                face = Font:getFace("tfont", 22),
+                bold = true,
+            },
+        }
+    end
+    -- Horizontal cover strip sized to content_w (mirrors buildCoverRow but
+    -- computes card width from content_w, reusing buildCoverCard per card).
+    -- Cards are sized on a fixed 3-column basis (~3 visible at once); ALL books
+    -- are laid out in one horizontal row, wrapped in a horizontally-scrollable
+    -- container so the reader can swipe sideways through the whole list (like
+    -- the web "More in Series" / "Similar Books" strips). If everything already
+    -- fits, the plain row is returned so no scrollbar is drawn.
+    local function scrollStrip(books, on_tap)
+        if not books or #books == 0 then return nil end
+        local gapw = Size.padding.default
+        local card_w = math.floor((content_w - gapw * 2) / 3)
+        local row = HorizontalGroup:new{ align = "top" }
+        for i, b in ipairs(books) do
+            if i > 1 then table.insert(row, HorizontalSpan:new{ width = gapw }) end
+            -- buildCoverCard returns (card, height); keep only the card, else
+            -- the extra return turns this into table.insert(row, card, height).
+            local card = self:buildCoverCard(b, card_w, on_tap)
+            table.insert(row, card)
+        end
+        local sz = row:getSize()
+        if sz.w <= content_w then
+            return row
+        end
+        -- Horizontal scroller. It only claims a pan that STARTS inside its area
+        -- (onScrollablePan checks ges.pos against its dimen) and children handle
+        -- events before the page's vertical scroller, so sideways swipes here
+        -- scroll the strip while swipes elsewhere scroll the page.
+        -- Add scrollbar_w to the height: ScrollableContainer reserves that much
+        -- height for the horizontal scrollbar, and without the extra room the
+        -- row would no longer fit vertically and a spurious vertical scrollbar
+        -- would appear alongside the horizontal one.
+        return ScrollableContainer:new{
+            dimen = Geom:new{ w = content_w, h = sz.h + scrollbar_w },
+            show_parent = self.detail_widget,
+            row,
+        }
+    end
+
+    -- ── 1. Header: cover (left) + identity column (right) ───────────
+    local cover_w = math.floor(screen_w * 0.34)
+    local cover_h = math.floor(cover_w * 1.45)
     local cover_widget = nil
     if book.id and self.cover_cache_dir then
         local cover_path = self:apiCall("downloadCover", book.id, book.coverUpdatedOn, self.cover_cache_dir)
         if cover_path then
             local ok, img = pcall(ImageWidget.new, ImageWidget, {
                 file = cover_path,
-                width = math.floor(screen_w * 0.4),
-                height = math.floor(screen_h * 0.3),
+                width = cover_w,
+                height = cover_h,
                 scale_factor = 0,
             })
             if ok and img then cover_widget = img end
         end
     end
+    if not cover_widget then
+        cover_widget = FrameContainer:new{
+            width = cover_w,
+            height = cover_h,
+            background = Blitbuffer.gray(0.85),
+            bordersize = 1,
+            CenterContainer:new{
+                dimen = Geom:new{ w = cover_w - 4, h = cover_h - 4 },
+                TextBoxWidget:new{
+                    text = meta.title or book.fileName or _("Untitled"),
+                    width = cover_w - 20,
+                    face = Font:getFace("cfont", 16),
+                },
+            },
+        }
+    end
 
-    local content_w = screen_w - padding * 4
-    local content = VerticalGroup:new{ align = "center" }
+    local id_w = content_w - cover_w - padding
+    local ident = VerticalGroup:new{ align = "left" }
+    local function ident_add(w) table.insert(ident, w) end
+    local function ident_gap() ident_add(VerticalSpan:new{ width = Size.padding.small }) end
 
-    -- Title
-    local title_w = TextWidget:new{
-        text = title,
-        face = Font:getFace("tfont", 24),
+    ident_add(TextBoxWidget:new{
+        text = meta.title or book.fileName or _("Untitled"),
+        width = id_w,
+        face = Font:getFace("tfont", 22),
         bold = true,
-        max_width = content_w,
-    }
-    table.insert(content, CenterContainer:new{
-        dimen = Geom:new{ w = content_w, h = title_w:getSize().h },
-        title_w,
     })
-    table.insert(content, VerticalSpan:new{ width = padding })
-
-    if cover_widget then
-        table.insert(content, CenterContainer:new{
-            dimen = Geom:new{ w = content_w, h = cover_widget:getSize().h },
-            cover_widget,
-        })
-        table.insert(content, VerticalSpan:new{ width = padding })
-    end
-
-    -- Detail lines
-    local lines = {}
-    if type(meta.authors) == "table" and #meta.authors > 0 then
-        table.insert(lines, T(_("By: %1"), table.concat(meta.authors, ", ")))
-    end
+    -- Subheading: series name with "#X of Y" folded in (replaces the old
+    -- standalone bold series line below the cover).
     if meta.seriesName and meta.seriesName ~= "" then
-        local s
-        if meta.seriesNumber and meta.seriesTotal then
-            s = T(_("Series: %1 #%2 of %3"), meta.seriesName, tostring(meta.seriesNumber), tostring(meta.seriesTotal))
-        elseif meta.seriesNumber then
-            s = T(_("Series: %1 #%2"), meta.seriesName, tostring(meta.seriesNumber))
-        else
-            s = T(_("Series: %1"), meta.seriesName)
+        local num, tot = fmtNum(meta.seriesNumber), fmtNum(meta.seriesTotal)
+        local s = meta.seriesName
+        if num and tot then
+            s = s .. " #" .. num .. " of " .. tot
+        elseif num then
+            s = s .. " #" .. num
         end
-        table.insert(lines, s)
+        ident_gap()
+        ident_add(tbox(s, 18, { width = id_w, gray = 0.35 }))
     end
-    if meta.publisher and meta.publisher ~= "" then
-        if meta.publishedDate and meta.publishedDate ~= "" then
-            table.insert(lines, T(_("Publisher: %1 (%2)"), meta.publisher, meta.publishedDate))
-        else
-            table.insert(lines, T(_("Publisher: %1"), meta.publisher))
+    -- Subtitle only if it adds something the title/series don't already say
+    -- (avoids the "Title / Title" duplicate seen for series-named books).
+    if meta.subtitle and meta.subtitle ~= ""
+            and meta.subtitle ~= (meta.title or "")
+            and meta.subtitle ~= meta.seriesName then
+        ident_gap()
+        ident_add(tbox(meta.subtitle, 18, { width = id_w, gray = 0.4 }))
+    end
+    if type(meta.authors) == "table" and #meta.authors > 0 then
+        ident_gap()
+        ident_add(tbox(T(_("By: %1"), table.concat(meta.authors, ", ")), 18, { width = id_w }))
+    end
+    if book.libraryName and book.libraryName ~= "" then
+        ident_gap()
+        ident_add(tbox(T(_("in %1"), book.libraryName), 14, { width = id_w, gray = 0.5 }))
+    end
+    -- Personal rating (display-only): filled stars up to the rating, empty
+    -- (outline) stars for the rest; "?/10" when unrated.
+    do
+        local n = math.max(0, math.min(10, book.personalRating or 0))
+        local stars = string.rep("★", n) .. string.rep("☆", 10 - n)
+        local num = (n == 0) and "?" or tostring(n)
+        ident_gap()
+        ident_add(tbox(T(_("Your rating:  %1  %2/10"), stars, num), 18, { width = id_w }))
+    end
+    -- External ratings, directly under "Your rating", each on its own row with
+    -- a bundled SVG brand icon to the left of the name. No googleRating field
+    -- exists in the BookLore payload, so Google is not shown (only a googleId
+    -- link, which is admin/non-reader).
+    do
+        local icon_sz = Screen:scaleBySize(22)
+        local function pct(r) return math.floor(r / 5 * 100 + 0.5) end
+        local function cnt(c)
+            if not c then return "" end
+            if c >= 1000 then return " (" .. fmtNum(math.floor(c / 100) / 10) .. "k)" end
+            return " (" .. tostring(c) .. ")"
         end
-    end
-    local pl = {}
-    if meta.pageCount then table.insert(pl, T(_("%1 pages"), tostring(meta.pageCount))) end
-    if meta.language and meta.language ~= "" then table.insert(pl, meta.language) end
-    if #pl > 0 then table.insert(lines, table.concat(pl, " · ")) end
-    table.insert(lines, "")
-    if book.readStatus then table.insert(lines, T(_("Status: %1"), book.readStatus)) end
-    if book.personalRating and book.personalRating > 0 then
-        table.insert(lines, T(_("Rating: %1/10"), tostring(book.personalRating)))
-    end
-    if type(book.shelves) == "table" and #book.shelves > 0 then
-        local sn = {}
-        for _, sh in ipairs(book.shelves) do
-            table.insert(sn, type(sh) == "table" and (sh.name or sh.shelfName or "?") or tostring(sh))
+        -- Letter-badge fallback if the SVG asset is missing or fails to render.
+        local function badge(letter)
+            return FrameContainer:new{
+                bordersize = Size.border.default,
+                radius = Size.radius.default,
+                padding_top = Size.padding.tiny,
+                padding_bottom = Size.padding.tiny,
+                padding_left = Size.padding.small,
+                padding_right = Size.padding.small,
+                margin = 0,
+                background = Blitbuffer.COLOR_WHITE,
+                TextWidget:new{ text = letter, face = Font:getFace("cfont", 15), bold = true },
+            }
         end
-        table.insert(lines, T(_("Shelves: %1"), table.concat(sn, ", ")))
-    end
-    table.insert(lines, "")
-    table.insert(lines, T(_("Format: %1"), book.bookType or _("Unknown")))
-    if book.fileSizeKb then
-        table.insert(lines, T(_("Size: %1"), string.format("%.1f MB", book.fileSizeKb / 1024)))
+        local function icon(name, letter)
+            local path = PLUGIN_DIR .. "icons/" .. name .. ".svg"
+            if lfs.attributes(path, "mode") == "file" then
+                local ok, img = pcall(ImageWidget.new, ImageWidget, {
+                    file = path,
+                    width = icon_sz,
+                    height = icon_sz,
+                    scale_factor = 0,
+                    -- Honor the SVG's transparent background: without alpha the
+                    -- straight-alpha SVG blits its transparent pixels as solid
+                    -- black (the whole icon renders as a black tile). With it,
+                    -- the icon composites over the white page — so any dropped-in
+                    -- brand SVG renders correctly without editing the file.
+                    alpha = true,
+                })
+                if ok and img then return img end
+            end
+            return badge(letter)
+        end
+        local function ratingRow(name, letter, label)
+            local ic = icon(name, letter)
+            local iw = ic:getSize().w
+            ident_gap()
+            ident_add(HorizontalGroup:new{
+                align = "center",
+                ic,
+                HorizontalSpan:new{ width = Size.padding.default },
+                TextWidget:new{
+                    text = label,
+                    face = Font:getFace("cfont", 16),
+                    max_width = math.max(40, id_w - iw - Size.padding.default),
+                },
+            })
+        end
+        if meta.amazonRating then
+            ratingRow("amazon", "a", "Amazon  " .. pct(meta.amazonRating) .. "%" .. cnt(meta.amazonReviewCount))
+        end
+        if meta.goodreadsRating then
+            ratingRow("goodreads", "G", "Goodreads  " .. pct(meta.goodreadsRating) .. "%" .. cnt(meta.goodreadsReviewCount))
+        end
+        if meta.hardcoverRating then
+            ratingRow("hardcover", "H", "Hardcover  " .. pct(meta.hardcoverRating) .. "%" .. cnt(meta.hardcoverReviewCount))
+        end
+        if meta.rating then
+            ratingRow("booklore", "B", "BookLore  " .. fmtNum(meta.rating) .. "/5")
+        end
     end
 
-    table.insert(content, TextBoxWidget:new{
-        text = table.concat(lines, "\n"),
-        width = content_w,
-        face = Font:getFace("cfont", 20),
+    add(HorizontalGroup:new{
+        align = "top",
+        cover_widget,
+        HorizontalSpan:new{ width = padding },
+        ident,
     })
+    prev_rendered = true
 
-    -- Action buttons
-    table.insert(content, VerticalSpan:new{ width = padding * 2 })
+    -- (Series number and external ratings now live in the identity column
+    -- above, grouped with the title and personal rating.)
+
+    -- ── Genres (categories + tags, de-duped) as wrapped pill chips ──
+    do
+        local cats, seen = {}, {}
+        local function collect(arr)
+            if type(arr) ~= "table" then return end
+            for _, c in ipairs(arr) do
+                if type(c) == "string" and c ~= "" and not seen[c:lower()] then
+                    seen[c:lower()] = true
+                    table.insert(cats, c)
+                end
+            end
+        end
+        collect(meta.categories)
+        collect(meta.tags)
+        if #cats > 12 then
+            local t = {}
+            for i = 1, 12 do t[i] = cats[i] end
+            cats = t
+        end
+        if #cats > 0 then
+            -- One bordered, rounded pill per genre, packed left-to-right and
+            -- wrapped to new rows when the next pill would exceed content_w.
+            local function chip(text)
+                return FrameContainer:new{
+                    bordersize = Size.border.default,
+                    radius = Size.radius.button,
+                    padding_top = Size.padding.small,
+                    padding_bottom = Size.padding.small,
+                    padding_left = Size.padding.default,
+                    padding_right = Size.padding.default,
+                    margin = 0,
+                    background = Blitbuffer.COLOR_WHITE,
+                    TextWidget:new{ text = text, face = Font:getFace("cfont", 15) },
+                }
+            end
+            local hgap, vgap = Size.padding.small, Size.padding.small
+            local flow = VerticalGroup:new{ align = "left" }
+            -- First row leads with an inline "Genres" label, then the pills;
+            -- wrapped rows are pills only.
+            local label = TextWidget:new{
+                text = _("Genres"),
+                face = Font:getFace("cfont", 15),
+                fgcolor = Blitbuffer.gray(0.45),
+            }
+            local row = HorizontalGroup:new{ align = "center" }
+            table.insert(row, label)
+            local row_w = label:getSize().w
+            local first = false   -- label holds the row start; first pill adds a gap
+            for _, name in ipairs(cats) do
+                local c = chip(name)
+                local cw = c:getSize().w
+                local addw = first and cw or (hgap + cw)
+                if not first and row_w + addw > content_w then
+                    table.insert(flow, row)
+                    table.insert(flow, VerticalSpan:new{ width = vgap })
+                    row = HorizontalGroup:new{ align = "center" }
+                    row_w, first, addw = 0, true, cw
+                end
+                if not first then table.insert(row, HorizontalSpan:new{ width = hgap }) end
+                table.insert(row, c)
+                row_w = row_w + addw
+                first = false
+            end
+            if #row > 0 then table.insert(flow, row) end
+
+            gap(1)
+            add(flow)
+        end
+    end
+
+    -- ── 5. Info grid (two-column label / value) ─────────────────────
+    do
+        local label_w = math.floor(content_w * 0.34)
+        local value_w = content_w - label_w - padding
+        local rows = {}
+        local function infoRow(label, value)
+            if value == nil or value == "" then return end
+            table.insert(rows, HorizontalGroup:new{
+                align = "top",
+                FrameContainer:new{
+                    width = label_w,
+                    bordersize = 0,
+                    padding = 0,
+                    TextWidget:new{
+                        text = label,
+                        face = Font:getFace("cfont", 16),
+                        fgcolor = Blitbuffer.gray(0.45),
+                        max_width = label_w,
+                    },
+                },
+                HorizontalSpan:new{ width = padding },
+                tbox(value, 16, { width = value_w }),
+            })
+        end
+
+        if book.readStatus then
+            infoRow(_("Read Status"), readStatusLabel(book.readStatus))
+        end
+        -- Progress shape varies by BookLore version: usually an object with a
+        -- numeric .percentage, but some payloads return a bare number. Coerce
+        -- defensively — never pass a non-number to string.format.
+        local prog = book.epubProgress or book.pdfProgress
+            or book.cbxProgress or book.audiobookProgress
+        local pct_val
+        if type(prog) == "table" and type(prog.percentage) == "number" then
+            pct_val = prog.percentage
+        elseif type(prog) == "number" then
+            pct_val = prog
+        end
+        if pct_val then
+            infoRow(_("Progress"), string.format("%.2f%%", pct_val))
+        end
+        if meta.publisher and meta.publisher ~= "" then
+            if meta.publishedDate and meta.publishedDate ~= "" then
+                infoRow(_("Publisher"), meta.publisher .. " (" .. meta.publishedDate .. ")")
+            else
+                infoRow(_("Publisher"), meta.publisher)
+            end
+        elseif meta.publishedDate and meta.publishedDate ~= "" then
+            infoRow(_("Published"), meta.publishedDate)
+        end
+        if meta.pageCount then infoRow(_("Pages"), tostring(meta.pageCount)) end
+        if meta.language and meta.language ~= "" then infoRow(_("Language"), meta.language) end
+        local isbn = meta.isbn13 or meta.isbn10
+        if isbn and isbn ~= "" then infoRow(_("ISBN"), tostring(isbn)) end
+        if book.bookType then infoRow(_("Format"), tostring(book.bookType)) end
+        if book.fileSizeKb then
+            infoRow(_("Size"), string.format("%.1f MB", book.fileSizeKb / 1024))
+        end
+        if type(book.shelves) == "table" and #book.shelves > 0 then
+            local sn = {}
+            for _, sh in ipairs(book.shelves) do
+                table.insert(sn, type(sh) == "table" and (sh.name or sh.shelfName or "?") or tostring(sh))
+            end
+            infoRow(_("Shelves"), table.concat(sn, ", "))
+        end
+
+        if #rows > 0 then
+            gap(1)
+            for i, r in ipairs(rows) do
+                if i > 1 then add(VerticalSpan:new{ width = Size.padding.small }) end
+                add(r)
+            end
+        end
+    end
+
+    -- ── 6. Description with Show more / Show less ───────────────────
+    do
+        local desc = meta.description
+        -- BookLore descriptions are HTML (<br />, <p>, entities, …); flatten to
+        -- plain text with real line breaks so TextBoxWidget renders them.
+        if type(desc) == "string" and desc ~= "" then
+            desc = util.htmlToPlainTextIfHtml(desc)
+        end
+        if desc and desc ~= "" then
+            rule()
+            local long = #desc > 400
+            if long and not self._detail_desc_expanded then
+                add(tbox(util.fixUtf8(desc:sub(1, 400):gsub("%s+%S*$", ""), "") .. "…", 18))
+                add(Button:new{
+                    text = _("Show more") .. "  ▼",
+                    radius = Size.radius.button,
+                    padding = Size.padding.button,
+                    callback = function()
+                        self._detail_desc_expanded = true
+                        self:refreshDetailView(self._detail_book)
+                    end,
+                })
+            else
+                add(tbox(desc, 18))
+                if long then
+                    add(Button:new{
+                        text = _("Show less") .. "  ▲",
+                        radius = Size.radius.button,
+                        padding = Size.padding.button,
+                        callback = function()
+                            self._detail_desc_expanded = false
+                            self:refreshDetailView(self._detail_book)
+                        end,
+                    })
+                end
+            end
+        end
+    end
+
+    -- Tapping a related cover opens that book's detail, chaining Back so it
+    -- returns to the book we came from (mirrors the dashboard on_tap pattern).
+    local this_book = book
+    local on_tap_detail = function(b)
+        local prev = self._back_from_detail
+        self._back_from_detail = function()
+            self._back_from_detail = prev
+            self:showBookDetail(this_book)
+        end
+        self:refreshDetailView(b)
+    end
+
+    -- ── 7. More in Series (zero network, from cached_books) ─────────
+    if self.cached_books and meta.seriesName and meta.seriesName ~= "" then
+        local sib = {}
+        for _, b in ipairs(self.cached_books) do
+            local bm = b.metadata
+            if bm and bm.seriesName == meta.seriesName and b.id ~= book.id then
+                table.insert(sib, b)
+            end
+        end
+        table.sort(sib, function(a, c)
+            local an = tonumber((a.metadata or {}).seriesNumber) or 0
+            local cn = tonumber((c.metadata or {}).seriesNumber) or 0
+            return an < cn
+        end)
+        if #sib > 0 then
+            rule()
+            add(sectionHeader(_("More in Series")))
+            local r = scrollStrip(sib, on_tap_detail)
+            if r then add(r) end
+        end
+    end
+
+    -- ── 8. Similar Books (recommendations endpoint, horizontal scroll) ──
+    -- Mirrors the web "Similar Books" strip. Fetched once per book and cached
+    -- so Show more / Reveal rebuilds don't refetch. series_ids is unused now
+    -- that this is server-driven rather than derived from the cached list.
+    if book.id and (self.token or self.refresh_token) then
+        if not self._detail_recs or self._detail_recs_id ~= book.id then
+            local recs = self:apiCall("getRecommendations", book.id)
+            local list = {}
+            if type(recs) == "table" then
+                for _, r in ipairs(recs) do
+                    if type(r) == "table" and type(r.book) == "table" then
+                        table.insert(list, r.book)
+                    end
+                end
+            end
+            self._detail_recs = list
+            self._detail_recs_id = book.id
+        end
+        if #self._detail_recs > 0 then
+            rule()
+            add(sectionHeader(_("Similar Books")))
+            local r = scrollStrip(self._detail_recs, on_tap_detail)
+            if r then add(r) end
+        end
+    end
+
+    -- ── 9. Reviews (zero network, from meta.bookReviews) ────────────
+    if type(meta.bookReviews) == "table" and #meta.bookReviews > 0 then
+        rule()
+        add(sectionHeader(_("Reviews")))
+        local nshow = math.min(3, #meta.bookReviews)
+        for i = 1, nshow do
+            local rv = meta.bookReviews[i]
+            local who = rv.reviewerName or rv.metadataProvider or _("Anonymous")
+            local head = who
+            if rv.rating then head = head .. "  " .. fmtNum(rv.rating) .. "/5" end
+            if i > 1 then gap(1) end
+            add(tbox(head, 16, { bold = true }))
+            if rv.spoiler == true and not self._detail_spoilers[i] then
+                add(tbox(T(_("[spoiler] %1"), rv.title or ""), 16))
+                local idx = i
+                add(Button:new{
+                    text = _("Reveal"),
+                    callback = function()
+                        self._detail_spoilers[idx] = true
+                        self:refreshDetailView(self._detail_book)
+                    end,
+                })
+            else
+                add(tbox(util.fixUtf8((rv.body or ""):sub(1, 300), ""), 16))
+            end
+        end
+        if #meta.bookReviews > 3 then
+            gap(1)
+            add(tbox(T(_("+%1 more reviews"), #meta.bookReviews - 3), 14, { gray = 0.5 }))
+        end
+    end
+    gap(2)
+
+    -- ── Fixed bottom action bar ─────────────────────────────────────
+    local back_action = function()
+        if self.detail_widget then
+            UIManager:close(self.detail_widget)
+            self.detail_widget = nil
+        end
+        if cover_widget and cover_widget.free then cover_widget:free() end
+        self._detail_book = nil
+        self._detail_desc_expanded = false
+        self._detail_spoilers = {}
+        self._detail_scroll_y = 0
+        -- Schedule navigation on next tick so close fully completes
+        UIManager:scheduleIn(0.1, function()
+            if self._back_from_detail then self._back_from_detail() end
+        end)
+    end
 
     local local_path = self:getLocalPath(book)
     local is_downloading = (self._downloading_id == book.id)
-
     local action_btn
     if local_path then
         action_btn = Button:new{
@@ -1989,15 +2534,7 @@ function BookLore:showBookDetail(book)
         text = _("← Back"),
         radius = Size.radius.button,
         padding = Size.padding.button,
-        callback = function()
-            UIManager:close(self.detail_widget)
-            self.detail_widget = nil
-            if cover_widget and cover_widget.free then cover_widget:free() end
-            -- Schedule navigation on next tick so close fully completes
-            UIManager:scheduleIn(0.1, function()
-                if self._back_from_detail then self._back_from_detail() end
-            end)
-        end,
+        callback = back_action,
     }
 
     local btn_row = HorizontalGroup:new{
@@ -2006,23 +2543,74 @@ function BookLore:showBookDetail(book)
         HorizontalSpan:new{ width = padding * 2 },
         action_btn,
     }
-    table.insert(content, CenterContainer:new{
-        dimen = Geom:new{ w = content_w, h = btn_row:getSize().h },
-        btn_row,
-    })
+    local action_bar = FrameContainer:new{
+        width = screen_w,
+        bordersize = 0,
+        padding = padding,
+        background = Blitbuffer.COLOR_WHITE,
+        CenterContainer:new{
+            dimen = Geom:new{ w = screen_w - padding * 2, h = btn_row:getSize().h },
+            btn_row,
+        },
+    }
+    local action_h = action_bar:getSize().h
+
+    -- ── Top bar (☰ sidebar, search, ✕ close plugin) ─────────────────
+    local top_bar = self:buildTopBar(
+        function() self:showSidebar() end,
+        function()
+            if self.detail_widget then
+                UIManager:close(self.detail_widget)
+                self.detail_widget = nil
+            end
+            self:showSearch()
+        end,
+        function() self:closeAllViews() end
+    )
+
+    -- ── Scrollable body between the two fixed bars ──────────────────
+    local scroll_h = screen_h - top_bar:getSize().h - action_h
+    local scroll_inner = FrameContainer:new{
+        width = inner_w,
+        bordersize = 0,
+        padding = 0,
+        padding_left = body_left_pad,
+        padding_top = padding,
+        background = Blitbuffer.COLOR_WHITE,
+        content,
+    }
+
+    -- (self.detail_widget was created near the top so the cover strips could
+    -- use it as show_parent.)
+    -- ScrollableContainer must be exposed as cropping_widget on the widget
+    -- passed to UIManager:show() (see KOReader bookmapwidget). Inner widget
+    -- is self[1]; never give scroll_inner a fixed height or it would clip.
+    local scroll = ScrollableContainer:new{
+        dimen = Geom:new{ w = screen_w, h = scroll_h },
+        show_parent = self.detail_widget,
+        scroll_inner,
+    }
+    self.detail_widget.cropping_widget = scroll
+    -- Restore scroll position on a same-book rebuild (set in refreshDetailView).
+    -- Clamp to the new content height in case it shrank (Show less). initState
+    -- computes maxes lazily on first paint and won't clobber a pre-set offset.
+    if self._detail_scroll_y and self._detail_scroll_y > 0 and scroll.setScrolledOffset then
+        local max_y = math.max(0, scroll_inner:getSize().h - scroll_h)
+        scroll:setScrolledOffset(Geom:new{ x = 0, y = math.min(self._detail_scroll_y, max_y) })
+    end
 
     local frame = FrameContainer:new{
         width = screen_w,
         height = screen_h,
         background = Blitbuffer.COLOR_WHITE,
         bordersize = 0,
-        padding = padding * 2,
-        padding_top = padding,
-        content,
-    }
-
-    self.detail_widget = InputContainer:new{
-        dimen = Geom:new{ w = screen_w, h = screen_h },
+        padding = 0,
+        VerticalGroup:new{
+            align = "left",
+            top_bar,
+            scroll,
+            action_bar,
+        },
     }
     table.insert(self.detail_widget, frame)
     UIManager:show(self.detail_widget)

@@ -1,0 +1,24 @@
+[
+  {
+    "book": {
+      "id": 2,
+      "metadata": {
+        "title": "Similar Book Two",
+        "authors": ["Author B"]
+      },
+      "fileSizeKb": 512
+    },
+    "similarityScore": 0.91
+  },
+  {
+    "book": {
+      "id": 3,
+      "metadata": {
+        "title": "Similar Book Three",
+        "authors": ["Author C"]
+      },
+      "fileSizeKb": 700
+    },
+    "similarityScore": 0.84
+  }
+]

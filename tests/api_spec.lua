@@ -99,6 +99,45 @@ describe("BookLoreApi", function()
         end)
     end)
 
+    describe("getBook (single, with description)", function()
+        it("fetches /books/{id} and returns the full record", function()
+            fixture = spec_helper.start_http_fixture({
+                {
+                    method = "GET",
+                    path = "/api/v1/books/1",
+                    status = 200,
+                    headers = { ["Content-Type"] = "application/json" },
+                    body_file = "book_metadata.json",
+                },
+            })
+            -- Arg order is (server_url, token, book_id) to match "token-second".
+            local data, err = BookLoreApi:getBook(fixture.base_url(), "test-token", 1)
+            assert.is_nil(err, tostring(err))
+            assert.is_table(data)
+            assert.equals(1, data.id)
+            assert.is_table(data.metadata)
+        end)
+    end)
+
+    describe("getRecommendations (similar books)", function()
+        it("fetches /books/{id}/recommendations and parses the list", function()
+            fixture = spec_helper.start_http_fixture({
+                {
+                    method = "GET",
+                    path = "/api/v1/books/1/recommendations",
+                    status = 200,
+                    headers = { ["Content-Type"] = "application/json" },
+                    body_file = "recommendations.json",
+                },
+            })
+            local data, err = BookLoreApi:getRecommendations(fixture.base_url(), "test-token", 1)
+            assert.is_nil(err, tostring(err))
+            assert.is_table(data)
+            assert.is_table(data[1])
+            assert.is_table(data[1].book)
+        end)
+    end)
+
     describe("progress GET", function()
         it("parses cfi, percentage, lastReadAt fields", function()
             fixture = spec_helper.start_http_fixture({
