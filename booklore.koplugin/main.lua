@@ -615,9 +615,10 @@ local PREEMPTIVE_REFRESH_SECS = 50 * 60
 -- Any BookLoreApi method routed through apiCall MUST be registered here --
 -- unregistered calls fail at runtime with unmapped-api-method.
 local METHOD_ARG_LAYOUT = {
-    getBooks      = "token-second",
-    getBook       = "token-second",
-    getShelves    = "token-second",
+    getBooks           = "token-second",
+    getBook            = "token-second",
+    getRecommendations = "token-second",
+    getShelves         = "token-second",
     getLibraries  = "token-second",
     downloadBook  = "download-book",
     downloadCover = "download-cover",
@@ -1942,7 +1943,16 @@ function BookLore:showBookDetail(book)
         self._detail_desc_expanded = false
         self._detail_spoilers = {}
         self._detail_scroll_y = 0
+        self._detail_recs = nil
+        self._detail_recs_id = nil
     end
+
+    -- Create the page widget early so the horizontally-scrollable cover strips
+    -- built below can reference it as their show_parent. cropping_widget and
+    -- the page scroll are attached near the end of this function.
+    self.detail_widget = InputContainer:new{
+        dimen = Geom:new{ w = screen_w, h = screen_h },
+    }
 
     -- ── Local render helpers ────────────────────────────────────────
     local content = VerticalGroup:new{ align = "left" }
@@ -1990,22 +2000,33 @@ function BookLore:showBookDetail(book)
     end
     -- Horizontal cover strip sized to content_w (mirrors buildCoverRow but
     -- computes card width from content_w, reusing buildCoverCard per card).
-    -- Always size cards on a fixed 3-column basis (not divided by the actual
-    -- count), so a strip with one or two related books shows normal-sized,
-    -- left-aligned cards instead of stretching one card across the full width.
-    local function coverRow(books, on_tap)
-        local cols = 3
+    -- Cards are sized on a fixed 3-column basis (~3 visible at once); ALL books
+    -- are laid out in one horizontal row, wrapped in a horizontally-scrollable
+    -- container so the reader can swipe sideways through the whole list (like
+    -- the web "More in Series" / "Similar Books" strips). If everything already
+    -- fits, the plain row is returned so no scrollbar is drawn.
+    local function scrollStrip(books, on_tap)
+        if not books or #books == 0 then return nil end
         local gapw = Size.padding.default
-        local n = math.min(cols, #books)
-        if n == 0 then return nil end
-        local card_w = math.floor((content_w - gapw * (cols - 1)) / cols)
+        local card_w = math.floor((content_w - gapw * 2) / 3)
         local row = HorizontalGroup:new{ align = "top" }
-        for i = 1, n do
+        for i, b in ipairs(books) do
             if i > 1 then table.insert(row, HorizontalSpan:new{ width = gapw }) end
-            local card = self:buildCoverCard(books[i], card_w, on_tap)
-            table.insert(row, card)
+            table.insert(row, self:buildCoverCard(b, card_w, on_tap))
         end
-        return row
+        local sz = row:getSize()
+        if sz.w <= content_w then
+            return row
+        end
+        -- Horizontal scroller. It only claims a pan that STARTS inside its area
+        -- (onScrollablePan checks ges.pos against its dimen) and children handle
+        -- events before the page's vertical scroller, so sideways swipes here
+        -- scroll the strip while swipes elsewhere scroll the page.
+        return ScrollableContainer:new{
+            dimen = Geom:new{ w = content_w, h = sz.h },
+            show_parent = self.detail_widget,
+            row,
+        }
     end
 
     -- ── 1. Header: cover (left) + identity column (right) ───────────
@@ -2081,18 +2102,14 @@ function BookLore:showBookDetail(book)
         ident_gap()
         ident_add(tbox(T(_("in %1"), book.libraryName), 14, { width = id_w, gray = 0.5 }))
     end
-    -- Personal rating (display-only, grayscale star bar)
+    -- Personal rating (display-only): filled stars up to the rating, empty
+    -- (outline) stars for the rest; "?/10" when unrated.
     do
         local n = math.max(0, math.min(10, book.personalRating or 0))
-        local txt
-        if n == 0 then
-            txt = _("Your rating:  ----------  (unrated)")
-        else
-            txt = _("Your rating:  ") .. string.rep("*", n) .. string.rep("-", 10 - n)
-                .. "  " .. tostring(n) .. "/10"
-        end
+        local stars = string.rep("★", n) .. string.rep("☆", 10 - n)
+        local num = (n == 0) and "?" or tostring(n)
         ident_gap()
-        ident_add(tbox(txt, 18, { width = id_w }))
+        ident_add(tbox(T(_("Your rating:  %1  %2/10"), stars, num), 18, { width = id_w }))
     end
     -- External ratings, directly under "Your rating", each on its own row with
     -- a bundled SVG brand icon to the left of the name. No googleRating field
@@ -2373,14 +2390,12 @@ function BookLore:showBookDetail(book)
     end
 
     -- ── 7. More in Series (zero network, from cached_books) ─────────
-    local series_ids = {}
     if self.cached_books and meta.seriesName and meta.seriesName ~= "" then
         local sib = {}
         for _, b in ipairs(self.cached_books) do
             local bm = b.metadata
             if bm and bm.seriesName == meta.seriesName and b.id ~= book.id then
                 table.insert(sib, b)
-                series_ids[b.id] = true
             end
         end
         table.sort(sib, function(a, c)
@@ -2391,33 +2406,33 @@ function BookLore:showBookDetail(book)
         if #sib > 0 then
             rule()
             add(sectionHeader(_("More in Series")))
-            local r = coverRow(sib, on_tap_detail)
+            local r = scrollStrip(sib, on_tap_detail)
             if r then add(r) end
         end
     end
 
-    -- ── 8. More by Author (zero network, excludes series siblings) ──
-    if self.cached_books and type(meta.authors) == "table" and #meta.authors > 0 then
-        local author_set = {}
-        for _, a in ipairs(meta.authors) do author_set[a] = true end
-        local byauthor = {}
-        for _, b in ipairs(self.cached_books) do
-            if b.id ~= book.id and not series_ids[b.id] then
-                local bm = b.metadata
-                if bm and type(bm.authors) == "table" then
-                    for _, a in ipairs(bm.authors) do
-                        if author_set[a] then
-                            table.insert(byauthor, b)
-                            break
-                        end
+    -- ── 8. Similar Books (recommendations endpoint, horizontal scroll) ──
+    -- Mirrors the web "Similar Books" strip. Fetched once per book and cached
+    -- so Show more / Reveal rebuilds don't refetch. series_ids is unused now
+    -- that this is server-driven rather than derived from the cached list.
+    if book.id and (self.token or self.refresh_token) then
+        if not self._detail_recs or self._detail_recs_id ~= book.id then
+            local recs = self:apiCall("getRecommendations", book.id)
+            local list = {}
+            if type(recs) == "table" then
+                for _, r in ipairs(recs) do
+                    if type(r) == "table" and type(r.book) == "table" then
+                        table.insert(list, r.book)
                     end
                 end
             end
+            self._detail_recs = list
+            self._detail_recs_id = book.id
         end
-        if #byauthor > 0 then
+        if #self._detail_recs > 0 then
             rule()
-            add(sectionHeader(_("More by Author")))
-            local r = coverRow(byauthor, on_tap_detail)
+            add(sectionHeader(_("Similar Books")))
+            local r = scrollStrip(self._detail_recs, on_tap_detail)
             if r then add(r) end
         end
     end
@@ -2554,9 +2569,8 @@ function BookLore:showBookDetail(book)
         content,
     }
 
-    self.detail_widget = InputContainer:new{
-        dimen = Geom:new{ w = screen_w, h = screen_h },
-    }
+    -- (self.detail_widget was created near the top so the cover strips could
+    -- use it as show_parent.)
     -- ScrollableContainer must be exposed as cropping_widget on the widget
     -- passed to UIManager:show() (see KOReader bookmapwidget). Inner widget
     -- is self[1]; never give scroll_inner a fixed height or it would clip.

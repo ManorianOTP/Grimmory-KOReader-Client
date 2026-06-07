@@ -207,6 +207,15 @@ function BookLoreApi:getBook(server_url, token, book_id)
     return self:get(url, token)
 end
 
+--- Fetch recommended ("Similar Books") for a book.
+-- Returns a list of { book = <Book>, similarityScore = <number> }.
+-- Arg order matches "token-second".
+function BookLoreApi:getRecommendations(server_url, token, book_id)
+    local url = server_url .. "/api/v1/books/" .. tostring(book_id)
+        .. "/recommendations"
+    return self:get(url, token)
+end
+
 --- Download a book's cover thumbnail to a file.
 -- Media endpoints use ?token= query param, NOT the Authorization header.
 -- Note: BookLore may return Content-Type: application/json despite
