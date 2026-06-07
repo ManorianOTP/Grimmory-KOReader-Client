@@ -2128,6 +2128,12 @@ function BookLore:showBookDetail(book)
                     width = icon_sz,
                     height = icon_sz,
                     scale_factor = 0,
+                    -- Honor the SVG's transparent background: without alpha the
+                    -- straight-alpha SVG blits its transparent pixels as solid
+                    -- black (the whole icon renders as a black tile). With it,
+                    -- the icon composites over the white page — so any dropped-in
+                    -- brand SVG renders correctly without editing the file.
+                    alpha = true,
                 })
                 if ok and img then return img end
             end
