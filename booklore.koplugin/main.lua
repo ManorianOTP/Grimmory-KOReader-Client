@@ -2025,8 +2025,12 @@ function BookLore:showBookDetail(book)
         -- (onScrollablePan checks ges.pos against its dimen) and children handle
         -- events before the page's vertical scroller, so sideways swipes here
         -- scroll the strip while swipes elsewhere scroll the page.
+        -- Add scrollbar_w to the height: ScrollableContainer reserves that much
+        -- height for the horizontal scrollbar, and without the extra room the
+        -- row would no longer fit vertically and a spurious vertical scrollbar
+        -- would appear alongside the horizontal one.
         return ScrollableContainer:new{
-            dimen = Geom:new{ w = content_w, h = sz.h },
+            dimen = Geom:new{ w = content_w, h = sz.h + scrollbar_w },
             show_parent = self.detail_widget,
             row,
         }
