@@ -10,7 +10,7 @@
 local spec_helper = {}
 
 local PLUGIN_PREFIXES = {
-    "booklore", "booklore_sync", "cfi", "api",
+    "booklore", "booklore_sync", "cfi", "api", "view",
     "logger", "luasettings", "datastorage",
     "json", "ltn12", "optmath", "gettext",
 }

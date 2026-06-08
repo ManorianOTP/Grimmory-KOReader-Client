@@ -36,6 +36,7 @@ local _ = require("gettext")
 local T = require("ffi/util").template
 
 local BookLoreApi = require("api")
+local BookLoreView = require("view")
 
 -- Absolute path to this plugin's directory, for loading bundled assets
 -- (icons/*.svg). Derived from this chunk's source so it works wherever the
@@ -78,6 +79,15 @@ function BookLore:init()
         "download_dir",
         DataStorage:getFullDataDir() .. "/booklore/downloads"
     )
+
+    self.view_state = {
+        sort = {
+            key = self.settings:readSetting("view_sort_key", "title"),
+            dir = self.settings:readSetting("view_sort_dir", "asc"),
+        },
+        combine = self.settings:readSetting("view_combine", "AND"),
+        filters = {},
+    }
 
     self.ui.menu:registerToMainMenu(self)
 end
@@ -813,12 +823,6 @@ function BookLore:browseLibrary()
         return
     end
 
-    table.sort(books, function(a, b)
-        local ta = a.metadata and a.metadata.title or ""
-        local tb = b.metadata and b.metadata.title or ""
-        return ta:lower() < tb:lower()
-    end)
-
     self.cached_books = books
 
     local shelves = self:apiCall("getShelves")
@@ -1169,6 +1173,23 @@ function BookLore:closeAllViews()
         UIManager:close(self.book_list_widget)
         self.book_list_widget = nil
     end
+    if self.view_options_widget then
+        UIManager:close(self.view_options_widget)
+        self.view_options_widget = nil
+    end
+    if self.sort_menu_widget then
+        UIManager:close(self.sort_menu_widget)
+        self.sort_menu_widget = nil
+    end
+    if self.filter_menu_widget then
+        UIManager:close(self.filter_menu_widget)
+        self.filter_menu_widget = nil
+    end
+    if self.filter_values_widget then
+        UIManager:close(self.filter_values_widget)
+        self.filter_values_widget = nil
+    end
+    -- Legacy field names kept for safety during transition
     if self.filter_menu then
         UIManager:close(self.filter_menu)
         self.filter_menu = nil
@@ -1469,9 +1490,13 @@ end
 
 -- ─── Book list ───────────────────────────────────────────────────────
 
-function BookLore:showBookList(books, title, back_callback)
+function BookLore:showBookList(base_set, title, back_callback)
     local screen_w = Screen:getWidth()
     local screen_h = Screen:getHeight()
+
+    -- Apply current view_state (sort + filters) to the base set.
+    local view_result = BookLoreView.applyView(base_set, self.view_state)
+    local n_active = BookLoreView.activeFilterCount(self.view_state)
 
     -- Build top bar
     local top_bar = self:buildTopBar(
@@ -1482,7 +1507,7 @@ function BookLore:showBookList(books, title, back_callback)
             if self.book_list_widget then
                 UIManager:close(self.book_list_widget)
             end
-            self:showSearchWithin(books, title, back_callback)
+            self:showSearchWithin(base_set, title, back_callback)
         end,
         function()  -- ✕ Close plugin
             self:closeAllViews()
@@ -1493,15 +1518,21 @@ function BookLore:showBookList(books, title, back_callback)
     -- Build menu items
     local item_table = {}
 
-    -- Filter option at top of list
+    -- Combined view-options row (sort + filter summary, single row).
+    local sort_key = self.view_state.sort and self.view_state.sort.key or "title"
+    local sort_dir = self.view_state.sort and self.view_state.sort.dir or "asc"
+    local sort_desc = BookLoreView.SORTS[sort_key] or BookLoreView.SORTS["title"]
+    local sort_label = _(sort_desc.label) .. (sort_dir == "asc" and " ↑" or " ↓")
+    local filter_label = n_active > 0 and (_("Filter: ") .. n_active .. " ▾") or _("Filter ▾")
     table.insert(item_table, {
-        text = _("Filter…"),
-        mandatory = "",
+        text      = _("Sort: ") .. sort_label,
+        mandatory = filter_label,
         book_data = nil,
-        is_filter = true,
+        is_viewopts = true,
     })
 
-    for _, book in ipairs(books) do
+    for bi = 1, #view_result do
+        local book = view_result[bi]
         local meta = book.metadata or {}
         local book_title = meta.title or book.fileName or _("Untitled")
         local authors = ""
@@ -1521,7 +1552,7 @@ function BookLore:showBookList(books, title, back_callback)
     end
 
     self._back_from_detail = function()
-        self:showBookList(books, title, back_callback)
+        self:showBookList(base_set, title, back_callback)
     end
 
     -- Guard flag: when onMenuChoice fires and navigates, prevent
@@ -1531,6 +1562,15 @@ function BookLore:showBookList(books, title, back_callback)
 
     -- Menu fills remaining height below top bar
     local menu_h = screen_h - bar_h
+
+    -- Compose the menu title: show "N of M — filtered" when filters are active.
+    local menu_title
+    if n_active > 0 then
+        menu_title = T(_("%1 (%2 of %3) — filtered"), title,
+            tostring(#view_result), tostring(#base_set))
+    else
+        menu_title = T(_("%1 (%2)"), title, tostring(#view_result))
+    end
 
     -- Create the top-level widget first so Menu can capture it as
     -- show_parent at init time. Menu:init passes show_parent down to
@@ -1544,7 +1584,7 @@ function BookLore:showBookList(books, title, back_callback)
 
     local book_menu = Menu:new{
         show_parent = self.book_list_widget,
-        title = T(_("%1 (%2)"), title, tostring(#books)),
+        title = menu_title,
         item_table = item_table,
         width = screen_w,
         height = menu_h,
@@ -1553,9 +1593,9 @@ function BookLore:showBookList(books, title, back_callback)
         is_popout = false,
         onMenuChoice = function(menu_instance, item)
             navigated = true
-            if item.is_filter then
+            if item.is_viewopts then
                 UIManager:close(self.book_list_widget)
-                self:showFilterMenu(books, title, back_callback)
+                self:showViewOptions(base_set, title, back_callback)
             elseif item.book_data then
                 UIManager:close(self.book_list_widget)
                 self:showBookDetail(item.book_data)
@@ -1582,42 +1622,39 @@ function BookLore:showBookList(books, title, back_callback)
     UIManager:setDirty("all", "ui")
 end
 
--- ─── Filters ─────────────────────────────────────────────────────────
+-- ─── View options: Sort, Filter, Clear ───────────────────────────────
 
-function BookLore:showFilterMenu(books, parent_title, back_callback)
+function BookLore:showViewOptions(base_set, parent_title, back_callback)
+    local navigated = false
+
+    self.view_options_widget = InputContainer:new{
+        dimen = Geom:new{ w = Screen:getWidth(), h = Screen:getHeight() },
+    }
+
     local item_table = {
         {
-            text = _("Author"), mandatory = "",
+            text = _("Sort…"),
+            mandatory = "",
             callback = function()
-                UIManager:close(self.filter_menu)
-                self:showFilterValues(books, parent_title, back_callback, "author")
+                navigated = true
+                UIManager:close(self.view_options_widget)
+                self:showSortMenu(base_set, parent_title, back_callback)
             end,
         },
         {
-            text = _("Series"), mandatory = "",
+            text = _("Filter…"),
+            mandatory = "",
             callback = function()
-                UIManager:close(self.filter_menu)
-                self:showFilterValues(books, parent_title, back_callback, "series")
-            end,
-        },
-        {
-            text = _("Read Status"), mandatory = "",
-            callback = function()
-                UIManager:close(self.filter_menu)
-                self:showFilterValues(books, parent_title, back_callback, "readStatus")
-            end,
-        },
-        {
-            text = _("Category"), mandatory = "",
-            callback = function()
-                UIManager:close(self.filter_menu)
-                self:showFilterValues(books, parent_title, back_callback, "category")
+                navigated = true
+                UIManager:close(self.view_options_widget)
+                self:showFilterMenu(base_set, parent_title, back_callback)
             end,
         },
     }
 
-    self.filter_menu = Menu:new{
-        title = T(_("Filter: %1"), parent_title),
+    local view_options_menu = Menu:new{
+        show_parent = self.view_options_widget,
+        title = _("View Options"),
         item_table = item_table,
         width = Screen:getWidth(),
         height = Screen:getHeight(),
@@ -1625,88 +1662,318 @@ function BookLore:showFilterMenu(books, parent_title, back_callback)
         is_borderless = true,
         is_popout = false,
         close_callback = function()
-            UIManager:close(self.filter_menu)
-            self:showBookList(books, parent_title, back_callback)
+            UIManager:close(self.view_options_widget)
+            if not navigated then
+                self:showBookList(base_set, parent_title, back_callback)
+            end
         end,
     }
-    UIManager:show(self.filter_menu)
+
+    table.insert(self.view_options_widget, view_options_menu)
+    UIManager:show(self.view_options_widget)
 end
 
-function BookLore:showFilterValues(books, parent_title, back_callback, filter_type)
-    local value_map = {}
-    for _, book in ipairs(books) do
-        local meta = book.metadata or {}
-        local values = {}
-        if filter_type == "author" then
-            if type(meta.authors) == "table" then
-                for _, a in ipairs(meta.authors) do table.insert(values, a) end
+-- ─── Sort menu ───────────────────────────────────────────────────────
+
+function BookLore:showSortMenu(base_set, parent_title, back_callback)
+    local navigated = false
+
+    self.sort_menu_widget = InputContainer:new{
+        dimen = Geom:new{ w = Screen:getWidth(), h = Screen:getHeight() },
+    }
+
+    local cur_key = self.view_state.sort and self.view_state.sort.key or "title"
+    local cur_dir = self.view_state.sort and self.view_state.sort.dir or "asc"
+
+    -- All sort keys in one flat list (essentials first, then the rest).
+    local ordered_keys = {
+        "title", "title_series", "author", "author_series", "last_read",
+        "added_on", "personal_rating", "pages", "file_name", "file_size",
+        "publisher", "published_date", "amazon_rating", "amazon_count",
+        "goodreads_rating", "goodreads_count", "hardcover_rating",
+        "hardcover_count", "random", "locked",
+    }
+
+    local item_table = {}
+    for ki = 1, #ordered_keys do
+        local k = ordered_keys[ki]
+        local sd = BookLoreView.SORTS[k]
+        -- Locked is conditional: only list it if the data carries the field.
+        if sd and not (k == "locked"
+                and not BookLoreView.isDimensionPresent(base_set, "locked")) then
+            local is_active = (k == cur_key)
+            local dir_arrow = ""
+            if is_active then
+                dir_arrow = cur_dir == "asc" and " ↑" or " ↓"
             end
-        elseif filter_type == "series" then
-            if meta.seriesName and meta.seriesName ~= "" then
-                table.insert(values, meta.seriesName)
-            end
-        elseif filter_type == "readStatus" then
-            table.insert(values, book.readStatus or "Unset")
-        elseif filter_type == "category" then
-            if type(meta.categories) == "table" then
-                for _, c in ipairs(meta.categories) do table.insert(values, c) end
-            end
-        end
-        for _, val in ipairs(values) do
-            if not value_map[val] then value_map[val] = {} end
-            table.insert(value_map[val], book)
+            item_table[#item_table+1] = {
+                text      = (is_active and "●" or "○") .. " " .. _(sd.label),
+                mandatory = dir_arrow,
+                sort_key  = k,
+            }
         end
     end
 
-    local names = {}
-    for name, _ in pairs(value_map) do table.insert(names, name) end
-    table.sort(names, function(a, b) return a:lower() < b:lower() end)
+    local sort_menu = Menu:new{
+        show_parent = self.sort_menu_widget,
+        title = _("Sort By"),
+        item_table = item_table,
+        width = Screen:getWidth(),
+        height = Screen:getHeight(),
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        onMenuChoice = function(_, item)
+            if item.sort_key then
+                local new_key = item.sort_key
+                local new_dir
+                if new_key == cur_key then
+                    -- Toggle direction on already-selected sort
+                    new_dir = cur_dir == "asc" and "desc" or "asc"
+                else
+                    new_dir = "asc"
+                end
+                self.view_state.sort = { key = new_key, dir = new_dir }
+                -- Assign fresh seed when switching to random
+                if new_key == "random" then
+                    self.view_state.sort._seed = math.floor(os.time() * 1000 + math.random(9999))
+                end
+                self.settings:saveSetting("view_sort_key", new_key)
+                self.settings:saveSetting("view_sort_dir", new_dir)
+                self.settings:flush()
+                navigated = true
+                UIManager:close(self.sort_menu_widget)
+                self:showBookList(base_set, parent_title, back_callback)
+            end
+        end,
+        close_callback = function()
+            UIManager:close(self.sort_menu_widget)
+            if not navigated then
+                self:showViewOptions(base_set, parent_title, back_callback)
+            end
+        end,
+    }
 
-    if #names == 0 then
-        UIManager:show(InfoMessage:new{ text = _("No values for this filter.") })
-        self:showBookList(books, parent_title, back_callback)
+    table.insert(self.sort_menu_widget, sort_menu)
+    UIManager:show(self.sort_menu_widget)
+end
+
+-- ─── Filter menu (dimension list) ────────────────────────────────────
+
+function BookLore:showFilterMenu(base_set, parent_title, back_callback)
+    local navigated = false
+
+    self.filter_menu_widget = InputContainer:new{
+        dimen = Geom:new{ w = Screen:getWidth(), h = Screen:getHeight() },
+    }
+
+    -- All filter dimensions in one flat list.
+    local ordered_keys = {
+        "author", "genre", "series", "readStatus", "publisher", "language",
+        "personal_rating", "published_year", "book_type", "shelf_status",
+        "file_size", "page_count", "amazon_rating", "goodreads_rating",
+        "metadata_match_score",
+    }
+
+    local filter_menu  -- forward declaration so callbacks can refresh in place
+
+    local function build_item_table()
+        local rows = {}
+        -- Pinned: Combine toggle (controls AND/OR across active dimensions).
+        rows[#rows+1] = {
+            text      = _("Combine: ") .. (self.view_state.combine or "AND"),
+            mandatory = "",
+            is_combine = true,
+        }
+        -- Pinned: Clear all filters (only while something is active).
+        if BookLoreView.activeFilterCount(self.view_state) > 0 then
+            rows[#rows+1] = {
+                text      = _("Clear all filters"),
+                mandatory = "",
+                is_clear_all = true,
+            }
+        end
+        for ki = 1, #ordered_keys do
+            local k = ordered_keys[ki]
+            local dd = BookLoreView.DIMENSIONS[k]
+            -- metadata_match_score is conditional on the data carrying it.
+            if dd and not (k == "metadata_match_score"
+                    and not BookLoreView.isDimensionPresent(base_set, k)) then
+                local dim_filters = self.view_state.filters[k]
+                local n_selected = 0
+                if dim_filters then
+                    for _, v in pairs(dim_filters) do
+                        if v then n_selected = n_selected + 1 end
+                    end
+                end
+                rows[#rows+1] = {
+                    text      = _(dd.label),
+                    mandatory = n_selected > 0 and tostring(n_selected) or "",
+                    dim_key   = k,
+                }
+            end
+        end
+        return rows
+    end
+
+    -- Refresh the menu in place (no close/reshow). Reshowing this same widget
+    -- would let its deferred close_callback fire AFTER the new menu is shown,
+    -- closing it and dropping to the home screen — so we mutate item_table
+    -- instead, mirroring the multi-select value picker.
+    local function refresh_in_place()
+        if filter_menu.switchItemTable then
+            local cur_item = (filter_menu.page - 1) * (filter_menu.perpage or 10) + 1
+            filter_menu:switchItemTable(nil, build_item_table(), cur_item)
+        end
+    end
+
+    filter_menu = Menu:new{
+        show_parent = self.filter_menu_widget,
+        title = _("Filter By"),
+        item_table = build_item_table(),
+        width = Screen:getWidth(),
+        height = Screen:getHeight(),
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        onMenuChoice = function(_, item)
+            if item.is_combine then
+                self.view_state.combine = (self.view_state.combine == "AND") and "OR" or "AND"
+                self.settings:saveSetting("view_combine", self.view_state.combine)
+                self.settings:flush()
+                refresh_in_place()
+                return
+            end
+            if item.is_clear_all then
+                self.view_state.filters = {}
+                refresh_in_place()
+                return
+            end
+            if item.dim_key then
+                navigated = true
+                UIManager:close(self.filter_menu_widget)
+                self:showFilterValues(base_set, parent_title, back_callback, item.dim_key)
+            end
+        end,
+        close_callback = function()
+            UIManager:close(self.filter_menu_widget)
+            if not navigated then
+                self:showViewOptions(base_set, parent_title, back_callback)
+            end
+        end,
+    }
+
+    table.insert(self.filter_menu_widget, filter_menu)
+    UIManager:show(self.filter_menu_widget)
+end
+
+-- ─── Filter values (multi-select checkmark picker) ───────────────────
+
+function BookLore:showFilterValues(base_set, parent_title, back_callback, dim_key)
+    local navigated = false
+
+    local dd = BookLoreView.DIMENSIONS[dim_key]
+    if not dd then
+        UIManager:show(InfoMessage:new{ text = _("Unknown filter dimension.") })
+        self:showFilterMenu(base_set, parent_title, back_callback)
         return
     end
 
-    local item_table = {}
-    for _, name in ipairs(names) do
-        local subset = value_map[name]
-        table.insert(item_table, {
-            text = name,
-            mandatory = tostring(#subset),
-            callback = function()
-                UIManager:close(self.filter_values_menu)
-                if filter_type == "series" then
-                    table.sort(subset, function(a, b)
-                        local na = (a.metadata or {}).seriesNumber or 999
-                        local nb = (b.metadata or {}).seriesNumber or 999
-                        return na < nb
-                    end)
-                end
-                self:showBookList(subset, name, function()
-                    self:showFilterValues(books, parent_title, back_callback, filter_type)
-                end)
-            end,
-        })
+    -- Ensure dim entry exists in view_state.filters
+    if not self.view_state.filters[dim_key] then
+        self.view_state.filters[dim_key] = {}
     end
 
-    local filter_label = filter_type:sub(1,1):upper() .. filter_type:sub(2)
-    if filter_type == "readStatus" then filter_label = _("Read Status") end
+    local function build_value_rows()
+        local facets = BookLoreView.computeFacetCounts(base_set, self.view_state, dim_key)
+        local rows = {}
 
-    self.filter_values_menu = Menu:new{
-        title = filter_label,
-        item_table = item_table,
+        -- Pinned: Select all / Clear
+        rows[#rows+1] = {
+            text      = _("Select all"),
+            mandatory = "",
+            is_select_all = true,
+        }
+        rows[#rows+1] = {
+            text      = _("Clear (this filter)"),
+            mandatory = "",
+            is_clear_dim = true,
+        }
+
+        for _, entry in ipairs(facets.ordered) do
+            local selected = self.view_state.filters[dim_key][entry.value] == true
+            rows[#rows+1] = {
+                text      = (selected and "☑ " or "☐ ") .. entry.label,
+                mandatory = tostring(entry.count),
+                value_key = entry.value,
+            }
+        end
+
+        if #rows == 2 then
+            -- Only the two pinned rows, no values available
+            rows[#rows+1] = {
+                text      = _("(No values available)"),
+                mandatory = "",
+                is_empty  = true,
+            }
+        end
+
+        return rows
+    end
+
+    local filter_values_menu
+    self.filter_values_widget = InputContainer:new{
+        dimen = Geom:new{ w = Screen:getWidth(), h = Screen:getHeight() },
+    }
+
+    filter_values_menu = Menu:new{
+        show_parent = self.filter_values_widget,
+        title = _(dd.label),
+        item_table = build_value_rows(),
         width = Screen:getWidth(),
         height = Screen:getHeight(),
         covers_fullscreen = true,
         is_borderless = true,
         is_popout = false,
+        onMenuChoice = function(_, item)
+            if item.is_empty then return end
+            if item.is_select_all then
+                -- Select all values currently visible in facets
+                local facets = BookLoreView.computeFacetCounts(base_set, self.view_state, dim_key)
+                for _, entry in ipairs(facets.ordered) do
+                    self.view_state.filters[dim_key][entry.value] = true
+                end
+            elseif item.is_clear_dim then
+                self.view_state.filters[dim_key] = {}
+            elseif item.value_key then
+                local cur = self.view_state.filters[dim_key][item.value_key]
+                self.view_state.filters[dim_key][item.value_key] = not cur
+            end
+
+            -- Refresh picker in-place (preserves scroll position; no close/reopen).
+            -- Falls back gracefully if switchItemTable is not available.
+            local new_rows = build_value_rows()
+            if filter_values_menu.switchItemTable then
+                local cur_item = (filter_values_menu.page - 1) * (filter_values_menu.perpage or 10) + 1
+                filter_values_menu:switchItemTable(nil, new_rows, cur_item)
+            else
+                -- Fallback: close and reopen (scroll jump accepted)
+                navigated = true
+                UIManager:close(self.filter_values_widget)
+                self:showFilterValues(base_set, parent_title, back_callback, dim_key)
+            end
+        end,
         close_callback = function()
-            UIManager:close(self.filter_values_menu)
-            self:showFilterMenu(books, parent_title, back_callback)
+            UIManager:close(self.filter_values_widget)
+            if not navigated then
+                -- Apply-on-close: heavy book-list re-render happens here.
+                self:showFilterMenu(base_set, parent_title, back_callback)
+            end
         end,
     }
-    UIManager:show(self.filter_values_menu)
+
+    table.insert(self.filter_values_widget, filter_values_menu)
+    UIManager:show(self.filter_values_widget)
 end
 
 -- ─── Search ──────────────────────────────────────────────────────────
