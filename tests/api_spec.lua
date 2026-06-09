@@ -214,6 +214,62 @@ describe("BookLoreApi", function()
         end)
     end)
 
+    describe("findCachedCover (offline cover probe)", function()
+        local lfs = require("lfs")
+        local cache_dir
+
+        before_each(function()
+            local base = os.getenv("TMPDIR") or "/tmp"
+            cache_dir = base .. "/booklore_covers_" .. tostring(os.time()) ..
+                        "_" .. tostring(math.random(99999))
+            lfs.mkdir(cache_dir)
+        end)
+
+        after_each(function()
+            for entry in lfs.dir(cache_dir) do
+                if entry ~= "." and entry ~= ".." then
+                    os.remove(cache_dir .. "/" .. entry)
+                end
+            end
+            lfs.rmdir(cache_dir)
+        end)
+
+        it("returns nil when no cover is cached", function()
+            assert.is_nil((BookLoreApi:findCachedCover(7, "2024-01-01", cache_dir)))
+        end)
+
+        it("agrees with downloadCover on the filename scheme", function()
+            -- Regression lock: offline mode resolves covers through this probe,
+            -- so it must find the exact file downloadCover writes. GIF magic is
+            -- ASCII ("GIF8"), so the body survives the fixture's JSON transport
+            -- (jpg/png magic bytes would not) and is sniffed/stored as .gif.
+            fixture = spec_helper.start_http_fixture({
+                {
+                    method = "GET",
+                    path = "/api/v1/media/book/7/thumbnail",
+                    status = 200,
+                    headers = { ["Content-Type"] = "image/gif" },
+                    body = "GIF89a-fake-gif-bytes",
+                    repeat_ = 1,
+                },
+            })
+            local dl_path, err = BookLoreApi:downloadCover(
+                fixture.base_url(), 7, "2024-01-01T00:00:00Z", "test-token", cache_dir)
+            assert.is_truthy(dl_path, tostring(err))
+
+            local cached = BookLoreApi:findCachedCover(7, "2024-01-01T00:00:00Z", cache_dir)
+            assert.equals(dl_path, cached,
+                "offline probe must resolve the exact file downloadCover wrote")
+        end)
+
+        it("does not match a cover cached under a different coverUpdatedOn stamp", function()
+            local f = assert(io.open(cache_dir .. "/cover_7_old.jpg", "wb"))
+            f:write("\xFF\xD8")
+            f:close()
+            assert.is_nil((BookLoreApi:findCachedCover(7, "new", cache_dir)))
+        end)
+    end)
+
     describe("HTTP redirect handling", function()
         it("returns a typed error for 302 responses (socket.http does not follow redirects)", function()
             -- api.lua:get() does not follow redirects; 302 is treated as a non-200 error.

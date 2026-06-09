@@ -1,17 +1,32 @@
 --[[
-    Per-book offline progress queue.
+    Per-(account, book) offline progress queue.
 
     Page-turn handler writes here instead of calling HTTP. The periodic flusher
     and book-open drain in main.lua pop entries when network is back. Entries
-    are latest-wins per book_id (overwrite on enqueue) so we never push stale
-    intermediate progress.
+    are latest-wins per (username, book_id) — a rapid burst of page turns
+    collapses to one queued entry, the latest — while different accounts'
+    progress for the same book occupies separate slots, so on a shared device
+    one reader's undrained offline progress is never overwritten by another's.
 
     Persistence: LuaSettings file at DataStorage:getSettingsDir() ..
     "/booklore_sync_queue.lua" (DL-001). Survives reader crash / reboot.
 
-    Schema per entry: { server_url, percentage, cfi, enqueued_at }
-    (book_id is the table key, tostring()-coerced so JSON-encoding round-trips
-    cleanly via the dkjson stub).
+    Key: username .. "\n" .. book_id ("\n" cannot occur in a BookLore
+    username; nil username keys under ""). Schema per entry:
+    { book_id, server_url, percentage, cfi, username, enqueued_at }.
+    username tags the account that produced the progress; a drain only pushes
+    an entry while that account is logged in. Unowned entries (nil username)
+    push under whatever account is current.
+
+    Legacy migration: pre-composite-schema entries on disk are keyed by bare
+    book_id. Lookups fall back to the bare key, and an enqueue replaces the
+    bare entry only when the enqueuing account owns it, so another account's
+    undrained legacy progress survives the upgrade.
+
+    Non-goal: the key has no server component. Entries store their server_url
+    and always push to it (a drain under the wrong server's token gets a 401
+    and stays queued), but one username switching servers with undrained
+    progress for the same book_id collapses to the latest entry.
 ]]
 local DataStorage = require("datastorage")
 local LuaSettings = require("luasettings")
@@ -27,34 +42,70 @@ function Queue.new(opts)
     return setmetatable({ _store = store }, Queue)
 end
 
-function Queue:enqueue(book_id, server_url, percentage, cfi)
-    local key = tostring(book_id)
-    self._store.data[key] = {
+-- One slot per (account, book). "\n" is unambiguous because BookLore rejects
+-- newlines in usernames; a nil username keys under "".
+local function entryKey(username, book_id)
+    return (username or "") .. "\n" .. tostring(book_id)
+end
+
+-- An entry is owned by `current_username` when it has no stored username
+-- (unowned: pre-upgrade or enqueued while logged out, pushes under any
+-- account) or its username matches.
+local function ownedBy(entry, current_username)
+    return entry.username == nil or entry.username == current_username
+end
+
+function Queue:enqueue(book_id, server_url, percentage, cfi, username)
+    -- Supersede a pre-composite-schema entry (bare key) for this book only if
+    -- the enqueuing account owns it; another account's undrained legacy
+    -- progress must survive.
+    local legacy_key = tostring(book_id)
+    local legacy = self._store.data[legacy_key]
+    if legacy and ownedBy(legacy, username) then
+        self._store.data[legacy_key] = nil
+    end
+    self._store.data[entryKey(username, book_id)] = {
         book_id      = book_id,
         server_url   = server_url,
         percentage   = percentage,
         cfi          = cfi,
+        username     = username,
         enqueued_at  = os.time(),
     }
     self._store:flush()
 end
 
-function Queue:drainCurrentBook(book_id, push_fn)
-    local key = tostring(book_id)
-    local entry = self._store.data[key]
-    if not entry then return end
-    local ok, result = pcall(push_fn, entry)
-    if ok and result then
-        self._store.data[key] = nil
-        self._store:flush()
+function Queue:drainCurrentBook(book_id, current_username, push_fn)
+    -- The current book's progress can live in up to three slots: the legacy
+    -- bare key, the unowned key (enqueued with no username), and this
+    -- account's key. Drain oldest-first so a stale slot never pushes after a
+    -- fresher one (bare predates unowned predates owned: usernames are only
+    -- ever gained over time, never unset).
+    local keys = { tostring(book_id), entryKey(nil, book_id) }
+    if current_username ~= nil then
+        keys[#keys + 1] = entryKey(current_username, book_id)
+    end
+    for _, key in ipairs(keys) do
+        local entry = self._store.data[key]
+        if entry and ownedBy(entry, current_username) then
+            local ok, result = pcall(push_fn, entry)
+            if ok and result then
+                self._store.data[key] = nil
+                self._store:flush()
+            end
+        end
     end
 end
 
-function Queue:drainOthers(current_book_id, push_fn)
-    local skip_key = current_book_id and tostring(current_book_id) or nil
+function Queue:drainOthers(current_book_id, current_username, push_fn)
+    local skip_book = current_book_id and tostring(current_book_id) or nil
     local to_remove = {}
     for key, entry in pairs(self._store.data) do
-        if key ~= skip_key then
+        -- The current book is skipped by entry content, not key shape, so the
+        -- push-after-pull gate also covers its legacy/unowned slots — those
+        -- belong to drainCurrentBook, which main.lua gates on the pull.
+        local is_current_book = skip_book and tostring(entry.book_id) == skip_book
+        if not is_current_book and ownedBy(entry, current_username) then
             local ok, result = pcall(push_fn, entry)
             if ok and result then
                 to_remove[#to_remove + 1] = key
@@ -69,8 +120,12 @@ function Queue:drainOthers(current_book_id, push_fn)
     end
 end
 
-function Queue:peek(book_id)
-    return self._store.data[tostring(book_id)]
+-- Look up the queued entry for (username, book_id), falling back to the
+-- unowned slots (nil-username key, then legacy bare key).
+function Queue:peek(book_id, username)
+    return self._store.data[entryKey(username, book_id)]
+        or self._store.data[entryKey(nil, book_id)]
+        or self._store.data[tostring(book_id)]
 end
 
 function Queue:size()

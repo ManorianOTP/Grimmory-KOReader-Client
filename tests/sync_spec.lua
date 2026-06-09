@@ -460,3 +460,212 @@ describe("BookLoreSync offline queue", function()
             "queue entry must remain intact when pull fails")
     end)
 end)
+
+describe("BookLoreSync token-independent capture & per-account drain", function()
+    local settings_dir3
+    local fake_reader_ui = require("fake_reader_ui")
+
+    before_each(function()
+        spec_helper.setup()
+        -- token = "" simulates an expired / cleared access token.
+        settings_dir3 = fake_settings.create({
+            server_url = "http://127.0.0.1",
+            token = "",
+            token_time = 0,
+            downloads = {
+                ["/books/test.epub"] = { path = "/books/test.epub", server_id = 99, server_url = nil },
+            },
+        })
+        local datastorage = require("datastorage")
+        datastorage._set_dir(settings_dir3.dir)
+        BookLoreSync = require("booklore_sync")
+        ui = fake_reader_ui.new({ file = "/books/test.epub", book_id = 99 })
+    end)
+
+    after_each(function()
+        if fixture then fixture.stop(); fixture = nil end
+        settings_dir3.cleanup()
+        local nm = require("ui/network/manager")
+        nm._reset()
+        spec_helper.teardown()
+    end)
+
+    it("init keeps capture enabled when the token is absent/expired", function()
+        local sync = BookLoreSync:new()
+        sync.ui = ui
+        sync:init()
+        assert.is_true(sync.enabled,
+            "capture must stay enabled without a live token (decoupled from token)")
+        assert.is_true(sync.token == nil or sync.token == "",
+            "no live token is stored")
+    end)
+
+    it("pullProgress with no token does not crash and keeps the push gate closed", function()
+        -- No HTTP fixture on purpose. "Never reaches the network" is proven by
+        -- the guard's log line: pullProgress returns at the no-token guard, so
+        -- the request code below it is unreachable. (A silent connection-refused
+        -- would NOT fail the assertions, so the log assertion is load-bearing.)
+        local sync = BookLoreSync:new()
+        sync.ui = ui
+        sync.server_url = "http://127.0.0.1"
+        sync.token = nil
+        sync.enabled = true
+        sync.book_id = 99
+        sync.pulled = false
+        sync.has_pages = true
+        sync.awaiting_decision = false
+        sync.cfi = nil
+        sync.queue = require("queue").new{}
+        sync.queue:enqueue(99, "http://127.0.0.1", 42.0, nil, "alice")
+
+        sync:pullProgress()
+
+        assert.is_false(sync.pulled,
+            "no-token pull must leave the gate closed (nothing was pulled)")
+        local logger = require("logger")
+        assert.is_true(logger.has("warn", "no token, skipping pull"),
+            "the no-token guard must fire before any network code")
+        assert.is_false(logger.has("dbg", "pushed progress"))
+        assert.equals(1, sync.queue:size(),
+            "queued entry stays untouched (sanity check; pull never drains)")
+    end)
+
+    it("drain pushes only entries owned by the logged-in account", function()
+        fixture = spec_helper.start_http_fixture({
+            { method = "POST", path = "/api/v1/books/progress", status = 204, headers = {}, body = "", repeat_ = 5 },
+        })
+        local settings = require("luasettings"):open(settings_dir3.dir .. "/booklore.lua")
+        settings:saveSetting("username", "alice")
+        settings:saveSetting("token", "alice-token")
+        settings:flush()
+
+        local nm = require("ui/network/manager"); nm._set_wifi(true)
+
+        local sync = BookLoreSync:new()
+        sync.ui = ui
+        sync.server_url = fixture.base_url()
+        sync.token = "alice-token"
+        sync.enabled = true
+        sync.book_id = 99
+        sync.pulled = true
+        sync.has_pages = true
+        sync.awaiting_decision = false
+        sync.queue = require("queue").new{}
+        sync.queue:enqueue(88, fixture.base_url(), 30.0, nil, "alice")
+        sync.queue:enqueue(77, fixture.base_url(), 60.0, nil, "bob")
+
+        sync:_drainAll()
+
+        assert.is_nil(sync.queue:peek(88, "alice"),
+            "alice's entry should push and be removed while alice is logged in")
+        assert.not_nil(sync.queue:peek(77, "bob"),
+            "bob's entry must stay queued until bob is logged in")
+        assert.equals(1, sync.queue:size())
+    end)
+
+    it("keeps both accounts' progress when they queue the same book", function()
+        -- The multi-user guarantee at the queue layer: latest-wins applies
+        -- per (account, book), so bob reading the same book must not destroy
+        -- alice's undrained offline progress.
+        local q = require("queue").new{}
+        q:enqueue(99, "http://127.0.0.1", 42.0, nil, "alice")
+        q:enqueue(99, "http://127.0.0.1", 60.0, nil, "bob")
+
+        assert.equals(2, q:size(), "one slot per account, not one per book")
+        assert.equals(42.0, q:peek(99, "alice").percentage)
+        assert.equals(60.0, q:peek(99, "bob").percentage)
+
+        -- Latest-wins still collapses within one account.
+        q:enqueue(99, "http://127.0.0.1", 55.0, nil, "alice")
+        assert.equals(2, q:size())
+        assert.equals(55.0, q:peek(99, "alice").percentage)
+    end)
+
+    it("enqueue supersedes only the enqueuing account's legacy bare-key entry", function()
+        local q = require("queue").new{}
+        -- Seed pre-composite-schema entries the way old deployments wrote
+        -- them: bare book_id keys, directly in the on-disk store.
+        q._store.data["77"] = { book_id = 77, server_url = "http://127.0.0.1",
+            percentage = 10.0, username = "alice", enqueued_at = 0 }
+        q._store.data["88"] = { book_id = 88, server_url = "http://127.0.0.1",
+            percentage = 20.0, username = "alice", enqueued_at = 0 }
+        q._store:flush()
+
+        -- Alice re-queues her own book: the legacy slot is superseded.
+        q:enqueue(77, "http://127.0.0.1", 50.0, nil, "alice")
+        assert.equals(50.0, q:peek(77, "alice").percentage)
+        assert.is_nil(q._store.data["77"], "alice's legacy slot is replaced")
+
+        -- Bob queues a book that still holds alice's legacy progress:
+        -- alice's entry must survive.
+        q:enqueue(88, "http://127.0.0.1", 70.0, nil, "bob")
+        assert.equals(70.0, q:peek(88, "bob").percentage)
+        assert.equals(20.0, q._store.data["88"].percentage,
+            "bob's enqueue must not destroy alice's legacy entry")
+    end)
+
+    it("a legacy bare-key entry for the current book stays gated until pull", function()
+        fixture = spec_helper.start_http_fixture({
+            { method = "POST", path = "/api/v1/books/progress", status = 204, headers = {}, body = "", repeat_ = 2 },
+        })
+        local settings = require("luasettings"):open(settings_dir3.dir .. "/booklore.lua")
+        settings:saveSetting("username", "alice")
+        settings:saveSetting("token", "fresh-token")
+        settings:flush()
+
+        local nm = require("ui/network/manager"); nm._set_wifi(true)
+
+        local sync = BookLoreSync:new()
+        sync.ui = ui
+        sync.server_url = fixture.base_url()
+        sync.token = "fresh-token"
+        sync.enabled = true
+        sync.book_id = 99
+        sync.pulled = false
+        sync.has_pages = true
+        sync.awaiting_decision = false
+        sync.queue = require("queue").new{}
+        -- Pre-upgrade on-disk entry for the book currently open.
+        sync.queue._store.data["99"] = { book_id = 99, server_url = fixture.base_url(),
+            percentage = 33.0, enqueued_at = 0 }
+        sync.queue._store:flush()
+
+        sync:_drainAll()
+        assert.equals(1, sync.queue:size(),
+            "current-book legacy entry must respect the push-after-pull gate")
+
+        sync.pulled = true
+        sync:_drainAll()
+        assert.equals(0, sync.queue:size(),
+            "after the pull, drainCurrentBook drains the legacy slot too")
+    end)
+
+    it("a legacy (no-username) entry drains under the current account", function()
+        fixture = spec_helper.start_http_fixture({
+            { method = "POST", path = "/api/v1/books/progress", status = 204, headers = {}, body = "", repeat_ = 2 },
+        })
+        local settings = require("luasettings"):open(settings_dir3.dir .. "/booklore.lua")
+        settings:saveSetting("username", "alice")
+        settings:saveSetting("token", "fresh-token")
+        settings:flush()
+
+        local nm = require("ui/network/manager"); nm._set_wifi(true)
+
+        local sync = BookLoreSync:new()
+        sync.ui = ui
+        sync.server_url = fixture.base_url()
+        sync.token = "fresh-token"
+        sync.enabled = true
+        sync.book_id = 99
+        sync.pulled = true
+        sync.has_pages = true
+        sync.awaiting_decision = false
+        sync.queue = require("queue").new{}
+        sync.queue:enqueue(55, fixture.base_url(), 12.0, nil, nil)  -- legacy: no username
+
+        sync:_drainAll()
+
+        assert.equals(0, sync.queue:size(),
+            "legacy entries push under whatever account is current")
+    end)
+end)
