@@ -37,6 +37,7 @@ local T = require("ffi/util").template
 
 local BookLoreApi = require("api")
 local BookLoreView = require("view")
+local LibraryCache = require("library_cache")
 
 -- Absolute path to this plugin's directory, for loading bundled assets
 -- (icons/*.svg). Derived from this chunk's source so it works wherever the
@@ -88,6 +89,10 @@ function BookLore:init()
         combine = self.settings:readSetting("view_combine", "AND"),
         filters = {},
     }
+
+    -- True while the library is rendered read-only from the on-disk snapshot
+    -- (device offline / server unreachable). Recomputed on every browseLibrary.
+    self.offline_mode = false
 
     self.ui.menu:registerToMainMenu(self)
 end
@@ -794,25 +799,147 @@ function BookLore:apiCall(method_name, ...)
     return result, err
 end
 
+-- ─── Offline library snapshot ────────────────────────────────────────
+-- Persisted copy of the last successful library fetch so the library opens
+-- read-only when the device is offline but was logged in before. The on-disk
+-- read/write + account-match logic lives in the standalone library_cache
+-- module so it is unit-testable without the UI deps.
+
+function BookLore:saveSnapshot(books, shelves, libraries)
+    LibraryCache.save(self.username, self.server_url, books, shelves, libraries)
+end
+
+function BookLore:loadSnapshot()
+    return LibraryCache.load(self.username, self.server_url)
+end
+
+-- Bucket books into shelves / unshelved. Shared by the online and offline
+-- render paths so the dashboard groupings are identical either way. Numeric
+-- loops keep `_` bound to gettext (never shadow it near _("…") strings).
+function BookLore:indexShelves(books)
+    self.shelf_books = {}
+    self.unshelved_books = {}
+    for i = 1, #books do
+        local book = books[i]
+        local on_shelf = false
+        if type(book.shelves) == "table" then
+            for j = 1, #book.shelves do
+                local shelf = book.shelves[j]
+                local sid = type(shelf) == "table" and (shelf.id or shelf.shelfId) or nil
+                if sid then
+                    on_shelf = true
+                    if not self.shelf_books[sid] then self.shelf_books[sid] = {} end
+                    table.insert(self.shelf_books[sid], book)
+                end
+            end
+        end
+        if not on_shelf then table.insert(self.unshelved_books, book) end
+    end
+end
+
+-- Short human-readable age for the offline banner, e.g. "3 hr ago".
+function BookLore:formatRelativeTime(ts)
+    if type(ts) ~= "number" then return _("a while ago") end
+    local diff = os.time() - ts
+    if diff < 0 then diff = 0 end   -- clock skew / future ts => "just now"
+    if diff < 60 then
+        return _("just now")
+    elseif diff < 3600 then
+        return T(_("%1 min ago"), math.floor(diff / 60))
+    elseif diff < 86400 then
+        return T(_("%1 hr ago"), math.floor(diff / 3600))
+    else
+        local days = math.floor(diff / 86400)
+        if days == 1 then return _("yesterday") end
+        return T(_("%1 days ago"), days)
+    end
+end
+
+-- Render the dashboard from a cached snapshot, read-only (no network).
+function BookLore:renderOfflineLibrary(snap)
+    self.offline_mode = true
+    self._snapshot_fetched_at = snap.fetched_at
+    self.cached_books = snap.books
+    self.cached_shelves = (type(snap.shelves) == "table") and snap.shelves or {}
+    self.cached_libraries = (type(snap.libraries) == "table") and snap.libraries or {}
+    self:indexShelves(snap.books)
+    self.cover_cache_dir = DataStorage:getDataDir() .. "/cache/booklore"
+    lfs.mkdir(self.cover_cache_dir)
+    self:showDashboard()
+end
+
 function BookLore:browseLibrary()
-    if not self.token and not self.refresh_token then
-        UIManager:show(InfoMessage:new{
-            text = _("Not logged in. Please login first."),
+    local logged_in = self.token or self.refresh_token
+
+    -- The snapshot is loaded lazily: decoding a large library JSON from disk
+    -- on every open would penalize the common online path, which never needs
+    -- it. Only the logged-out gate (here) and the offline/fallback paths load.
+    local snap
+    if not logged_in then
+        snap = self:loadSnapshot()
+        if not snap then
+            UIManager:show(InfoMessage:new{
+                text = _("Not logged in. Please login first."),
+            })
+            return
+        end
+    end
+
+    -- When WiFi is off, ask before turning it on rather than connecting
+    -- automatically; declining continues in the offline cache.
+    if not NetworkMgr:isWifiOn() then
+        UIManager:show(ConfirmBox:new{
+            text = _("WiFi is off. Turn it on to load the latest library?"),
+            ok_text = _("Turn on WiFi"),
+            ok_callback = function()
+                NetworkMgr:turnOnWifi(function()
+                    self:fetchAndShowLibrary(snap)
+                end)
+            end,
+            cancel_text = _("Stay offline"),
+            cancel_callback = function()
+                snap = snap or self:loadSnapshot()
+                if snap then
+                    self:renderOfflineLibrary(snap)
+                else
+                    UIManager:show(InfoMessage:new{
+                        text = _("No cached library available offline. Turn on WiFi to load it."),
+                    })
+                end
+            end,
         })
         return
     end
-    if not NetworkMgr:isWifiOn() then NetworkMgr:turnOnWifi() end
 
+    self:fetchAndShowLibrary(snap)
+end
+
+-- Fetch the library online and render it. On a network-class failure, fall back
+-- to the cached snapshot. `snap` is non-nil only when browseLibrary's
+-- logged-out gate already loaded it; otherwise the fallback loads on demand.
+function BookLore:fetchAndShowLibrary(snap)
     local books, err = self:apiCall("getBooks")
     if not books then
-        -- apiCall already surfaced Session-expired on 401 paths.
-        if not (err and (err:match("^HTTP 401") or err == "refresh-in-progress" or err == "not-logged-in")) then
+        -- apiCall already surfaced Session-expired on 401 paths. For a
+        -- network-class failure, fall back to the cached snapshot if we have one.
+        -- "not-logged-in" (tokens cleared by a prior 401) is NOT a server-confirmed
+        -- auth failure -- we simply hold no credentials to try -- so it falls back
+        -- to the cached library like any offline case.
+        local auth_err = err and (err:match("^HTTP 401") or err == "refresh-in-progress")
+        if not auth_err then
+            snap = snap or self:loadSnapshot()
+            if snap then
+                self:renderOfflineLibrary(snap)
+                return
+            end
             UIManager:show(InfoMessage:new{
                 text = T(_("Failed to fetch books:\n%1"), tostring(err)),
             })
         end
         return
     end
+
+    self.offline_mode = false
 
     if type(books) == "table" and type(books.content) == "table" then
         books = books.content
@@ -831,22 +958,10 @@ function BookLore:browseLibrary()
     local libraries = self:apiCall("getLibraries")
     self.cached_libraries = (type(libraries) == "table") and libraries or {}
 
-    self.shelf_books = {}
-    self.unshelved_books = {}
-    for _, book in ipairs(books) do
-        local on_shelf = false
-        if type(book.shelves) == "table" then
-            for _, shelf in ipairs(book.shelves) do
-                local sid = type(shelf) == "table" and (shelf.id or shelf.shelfId) or nil
-                if sid then
-                    on_shelf = true
-                    if not self.shelf_books[sid] then self.shelf_books[sid] = {} end
-                    table.insert(self.shelf_books[sid], book)
-                end
-            end
-        end
-        if not on_shelf then table.insert(self.unshelved_books, book) end
-    end
+    -- Persist a fresh snapshot for offline use.
+    self:saveSnapshot(books, self.cached_shelves, self.cached_libraries)
+
+    self:indexShelves(books)
 
     -- Ensure cover cache directory exists
     self.cover_cache_dir = DataStorage:getDataDir() .. "/cache/booklore"
@@ -857,7 +972,67 @@ end
 
 -- ─── UI helpers ──────────────────────────────────────────────────────
 
---- Build the top bar: [☰] [Search…                           ]
+-- WiFi status indicator for the top bar: a wifi glyph that is crossed out in
+-- offline mode. Tapping it reports the connection state (and, when offline, the
+-- cached-library age). Built as a fixed-size tappable image so buildTopBar can
+-- give the search field the remaining width and never overflow screen_w.
+function BookLore:buildWifiButton()
+    local icon_sz = Screen:scaleBySize(24)
+    local name = self.offline_mode and "wifi_off" or "wifi"
+    local glyph
+    local path = PLUGIN_DIR .. "icons/" .. name .. ".svg"
+    if lfs.attributes(path, "mode") == "file" then
+        local ok, img = pcall(ImageWidget.new, ImageWidget, {
+            file = path,
+            width = icon_sz,
+            height = icon_sz,
+            scale_factor = 0,
+            alpha = true,
+        })
+        if ok and img then glyph = img end
+    end
+    if not glyph then
+        -- Text fallback if the SVG asset is missing/unreadable.
+        glyph = TextWidget:new{
+            text = self.offline_mode and "⚠" or "≈",
+            face = Font:getFace("cfont", 20),
+        }
+    end
+
+    local frame = FrameContainer:new{
+        bordersize = 0,
+        padding_h = Size.padding.large,
+        padding_v = Size.padding.default,
+        background = Blitbuffer.COLOR_WHITE,
+        glyph,
+    }
+
+    -- Tappable wrapper (same idiom as buildCoverCard): range references btn.dimen
+    -- so the gesture box tracks the widget's painted position.
+    local btn = InputContainer:new{
+        dimen = Geom:new{ w = frame:getSize().w, h = frame:getSize().h },
+    }
+    table.insert(btn, frame)
+    btn.ges_events = {
+        Tap = {
+            GestureRange:new{ ges = "tap", range = btn.dimen },
+        },
+    }
+    btn.onTap = function()
+        local text
+        if self.offline_mode then
+            text = T(_("Offline — showing cached library, last synced %1."),
+                self:formatRelativeTime(self._snapshot_fetched_at))
+        else
+            text = _("Online.")
+        end
+        UIManager:show(InfoMessage:new{ text = text })
+        return true
+    end
+    return btn
+end
+
+--- Build the top bar: [☰] [Search…                    ] [wifi] [✕]
 -- @param on_menu function: called when ☰ is tapped
 -- @param on_search function: called when search is tapped
 -- @return widget: the top bar row
@@ -874,6 +1049,8 @@ function BookLore:buildTopBar(on_menu, on_search, on_close)
         padding_v = Size.padding.default,
     }
 
+    local wifi_btn = self:buildWifiButton()
+
     local close_btn = Button:new{
         text = " ✕ ",
         callback = on_close or function()
@@ -885,7 +1062,11 @@ function BookLore:buildTopBar(on_menu, on_search, on_close)
         padding_v = Size.padding.default,
     }
 
-    local btn_space = menu_btn:getSize().w + close_btn:getSize().w + padding * 4
+    -- Reserve fixed-element widths + the 3 inter-element spans + the 2 frame
+    -- side paddings (padding * 5). search_w takes the remainder, so the row
+    -- width is exactly screen_w and never triggers a horizontal scrollbar.
+    local btn_space = menu_btn:getSize().w + wifi_btn:getSize().w
+        + close_btn:getSize().w + padding * 5
     local search_w = screen_w - btn_space
 
     local search_btn = Button:new{
@@ -904,6 +1085,8 @@ function BookLore:buildTopBar(on_menu, on_search, on_close)
         HorizontalSpan:new{ width = padding },
         search_btn,
         HorizontalSpan:new{ width = padding },
+        wifi_btn,
+        HorizontalSpan:new{ width = padding },
         close_btn,
     }
 
@@ -916,6 +1099,16 @@ function BookLore:buildTopBar(on_menu, on_search, on_close)
         background = Blitbuffer.COLOR_WHITE,
         row,
     }
+end
+
+--- Resolve an already-cached cover file without any network request.
+-- Deliberately calls BookLoreApi directly rather than through apiCall: the
+-- probe needs no token, and apiCall's not-logged-in gate must never block
+-- offline rendering. The filename scheme lives in findCachedCover (shared
+-- with downloadCover's cache-hit path). Returns the path or nil.
+function BookLore:cachedCoverPath(book)
+    if not (book and book.id and self.cover_cache_dir) then return nil end
+    return (BookLoreApi:findCachedCover(book.id, book.coverUpdatedOn, self.cover_cache_dir))
 end
 
 --- Build a single cover card (cover image + title + author).
@@ -937,17 +1130,20 @@ function BookLore:buildCoverCard(book, card_w, on_tap)
     -- Guard accepts refresh_token alone: apiCall triggers a pre-emptive
     -- refresh so the cover call has a live access token. (ref: DL-001, DL-006)
     local cover_widget = nil
-    if book.id and (self.token or self.refresh_token) and self.cover_cache_dir then
-        local path = self:apiCall("downloadCover", book.id, book.coverUpdatedOn, self.cover_cache_dir)
-        if path then
-            local ok, img = pcall(ImageWidget.new, ImageWidget, {
-                file = path,
-                width = card_w,
-                height = cover_h,
-                scale_factor = 0,
-            })
-            if ok and img then cover_widget = img end
-        end
+    local path
+    if self.offline_mode then
+        path = self:cachedCoverPath(book)
+    elseif book.id and (self.token or self.refresh_token) and self.cover_cache_dir then
+        path = self:apiCall("downloadCover", book.id, book.coverUpdatedOn, self.cover_cache_dir)
+    end
+    if path then
+        local ok, img = pcall(ImageWidget.new, ImageWidget, {
+            file = path,
+            width = card_w,
+            height = cover_h,
+            scale_factor = 0,
+        })
+        if ok and img then cover_widget = img end
     end
 
     -- Fallback: gray placeholder
@@ -2176,7 +2372,7 @@ function BookLore:showBookDetail(book)
     -- record once to get the blurb (and any other heavy fields the list view
     -- drops), merging it into the cached book so reopens are instant. Guarded
     -- by _enriched so Show more / Reveal rebuilds don't refetch.
-    if book.id and not meta._enriched and (self.token or self.refresh_token) then
+    if book.id and not meta._enriched and not self.offline_mode and (self.token or self.refresh_token) then
         local full = self:apiCall("getBook", book.id)
         if type(full) == "table" and type(full.metadata) == "table" then
             for k, v in pairs(full.metadata) do
@@ -2307,17 +2503,20 @@ function BookLore:showBookDetail(book)
     local cover_w = math.floor(screen_w * 0.34)
     local cover_h = math.floor(cover_w * 1.45)
     local cover_widget = nil
-    if book.id and self.cover_cache_dir then
-        local cover_path = self:apiCall("downloadCover", book.id, book.coverUpdatedOn, self.cover_cache_dir)
-        if cover_path then
-            local ok, img = pcall(ImageWidget.new, ImageWidget, {
-                file = cover_path,
-                width = cover_w,
-                height = cover_h,
-                scale_factor = 0,
-            })
-            if ok and img then cover_widget = img end
-        end
+    local cover_path
+    if self.offline_mode then
+        cover_path = self:cachedCoverPath(book)
+    elseif book.id and self.cover_cache_dir then
+        cover_path = self:apiCall("downloadCover", book.id, book.coverUpdatedOn, self.cover_cache_dir)
+    end
+    if cover_path then
+        local ok, img = pcall(ImageWidget.new, ImageWidget, {
+            file = cover_path,
+            width = cover_w,
+            height = cover_h,
+            scale_factor = 0,
+        })
+        if ok and img then cover_widget = img end
     end
     if not cover_widget then
         cover_widget = FrameContainer:new{
@@ -2693,7 +2892,7 @@ function BookLore:showBookDetail(book)
     -- Mirrors the web "Similar Books" strip. Fetched once per book and cached
     -- so Show more / Reveal rebuilds don't refetch. series_ids is unused now
     -- that this is server-driven rather than derived from the cached list.
-    if book.id and (self.token or self.refresh_token) then
+    if book.id and not self.offline_mode and (self.token or self.refresh_token) then
         if not self._detail_recs or self._detail_recs_id ~= book.id then
             local recs = self:apiCall("getRecommendations", book.id)
             local list = {}
@@ -2778,6 +2977,13 @@ function BookLore:showBookDetail(book)
     elseif is_downloading then
         action_btn = Button:new{
             text = _("Downloading…"),
+            radius = Size.radius.button,
+            padding = Size.padding.button,
+            enabled = false,
+        }
+    elseif self.offline_mode then
+        action_btn = Button:new{
+            text = _("Unavailable offline"),
             radius = Size.radius.button,
             padding = Size.padding.button,
             enabled = false,

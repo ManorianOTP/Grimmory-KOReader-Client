@@ -13,8 +13,6 @@ local _ = require("gettext")
 local Queue = require("queue")
 local NetworkMgr = require("ui/network/manager")
 
-local TOKEN_MAX_AGE = 20 * 60 * 60
-
 local BookLoreSync = WidgetContainer:extend{
     name = "booklore_sync",
     is_doc_only = true,
@@ -38,16 +36,20 @@ function BookLoreSync:init()
         DataStorage:getSettingsDir() .. "/booklore.lua"
     )
     self.server_url = settings:readSetting("server_url")
-    local token = settings:readSetting("token")
-    local token_time = settings:readSetting("token_time", 0)
 
-    if not self.server_url or self.server_url == ""
-       or not token or (os.time() - token_time) >= TOKEN_MAX_AGE then
+    -- Progress capture is decoupled from token validity: page turns enqueue
+    -- to the on-disk queue regardless of whether a live token exists, and only
+    -- PUSHING requires one (pushProgressBody re-reads the token from settings on
+    -- every drain). Gating capture on token age would silently discard progress
+    -- made offline once the access token expired -- the exact case we must keep
+    -- tracking until the user is online again. Only a missing server URL disables.
+    if not self.server_url or self.server_url == "" then
         self.enabled = false
         return
     end
 
-    self.token = token
+    self.token = settings:readSetting("token")          -- may be nil / expired
+    self.username = settings:readSetting("username")    -- tags queued progress
     self.enabled = true
     self.book_id = nil
     self.has_pages = nil
@@ -128,7 +130,7 @@ function BookLoreSync:onCloseDocument()
                 end
             end
         end
-        pcall(function() self.queue:enqueue(self.book_id, self.server_url, pct_100, cfi_str) end)
+        pcall(function() self.queue:enqueue(self.book_id, self.server_url, pct_100, cfi_str, self.username) end)
         pcall(function() self:_drainAll() end)
     end
     if self.cfi then
@@ -157,7 +159,7 @@ function BookLoreSync:onPageUpdate()
         end
     end
     local ok_q, err_q = pcall(function()
-        self.queue:enqueue(self.book_id, self.server_url, pct_100, cfi_str)
+        self.queue:enqueue(self.book_id, self.server_url, pct_100, cfi_str, self.username)
     end)
     if not ok_q then
         logger.warn("BookLoreSync: queue enqueue failed:", tostring(err_q))
@@ -190,8 +192,14 @@ function BookLoreSync:_drainAll()
     if not self.queue then return end
     if self.queue:size() == 0 then return end
     if not NetworkMgr:isWifiOn() then return end
+    -- Read the logged-in user fresh at drain time (a re-login may have switched
+    -- accounts): queued progress only pushes under the account that made it.
+    local settings = LuaSettings:open(
+        DataStorage:getSettingsDir() .. "/booklore.lua"
+    )
+    local current_username = settings:readSetting("username")
     if self.pulled and self.book_id then
-        self.queue:drainCurrentBook(self.book_id, function(entry)
+        self.queue:drainCurrentBook(self.book_id, current_username, function(entry)
             return self:pushProgressBody(
                 entry.book_id or self.book_id,
                 entry.server_url or self.server_url,
@@ -200,7 +208,7 @@ function BookLoreSync:_drainAll()
             )
         end)
     end
-    self.queue:drainOthers(self.book_id, function(entry)
+    self.queue:drainOthers(self.book_id, current_username, function(entry)
         return self:pushProgressBody(
             entry.book_id,
             entry.server_url,
@@ -307,6 +315,16 @@ end
 
 function BookLoreSync:pullProgress()
     if self.awaiting_decision then return end
+    -- No token => skip the pull entirely. This is a clean early return, NOT a
+    -- thrown error, so the pcall wrapper in onReaderReady leaves self.pulled
+    -- false and the push gate stays CLOSED (nothing was pulled). It also avoids
+    -- the `"Bearer " .. nil` concatenation crash that would otherwise trip the
+    -- crash-handler into spuriously opening the gate. Do NOT convert this to
+    -- error() -- the onReaderReady pcall would then set self.pulled=true.
+    if not self.token or self.token == "" then
+        logger.warn("BookLoreSync: no token, skipping pull; push gate stays closed")
+        return
+    end
     local sink = {}
     local dummy, code = http.request{
         url = self.server_url .. "/api/v1/books/" .. tostring(self.book_id),

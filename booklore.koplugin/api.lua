@@ -216,18 +216,31 @@ function BookLoreApi:getRecommendations(server_url, token, book_id)
     return self:get(url, token)
 end
 
+--- Probe the cover cache for an already-downloaded cover. No network, no auth.
+-- Owns the cover filename scheme (cover_<id>_<stamp>.<ext>): downloadCover's
+-- cache-hit fast path and the offline-mode render path both resolve through
+-- here, so the scheme lives in exactly one place.
+-- Returns the cached path or nil, plus the basename a cover for these
+-- arguments is stored under (used by downloadCover after a fetch).
+function BookLoreApi:findCachedCover(book_id, cover_updated_on, cache_dir)
+    local stamp = tostring(cover_updated_on or "0"):gsub("[^%w]", "")
+    local basename = "cover_" .. tostring(book_id) .. "_" .. stamp
+    for _, ext in ipairs({ "jpg", "png", "gif", "webp" }) do
+        local path = cache_dir .. "/" .. basename .. "." .. ext
+        if lfs.attributes(path, "mode") == "file" then
+            return path, basename
+        end
+    end
+    return nil, basename
+end
+
 --- Download a book's cover thumbnail to a file.
 -- Media endpoints use ?token= query param, NOT the Authorization header.
 -- Note: BookLore may return Content-Type: application/json despite
 -- serving image data — this is a known server bug. Treat as binary.
 function BookLoreApi:downloadCover(server_url, book_id, cover_updated_on, token, cache_dir)
-    local stamp = tostring(cover_updated_on or "0"):gsub("[^%w]", "")
-    local basename = "cover_" .. tostring(book_id) .. "_" .. stamp
-    for _, ext in ipairs({ "jpg", "png", "gif", "webp" }) do
-        if lfs.attributes(cache_dir .. "/" .. basename .. "." .. ext, "mode") == "file" then
-            return cache_dir .. "/" .. basename .. "." .. ext, nil
-        end
-    end
+    local cached, basename = self:findCachedCover(book_id, cover_updated_on, cache_dir)
+    if cached then return cached, nil end
 
     local url = server_url .. "/api/v1/media/book/" .. tostring(book_id)
         .. "/thumbnail?token=" .. token
