@@ -83,15 +83,19 @@ function BookLore:init()
     )
     self.downloads = Downloads.new{ download_dir = self.download_dir }
 
-    self.tailscale = Tailscale.new{
-        wifi_is_on = function() return NetworkMgr:isWifiOn() end,
-    }
-
     -- All network work (and long shell commands) funnels through this
     -- queue: one forked subprocess at a time, UI loop never blocked.
     -- Serialization is load-bearing -- see async.lua on refresh-token
     -- rotation -- so always reuse this instance, never construct another.
     self.async = Async.new{}
+
+    self.tailscale = Tailscale.new{
+        wifi_is_on = function() return NetworkMgr:isWifiOn() end,
+        -- Run the silent autostart's blocking `tailscale up` (up to 30s) in a
+        -- subprocess so it never freezes the reader seconds after boot. The
+        -- standalone module defaults this to a synchronous runner (tests).
+        run_blocking = function(task, on_done) self.async:run(task, on_done) end,
+    }
 
     self.view_state = {
         sort = {
@@ -171,22 +175,41 @@ end
 --- Install Tailscale from static ARM binaries (UI shell around
 -- Tailscale:install()).
 function BookLore:tailscaleInstall()
-    if not NetworkMgr:isWifiOn() then NetworkMgr:turnOnWifi() end
+    -- Callback form so the download doesn't start mid-association.
+    if not NetworkMgr:isWifiOn() then
+        NetworkMgr:turnOnWifi(function() self:_startTailscaleInstall() end)
+        return
+    end
+    self:_startTailscaleInstall()
+end
 
-    UIManager:show(InfoMessage:new{
-        text = _("Installing Tailscale…\n\nFetching latest version…"),
-        timeout = 60,
-    })
+function BookLore:_startTailscaleInstall()
+    -- The whole install pipeline (fetch version, download ~30 MB, extract,
+    -- copy, chmod) runs in a subprocess; it used to block the UI for minutes.
+    -- A tap-to-cancel message stands in for live stage updates (the async
+    -- gateway carries one result, not a progress stream). Cancel kills the
+    -- child; install() cleans tmp_root on any failure path.
+    local job
+    local busy = InfoMessage:new{
+        text = _("Installing Tailscale…\n\nDownloading the latest release (~30 MB).\nThis can take a minute.\n\nTap to cancel."),
+        dismiss_callback = function() self.async:cancel(job) end,
+    }
+    UIManager:show(busy)
 
-    UIManager:scheduleIn(0.2, function()
+    job = self.async:run(function()
         local version, err = self.tailscale:install()
+        return { version = version, err = err }
+    end, function(res, async_err)
+        UIManager:close(busy)
+        if async_err == "cancelled" then return end
+        local version = res and res.version
         if version then
             UIManager:show(InfoMessage:new{
                 text = T(_("Tailscale %1 installed successfully.\n\nUse Connect to join your tailnet."), version),
             })
         else
             UIManager:show(InfoMessage:new{
-                text = T(_("Tailscale install failed:\n%1"), tostring(err)),
+                text = T(_("Tailscale install failed:\n%1"), tostring(res and res.err or async_err)),
                 width = Screen:getWidth() * 0.9,
             })
         end
@@ -228,19 +251,26 @@ function BookLore:showTailscaleStatus()
         return
     end
 
-    local output, code = self.tailscale:status()
-    if code ~= 0 then
-        local msg = output ~= "" and output or "Unknown error."
+    -- `tailscale status` is local IPC (fast normally) but shares the
+    -- unbounded io.popen, so a wedged daemon would hang the UI. Run it off
+    -- the UI thread like every other shell-out.
+    self.async:run(function()
+        local output, code = self.tailscale:status()
+        return { output = output, code = code }
+    end, function(res)
+        if not res or res.code ~= 0 then
+            local msg = (res and res.output ~= "" and res.output) or "Unknown error."
+            UIManager:show(InfoMessage:new{
+                text = T(_("tailscale status failed:\n%1"), msg),
+                width = Screen:getWidth() * 0.9,
+            })
+            return
+        end
         UIManager:show(InfoMessage:new{
-            text = T(_("tailscale status failed:\n%1"), msg),
+            text = res.output,
             width = Screen:getWidth() * 0.9,
         })
-        return
-    end
-    UIManager:show(InfoMessage:new{
-        text = output,
-        width = Screen:getWidth() * 0.9,
-    })
+    end)
 end
 
 function BookLore:tailscaleConnect()
@@ -249,58 +279,73 @@ function BookLore:tailscaleConnect()
         return
     end
 
-    if not NetworkMgr:isWifiOn() then NetworkMgr:turnOnWifi() end
+    -- Callback form so the daemon/up flow doesn't start mid-association.
+    if not NetworkMgr:isWifiOn() then
+        NetworkMgr:turnOnWifi(function() self:tailscaleConnect() end)
+        return
+    end
 
-    -- Start daemon if not running
+    -- Start daemon if not running. startDaemon is already non-blocking (it
+    -- backgrounds the launch and settles via UIManager:scheduleIn).
     if not self.tailscale:isDaemonRunning() then
-        UIManager:show(InfoMessage:new{
-            text = _("Starting tailscaled…"),
-            timeout = 3,
-        })
-
-        UIManager:scheduleIn(0.2, function()
-            self.tailscale:startDaemon(function(ok, err)
-                if not ok then
-                    UIManager:show(InfoMessage:new{
-                        text = T(_("Failed to start tailscaled:\n%1"), tostring(err)),
-                        width = Screen:getWidth() * 0.9,
-                    })
-                    return
-                end
-                -- Daemon is running, now bring tailscale up
-                self:_tailscaleUp()
-            end)
+        local busy = InfoMessage:new{ text = _("Starting tailscaled…") }
+        UIManager:show(busy)
+        self.tailscale:startDaemon(function(ok, err)
+            UIManager:close(busy)
+            if not ok then
+                UIManager:show(InfoMessage:new{
+                    text = T(_("Failed to start tailscaled:\n%1"), tostring(err)),
+                    width = Screen:getWidth() * 0.9,
+                })
+                return
+            end
+            -- Daemon is running, now bring tailscale up
+            self:_tailscaleUp()
         end)
         return
     end
 
-    -- Daemon already running — check if already connected
-    local connected, status_out = self.tailscale:isConnected()
-    if connected then
-        UIManager:show(InfoMessage:new{
-            text = T(_("Tailscale is already connected.\n\n%1"), status_out),
-            width = Screen:getWidth() * 0.9,
-        })
-        return
-    end
-
-    self:_tailscaleUp()
+    -- Daemon already running — check if already connected (status() is a
+    -- shell-out, so run it off the UI thread) before bringing it up.
+    local busy = InfoMessage:new{ text = _("Checking Tailscale status…") }
+    UIManager:show(busy)
+    self.async:run(function()
+        local connected, status_out = self.tailscale:isConnected()
+        return { connected = connected, status_out = status_out }
+    end, function(res)
+        UIManager:close(busy)
+        if res and res.connected then
+            UIManager:show(InfoMessage:new{
+                text = T(_("Tailscale is already connected.\n\n%1"), res.status_out),
+                width = Screen:getWidth() * 0.9,
+            })
+            return
+        end
+        self:_tailscaleUp()
+    end)
 end
 
---- Internal: run `tailscale up` and handle the auth URL flow.
+--- Internal: run `tailscale up` (up to 30s) in a subprocess and handle the
+-- auth URL flow on completion.
 function BookLore:_tailscaleUp()
-    UIManager:show(InfoMessage:new{
-        text = _("Connecting to Tailscale…"),
-        timeout = 3,
-    })
+    local job
+    local busy = InfoMessage:new{
+        text = _("Connecting to Tailscale…\n\nTap to cancel."),
+        dismiss_callback = function() self.async:cancel(job) end,
+    }
+    UIManager:show(busy)
 
-    UIManager:scheduleIn(0.2, function()
+    job = self.async:run(function()
         local ok, auth_url, output = self.tailscale:up()
-        if ok then
+        return { ok = ok, auth_url = auth_url, output = output }
+    end, function(res, async_err)
+        UIManager:close(busy)
+        if async_err == "cancelled" then return end
+        if res and res.ok then
             UIManager:show(InfoMessage:new{
                 text = _("Tailscale connected successfully."),
             })
-        elseif auth_url then
+        elseif res and res.auth_url then
             -- Try to show a QR code for easy scanning
             local qr_ok, QRMessage = pcall(require, "ui/widget/qrmessage")
             if qr_ok and QRMessage then
@@ -312,7 +357,7 @@ function BookLore:_tailscaleUp()
                         .. "Tap anywhere to show the QR code."),
                     dismiss_callback = function()
                         UIManager:show(QRMessage:new{
-                            text = auth_url,
+                            text = res.auth_url,
                             width = Screen:getWidth() * 0.9,
                             height = Screen:getHeight() * 0.9,
                         })
@@ -321,11 +366,12 @@ function BookLore:_tailscaleUp()
             else
                 -- Fallback: plain text
                 UIManager:show(InfoMessage:new{
-                    text = T(_("Auth required. Visit this URL on another device:\n\n%1"), auth_url),
+                    text = T(_("Auth required. Visit this URL on another device:\n\n%1"), res.auth_url),
                     width = Screen:getWidth() * 0.9,
                 })
             end
         else
+            local output = res and res.output
             local msg = (output and output ~= "") and output or "Unknown error."
             UIManager:show(InfoMessage:new{
                 text = T(_("Tailscale connect failed:\n%1"), msg),
@@ -343,17 +389,27 @@ function BookLore:tailscaleDisconnect()
         return
     end
 
-    local ok, output = self.tailscale:down()
-    if ok then
-        UIManager:show(InfoMessage:new{
-            text = _("Tailscale disconnected."),
-        })
-    else
-        local msg = output ~= "" and output or "Unknown error."
-        UIManager:show(InfoMessage:new{
-            text = T(_("Tailscale disconnect failed:\n%1"), msg),
-        })
-    end
+    -- `tailscale down` is a shell-out with no --timeout, so a wedged daemon
+    -- could hang the UI indefinitely; run it off the UI thread.
+    local busy = InfoMessage:new{ text = _("Disconnecting Tailscale…") }
+    UIManager:show(busy)
+    self.async:run(function()
+        local ok, output = self.tailscale:down()
+        return { ok = ok, output = output }
+    end, function(res)
+        UIManager:close(busy)
+        if res and res.ok then
+            UIManager:show(InfoMessage:new{
+                text = _("Tailscale disconnected."),
+            })
+        else
+            local output = res and res.output
+            local msg = (output and output ~= "") and output or "Unknown error."
+            UIManager:show(InfoMessage:new{
+                text = T(_("Tailscale disconnect failed:\n%1"), msg),
+            })
+        end
+    end)
 end
 
 -- ─── Login ───────────────────────────────────────────────────────────

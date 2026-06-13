@@ -61,6 +61,13 @@ function Tailscale.new(opts)
     self.exec = opts.exec or defaultExec
     self.request = opts.request
     self.wifi_is_on = opts.wifi_is_on or function() return true end
+    -- run_blocking(task, on_done): runs a blocking thunk and delivers its
+    -- result to on_done. Defaults to synchronous (standalone use and specs);
+    -- main.lua injects the async subprocess gateway so the silent autostart's
+    -- `tailscale up` (up to 30s) never blocks the UI thread.
+    self.run_blocking = opts.run_blocking or function(task, on_done)
+        return on_done(task())
+    end
     self.cmd = self.bin_dir .. "/tailscale"
     self.daemon_cmd = self.bin_dir .. "/tailscaled"
     self.state_path = self.bin_dir .. "/tailscaled.state"
@@ -333,14 +340,22 @@ function Tailscale:_autostartUp()
         logger.dbg("BookLore: Tailscale autostart - WiFi off, daemon started, skipping up")
         return
     end
-    local ok, auth_url, output = self:up()
-    if ok then
-        logger.info("BookLore: Tailscale autostart connected")
-    elseif auth_url then
-        logger.warn("BookLore: Tailscale autostart needs authentication; use Connect")
-    else
-        logger.warn("BookLore: Tailscale autostart up failed:", output)
-    end
+    -- `tailscale up` blocks up to 30s; run it through run_blocking so on
+    -- device it forks instead of freezing the reader. up()'s three return
+    -- values are packed into a table because run_blocking carries one result.
+    self.run_blocking(function()
+        local ok, auth_url, output = self:up()
+        return { ok = ok, auth_url = auth_url, output = output }
+    end, function(res)
+        if type(res) ~= "table" then return end
+        if res.ok then
+            logger.info("BookLore: Tailscale autostart connected")
+        elseif res.auth_url then
+            logger.warn("BookLore: Tailscale autostart needs authentication; use Connect")
+        else
+            logger.warn("BookLore: Tailscale autostart up failed:", res.output)
+        end
+    end)
 end
 
 return Tailscale

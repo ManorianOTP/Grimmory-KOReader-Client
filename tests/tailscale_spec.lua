@@ -422,5 +422,30 @@ describe("Tailscale", function()
             UIManager.tickBy(3)
             assert.are.equal(0, #UIManager.shown())
         end)
+
+        it("routes the blocking `up` through an injected run_blocking", function()
+            -- On device main.lua injects the async gateway here so `up` forks
+            -- instead of freezing the UI. A deferring runner proves `up` does
+            -- not run until the runner chooses to execute the task.
+            local exec, calls = make_fake_exec({
+                { pattern = "^pidof", out = "99", code = 0 },
+                { pattern = " up %-%-timeout", out = "", code = 0 },
+            })
+            local deferred
+            local ts = make_ts({
+                exec = exec,
+                wifi_is_on = function() return true end,
+                run_blocking = function(task, on_done)
+                    deferred = function() on_done(task()) end
+                end,
+            })
+            install_binaries(ts)
+            ts:autostart()
+            assert.are.equal(0, calls_matching(calls, " up %-%-timeout"),
+                "up must not run until the injected runner executes the task")
+            deferred()
+            assert.are.equal(1, calls_matching(calls, " up %-%-timeout"),
+                "up runs once the runner executes the deferred task")
+        end)
     end)
 end)
