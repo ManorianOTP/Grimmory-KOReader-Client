@@ -564,6 +564,8 @@ end
 function BookLore:fetchAndShowLibrary(snap)
     if self._library_loading then return end
     self._library_loading = true
+    -- Fresh online load: let previously-failed cover downloads be retried.
+    self._cover_attempted = {}
 
     local job
     local busy = InfoMessage:new{
@@ -794,6 +796,70 @@ function BookLore:cachedCoverPath(book)
     return (BookLoreApi:findCachedCover(book.id, book.coverUpdatedOn, self.cover_cache_dir))
 end
 
+-- ─── Deferred render-time network work ───────────────────────────────
+-- Cover downloads and detail-page enrichment used to run synchronously
+-- inside widget construction, so rendering a dashboard or detail page did
+-- N blocking HTTP requests before anything painted. Now construction is
+-- pure and instant: cache hits render immediately, misses queue here, and
+-- _flushDeferredCalls runs the whole queue as ONE async batch (one child
+-- session, one shared token refresh), re-rendering in place when results
+-- land. The view paints now; covers and blurbs fill in a moment later.
+
+function BookLore:_resetDeferred()
+    self._deferred_calls = {}
+end
+
+-- Queue a cover cache miss for the deferred batch. Keyed by id+stamp so a
+-- changed cover re-fetches across opens, but each miss is attempted only
+-- once per online library load (reset in fetchAndShowLibrary): a cover that
+-- fails to download must not re-queue forever on each in-place re-render.
+function BookLore:_noteCoverMiss(book)
+    if not (book and book.id and self.cover_cache_dir) then return end
+    local key = tostring(book.id) .. "_" .. tostring(book.coverUpdatedOn)
+    self._cover_attempted = self._cover_attempted or {}
+    if self._cover_attempted[key] then return end
+    self._cover_attempted[key] = true
+    self._deferred_calls = self._deferred_calls or {}
+    self._deferred_calls[#self._deferred_calls + 1] = {
+        method = "downloadCover",
+        args = { book.id, book.coverUpdatedOn, self.cover_cache_dir },
+    }
+end
+
+-- Run the render's queued calls as one async batch, then re-render in
+-- place. current_fn is an identity guard: a completion that lands after the
+-- user navigated away (widget reference replaced) is dropped rather than
+-- popping a stale view back on screen.
+function BookLore:_flushDeferredCalls(current_fn, rerender_fn)
+    local calls = self._deferred_calls or {}
+    self._deferred_calls = {}
+    if #calls == 0 then return end
+    local task = self.session:buildBatchTask(self.server_url, calls)
+    self.async:run(task, function(payload, async_err)
+        if not payload then return end -- cancelled or task died: leave the view as-is
+        self.session:applyTokenSync(payload)
+        local changed = false
+        for i = 1, #calls do
+            local res = payload.results[i]
+            if calls[i].apply then
+                if calls[i].apply(res.result, res.err) then changed = true end
+            elseif res.result then
+                changed = true -- a cover downloaded to disk
+            end
+        end
+        if changed and current_fn() then
+            rerender_fn()
+        end
+    end)
+end
+
+function BookLore:_refreshDashboard()
+    if not self.dashboard_widget then return end
+    UIManager:close(self.dashboard_widget)
+    self:showDashboard()
+    UIManager:setDirty(self.dashboard_widget, "ui")
+end
+
 --- Build a single cover card (cover image + title + author).
 -- @param book table: book data
 -- @param card_w number: card width in pixels
@@ -809,15 +875,17 @@ function BookLore:buildCoverCard(book, card_w, on_tap)
         if #meta.authors > 1 then authors = authors .. " …" end
     end
 
-    -- Try to load cover from cache (download if needed).
-    -- Guard accepts refresh_token alone: apiCall triggers a pre-emptive
-    -- refresh so the cover call has a live access token. (ref: DL-001, DL-006)
+    -- Cache-only: a hit renders the image now, a miss renders a placeholder
+    -- and queues the download for the deferred batch (_noteCoverMiss). No
+    -- network happens during construction, so the row paints instantly and
+    -- covers fill in on the in-place re-render. (ref: DL-001, DL-006)
     local cover_widget = nil
     local path
     if self.offline_mode then
         path = self:cachedCoverPath(book)
     elseif book.id and self.session:isLoggedIn() and self.cover_cache_dir then
-        path = self:apiCall("downloadCover", book.id, book.coverUpdatedOn, self.cover_cache_dir)
+        path = self:cachedCoverPath(book)
+        if not path then self:_noteCoverMiss(book) end
     end
     if path then
         local ok, img = pcall(ImageWidget.new, ImageWidget, {
@@ -948,12 +1016,16 @@ end
 function BookLore:showDashboard()
     local books = self.cached_books
     if not books then return end
+    self:_resetDeferred()
     local screen_w = Screen:getWidth()
     local screen_h = Screen:getHeight()
 
     local on_tap_book = function(book)
         if self.dashboard_widget then
             UIManager:close(self.dashboard_widget)
+            -- Drop the reference so a late cover-batch completion's identity
+            -- guard (dashboard_widget == captured) fails and won't re-show it.
+            self.dashboard_widget = nil
         end
         self._back_from_detail = function() self:showDashboard() end
         self:showBookDetail(book)
@@ -967,6 +1039,7 @@ function BookLore:showDashboard()
         function()  -- Search
             if self.dashboard_widget then
                 UIManager:close(self.dashboard_widget)
+                self.dashboard_widget = nil
             end
             self:showSearch()
         end,
@@ -1037,6 +1110,13 @@ function BookLore:showDashboard()
 
     UIManager:show(self.dashboard_widget)
     UIManager:setDirty("all", "ui")
+
+    -- Download any missing covers off-thread, then repaint in place. Guarded
+    -- on widget identity so navigating away before covers land is a no-op.
+    local shown = self.dashboard_widget
+    self:_flushDeferredCalls(
+        function() return self.dashboard_widget == shown end,
+        function() self:_refreshDashboard() end)
 end
 
 -- ─── Sidebar overlay ─────────────────────────────────────────────────
@@ -2108,20 +2188,34 @@ function BookLore:showBookDetail(book)
     local meta = book.metadata or {}
     book.metadata = meta   -- ensure enrichment below persists on the cached book
 
+    self:_resetDeferred()
+
     -- The list endpoint (getBooks) omits the description, so fetch the full
     -- record once to get the blurb (and any other heavy fields the list view
-    -- drops), merging it into the cached book so reopens are instant. Guarded
-    -- by _enriched so Show more / Reveal rebuilds don't refetch.
-    if book.id and not meta._enriched and not self.offline_mode and self.session:isLoggedIn() then
-        local full = self:apiCall("getBook", book.id)
-        if type(full) == "table" and type(full.metadata) == "table" then
-            for k, v in pairs(full.metadata) do
-                if meta[k] == nil then meta[k] = v end
-            end
-            -- Mark enriched only on success, so a transient fetch failure
-            -- retries on the next open instead of permanently hiding the blurb.
-            meta._enriched = true
-        end
+    -- drops), merging it into the cached book so reopens are instant. The
+    -- fetch is DEFERRED into the page's async batch: the page paints now
+    -- (without the blurb), and the in-place re-render fills it in. Guarded by
+    -- _enriched (so Show more / Reveal rebuilds don't refetch) and by
+    -- _detail_extras_id (so the post-fetch re-render doesn't re-queue it).
+    if book.id and not meta._enriched and not self.offline_mode
+            and self.session:isLoggedIn() and self._detail_extras_id ~= book.id then
+        self._deferred_calls[#self._deferred_calls + 1] = {
+            method = "getBook",
+            args = { book.id },
+            apply = function(full)
+                if type(full) == "table" and type(full.metadata) == "table" then
+                    for k, v in pairs(full.metadata) do
+                        if meta[k] == nil then meta[k] = v end
+                    end
+                    -- Mark enriched only on success, so a transient fetch
+                    -- failure retries on the next open rather than permanently
+                    -- hiding the blurb.
+                    meta._enriched = true
+                    return true
+                end
+                return false
+            end,
+        }
     end
 
     local screen_w = Screen:getWidth()
@@ -2148,6 +2242,8 @@ function BookLore:showBookDetail(book)
         self._detail_scroll_y = 0
         self._detail_recs = nil
         self._detail_recs_id = nil
+        -- New book: allow its blurb + recommendations to be fetched once.
+        self._detail_extras_id = nil
     end
 
     -- Create the page widget early so the horizontally-scrollable cover strips
@@ -2247,7 +2343,8 @@ function BookLore:showBookDetail(book)
     if self.offline_mode then
         cover_path = self:cachedCoverPath(book)
     elseif book.id and self.cover_cache_dir then
-        cover_path = self:apiCall("downloadCover", book.id, book.coverUpdatedOn, self.cover_cache_dir)
+        cover_path = self:cachedCoverPath(book)
+        if not cover_path and self.session:isLoggedIn() then self:_noteCoverMiss(book) end
     end
     if cover_path then
         local ok, img = pcall(ImageWidget.new, ImageWidget, {
@@ -2629,24 +2726,35 @@ function BookLore:showBookDetail(book)
     end
 
     -- ── 8. Similar Books (recommendations endpoint, horizontal scroll) ──
-    -- Mirrors the web "Similar Books" strip. Fetched once per book and cached
-    -- so Show more / Reveal rebuilds don't refetch. series_ids is unused now
-    -- that this is server-driven rather than derived from the cached list.
+    -- Mirrors the web "Similar Books" strip. The fetch is DEFERRED into the
+    -- page's async batch (guarded by _detail_extras_id so the post-fetch
+    -- re-render doesn't re-queue it); the strip renders on the re-render once
+    -- _detail_recs is populated, and its cover cards queue their own covers
+    -- for a second batch. series_ids is unused now that this is server-driven.
     if book.id and not self.offline_mode and self.session:isLoggedIn() then
-        if not self._detail_recs or self._detail_recs_id ~= book.id then
-            local recs = self:apiCall("getRecommendations", book.id)
-            local list = {}
-            if type(recs) == "table" then
-                for _, r in ipairs(recs) do
-                    if type(r) == "table" and type(r.book) == "table" then
-                        table.insert(list, r.book)
+        if (not self._detail_recs or self._detail_recs_id ~= book.id)
+                and self._detail_extras_id ~= book.id then
+            self._deferred_calls[#self._deferred_calls + 1] = {
+                method = "getRecommendations",
+                args = { book.id },
+                apply = function(recs)
+                    local list = {}
+                    if type(recs) == "table" then
+                        for _, r in ipairs(recs) do
+                            if type(r) == "table" and type(r.book) == "table" then
+                                table.insert(list, r.book)
+                            end
+                        end
                     end
-                end
-            end
-            self._detail_recs = list
-            self._detail_recs_id = book.id
+                    -- Record the id even on an empty/failed result so a later
+                    -- re-render treats it as fetched rather than re-queueing.
+                    self._detail_recs = list
+                    self._detail_recs_id = book.id
+                    return #list > 0
+                end,
+            }
         end
-        if #self._detail_recs > 0 then
+        if self._detail_recs and #self._detail_recs > 0 then
             rule()
             add(sectionHeader(_("Similar Books")))
             local r = scrollStrip(self._detail_recs, on_tap_detail)
@@ -2828,6 +2936,15 @@ function BookLore:showBookDetail(book)
     table.insert(self.detail_widget, frame)
     UIManager:show(self.detail_widget)
     UIManager:setDirty("all", "ui")
+
+    -- Mark this book's blurb + recommendations as attempted so the in-place
+    -- re-render below doesn't re-queue them (covers re-queue freely via their
+    -- own attempted set), then run the page's deferred batch and repaint.
+    self._detail_extras_id = book.id
+    local shown = self.detail_widget
+    self:_flushDeferredCalls(
+        function() return self.detail_widget == shown end,
+        function() self:refreshDetailView(book) end)
 end
 
 return BookLore
