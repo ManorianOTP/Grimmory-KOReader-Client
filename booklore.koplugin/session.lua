@@ -216,4 +216,92 @@ function Session:call(server_url, method_name, ...)
     return result, err
 end
 
+-- ─── Async task bridge ───────────────────────────────────────────────
+-- buildCallTask/applyCallResult split call() across the async.lua fork
+-- boundary: the child runs the full refresh-aware dispatch (so the whole
+-- refresh -> request -> 401 retry chain happens off the UI thread as ONE
+-- task) and returns a serializable payload; the parent applies token
+-- rotation and the expiry notice. The parent process owns the settings
+-- file -- the child works on an in-memory shim and never flushes, so a
+-- fork can never race the parent's writes.
+
+-- Minimal LuaSettings look-alike over a plain table. flush() is a no-op
+-- by contract: the rotated pair travels back in the payload instead.
+local function newMemorySettings(data)
+    local MemorySettings = {}
+    MemorySettings.data = data or {}
+    function MemorySettings:readSetting(key) return self.data[key] end
+    function MemorySettings:saveSetting(key, value) self.data[key] = value end
+    function MemorySettings:delSetting(key) self.data[key] = nil end
+    function MemorySettings:flush() end
+    return MemorySettings
+end
+
+--- Build a child-side task closure for async.Async:run().
+-- Token state is read from `self` INSIDE the task, not captured at build
+-- time: tasks are queued, and an earlier task may rotate the pair before
+-- this one forks. Reading at execution time (post-apply, thanks to the
+-- queue's strict serialization) means each task always starts from the
+-- freshest tokens the parent knows about.
+function Session:buildCallTask(server_url, method_name, ...)
+    local parent = self
+    local extra_args = {...}
+    return function()
+        local child = Session.new{
+            settings = newMemorySettings{
+                token = parent.token,
+                refresh_token = parent.refresh_token,
+                token_time = parent.token_time,
+            },
+            api = parent.api,
+            now = parent.now,
+        }
+        local expired = false
+        child.on_expired = function() expired = true end
+        local result, err = child:call(server_url, method_name, unpack(extra_args))
+        return {
+            result = result,
+            err = err,
+            expired = expired,
+            tokens = {
+                token = child.token,
+                refresh_token = child.refresh_token,
+                token_time = child.token_time,
+            },
+        }
+    end
+end
+
+--- Apply a buildCallTask payload in the parent: persist rotated tokens,
+-- clear on child-side clearing, fire on_expired, and hand back the
+-- dispatch result. Returns (result, err) exactly like call().
+function Session:applyCallResult(payload)
+    if type(payload) ~= "table" then
+        return nil, "bad-async-payload"
+    end
+    local tokens = payload.tokens or {}
+    if tokens.token == nil and tokens.refresh_token == nil then
+        -- Child cleared the pair (unrecoverable 401 / failed refresh).
+        if self.token or self.refresh_token then
+            self:clearTokens()
+        end
+    elseif tokens.token ~= self.token
+            or tokens.refresh_token ~= self.refresh_token then
+        -- Rotated pair from a child-side refresh. Persist with the child's
+        -- token_time (not now()): the refresh happened then, and the
+        -- pre-emptive window must count from the actual issue time.
+        self.token = tokens.token
+        self.refresh_token = tokens.refresh_token
+        self.token_time = tokens.token_time
+        self.settings:saveSetting("token", tokens.token)
+        self.settings:saveSetting("refresh_token", tokens.refresh_token)
+        self.settings:saveSetting("token_time", tokens.token_time)
+        self.settings:flush()
+    end
+    if payload.expired then
+        self.on_expired()
+    end
+    return payload.result, payload.err
+end
+
 return Session

@@ -40,6 +40,7 @@ local LibraryCache = require("library_cache")
 local Downloads = require("downloads")
 local Session = require("session")
 local Tailscale = require("tailscale")
+local Async = require("async")
 
 -- Absolute path to this plugin's directory, for loading bundled assets
 -- (icons/*.svg). Derived from this chunk's source so it works wherever the
@@ -85,6 +86,12 @@ function BookLore:init()
     self.tailscale = Tailscale.new{
         wifi_is_on = function() return NetworkMgr:isWifiOn() end,
     }
+
+    -- All network work (and long shell commands) funnels through this
+    -- queue: one forked subprocess at a time, UI loop never blocked.
+    -- Serialization is load-bearing -- see async.lua on refresh-token
+    -- rotation -- so always reuse this instance, never construct another.
+    self.async = Async.new{}
 
     self.view_state = {
         sort = {
@@ -1882,29 +1889,104 @@ function BookLore:downloadBook(book)
         UIManager:show(InfoMessage:new{ text = _("Not logged in.") })
         return
     end
-    if not NetworkMgr:isWifiOn() then NetworkMgr:turnOnWifi() end
+    if self._downloading_id then return end -- one transfer at a time
+    -- Callback form, NOT fire-and-forget turnOnWifi(): association takes
+    -- seconds on Kindle, and a request fired before it completes burns its
+    -- whole connect timeout against a down interface.
+    if not NetworkMgr:isWifiOn() then
+        NetworkMgr:turnOnWifi(function() self:_startBookDownload(book) end)
+        return
+    end
+    self:_startBookDownload(book)
+end
 
+--- Run the download in an async subprocess: child streams to dest..".part",
+-- parent polls the part-file size for live progress and renames into place
+-- on success. Tapping the progress message cancels (kills the child).
+function BookLore:_startBookDownload(book)
     local dest = self:buildDestPath(book)
+    local tmp = dest .. ".part"
+    local title = (book.metadata or {}).title or book.fileName or _("book")
+    local expected_bytes = (book.fileSizeKb or 0) * 1024
 
     self._downloading_id = book.id
     self:refreshDetailView(book)
 
-    UIManager:scheduleIn(0.1, function()
-        local ok, err = self:apiCall("downloadBook", book.id, dest, book.fileSizeKb)
+    local job
+    local progress_box
+    local last_pct_shown = -100
+    local function showProgress(pct)
+        if progress_box then UIManager:close(progress_box) end
+        local pct_text = pct and string.format(" %d%%", pct) or ""
+        progress_box = InfoMessage:new{
+            text = T(_("Downloading %1…%2\n\nTap to cancel."), title, pct_text),
+            dismiss_callback = function()
+                progress_box = nil
+                self.async:cancel(job)
+            end,
+        }
+        UIManager:show(progress_box)
+    end
+
+    local task = self.session:buildCallTask(
+        self.server_url, "downloadBook", book.id, tmp, book.fileSizeKb)
+
+    job = self.async:run(task, function(payload, async_err)
+        if progress_box then
+            UIManager:close(progress_box)
+            progress_box = nil
+        end
         self._downloading_id = nil
+        if async_err == "cancelled" or not payload then
+            os.remove(tmp)
+            self:refreshDetailView(book)
+            if async_err and async_err ~= "cancelled" then
+                UIManager:show(InfoMessage:new{
+                    text = T(_("Download failed:\n%1"), tostring(async_err)),
+                })
+            end
+            return
+        end
+        local ok, err = self.session:applyCallResult(payload)
         if ok then
+            os.remove(dest)
+            os.rename(tmp, dest)
             self:registerDownload(book, dest)
             self:refreshDetailView(book)
-        elseif not (err and (err:match("^HTTP 401") or err == "refresh-in-progress" or err == "not-logged-in")) then
-            -- Suppress double dialog when apiCall already surfaced auth
-            -- errors. Auto-login (DL-009, rejected) would interrupt the
-            -- reader; silent refresh in apiCall is preferred. (ref: DL-001, DL-006, DL-009)
-            UIManager:show(InfoMessage:new{
-                text = T(_("Download failed:\n%1"), tostring(err)),
-            })
+        else
+            os.remove(tmp)
             self:refreshDetailView(book)
+            if not (err and (err:match("^HTTP 401") or err == "refresh-in-progress" or err == "not-logged-in")) then
+                -- Suppress double dialog when applyCallResult already surfaced
+                -- auth errors. Auto-login (DL-009, rejected) would interrupt the
+                -- reader; silent refresh in the task is preferred. (ref: DL-001, DL-006, DL-009)
+                UIManager:show(InfoMessage:new{
+                    text = T(_("Download failed:\n%1"), tostring(err)),
+                })
+            end
         end
-    end)
+    end, {
+        on_progress = function()
+            if not progress_box then return end -- dismissed; cancel in flight
+            local size = lfs.attributes(tmp, "size") or 0
+            if expected_bytes > 0 then
+                local pct = math.floor(size / expected_bytes * 100)
+                if pct > 99 then pct = 99 end
+                -- Decile steps keep e-ink repaints to at most ten per transfer.
+                if pct - last_pct_shown >= 10 then
+                    last_pct_shown = pct
+                    showProgress(pct)
+                end
+            end
+        end,
+    })
+
+    -- Skip when the job already completed: the inline fallback executor
+    -- finishes synchronously inside run(), and a box shown now would have
+    -- no closer left to run.
+    if not job.finished then
+        showProgress(expected_bytes > 0 and 0 or nil)
+    end
 end
 
 function BookLore:openBook(file_path)

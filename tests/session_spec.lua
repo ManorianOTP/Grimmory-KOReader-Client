@@ -223,4 +223,76 @@ describe("Session", function()
             assert.is_number(ctx.settings:readSetting("token_time"))
         end)
     end)
+
+    -- buildCallTask runs in the forked child; applyCallResult runs in the
+    -- parent. Specs execute the task closure directly (same contract as the
+    -- inline executor) and assert the fork-boundary invariants: the child
+    -- never touches parent state, and apply persists exactly the rotation
+    -- the child reports.
+    describe("async task bridge", function()
+        it("round-trips a plain result without touching parent tokens", function()
+            local ctx = make_ctx(fresh_tokens())
+            ctx.api.books_queue = { { result = { { id = 7 } } } }
+            local payload = ctx.session:buildCallTask(SERVER, "getBooks")()
+            -- Parent state untouched until apply.
+            assert.are.equal("t1", ctx.session.token)
+            assert.are.equal("t1", ctx.settings:readSetting("token"))
+            local result, err = ctx.session:applyCallResult(payload)
+            assert.same({ { id = 7 } }, result)
+            assert.is_nil(err)
+            -- No rotation happened, so nothing was rewritten.
+            assert.are.equal("t1", ctx.settings:readSetting("token"))
+            assert.are.equal(0, ctx.expired())
+        end)
+
+        it("persists a child-side pre-emptive refresh rotation on apply", function()
+            local ctx = make_ctx(stale_tokens())
+            ctx.api.refresh_queue = { { access = "t2", refresh = "r2" } }
+            ctx.api.books_queue = { { result = {} } }
+            local payload = ctx.session:buildCallTask(SERVER, "getBooks")()
+            -- Child refreshed; parent must not know yet.
+            assert.are.equal("t1", ctx.session.token)
+            local result, err = ctx.session:applyCallResult(payload)
+            assert.same({}, result)
+            assert.is_nil(err)
+            assert.are.equal("t2", ctx.session.token)
+            assert.are.equal("r2", ctx.session.refresh_token)
+            assert.are.equal("t2", ctx.settings:readSetting("token"))
+            assert.are.equal("r2", ctx.settings:readSetting("refresh_token"))
+        end)
+
+        it("clears parent tokens and fires on_expired when the child hit a dead 401", function()
+            local ctx = make_ctx(fresh_tokens())
+            ctx.api.books_queue = { { err = "HTTP 401: expired" } }
+            ctx.api.refresh_queue = { { err = "HTTP 401: refresh dead" } }
+            local payload = ctx.session:buildCallTask(SERVER, "getBooks")()
+            assert.is_true(ctx.session:isLoggedIn()) -- parent untouched pre-apply
+            local result, err = ctx.session:applyCallResult(payload)
+            assert.is_nil(result)
+            assert.is_truthy(err)
+            assert.is_false(ctx.session:isLoggedIn())
+            assert.is_nil(ctx.settings:readSetting("token"))
+            assert.are.equal(1, ctx.expired())
+        end)
+
+        it("reads parent token state at execution time, not build time", function()
+            local ctx = make_ctx(fresh_tokens())
+            ctx.api.books_queue = { { result = {} } }
+            local task = ctx.session:buildCallTask(SERVER, "getBooks")
+            -- An earlier queued task rotates the pair before this one runs.
+            ctx.session:setTokens("t5", "r5")
+            task()
+            local books_call = ctx.api.calls[#ctx.api.calls]
+            assert.are.equal("getBooks", books_call.method)
+            assert.are.equal("t5", books_call.token)
+        end)
+
+        it("rejects a malformed payload without crashing", function()
+            local ctx = make_ctx(fresh_tokens())
+            local result, err = ctx.session:applyCallResult(nil)
+            assert.is_nil(result)
+            assert.are.equal("bad-async-payload", err)
+            assert.is_true(ctx.session:isLoggedIn())
+        end)
+    end)
 end)
