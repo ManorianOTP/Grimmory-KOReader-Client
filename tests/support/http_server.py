@@ -36,7 +36,12 @@ def load_spec(spec_list):
 
 def _resolve_body(entry):
     if "body_file" in entry:
-        path = os.path.join(CANNED_DIR, entry["body_file"])
+        # Relative paths resolve against the canned-responses dir; absolute
+        # paths let specs serve fixtures they generate at test time (e.g. the
+        # Tailscale install tarball built in the per-test tmp dir).
+        path = entry["body_file"]
+        if not os.path.isabs(path):
+            path = os.path.join(CANNED_DIR, path)
         with open(path, "rb") as f:
             return f.read()
     body = entry.get("body", "")

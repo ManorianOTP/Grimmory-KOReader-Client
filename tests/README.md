@@ -2,15 +2,19 @@
 
 ## Overview
 
-Off-device test harness that exercises the three highest-pain subsystems (CFI translation, API HTTP contract, sync state machine) without a Kindle or real BookLore server. The suite runs under luajit in seconds; on-device SCP verification remains the final gate for runtime-coupled UI flows.
+Off-device test harness that exercises the highest-pain subsystems (CFI translation, API HTTP contract, sync state machine, token lifecycle, download registry, Tailscale install pipeline) without a Kindle or real BookLore server. The suite runs under luajit in seconds; on-device SCP verification remains the final gate for runtime-coupled UI flows.
 
 ## Architecture
 
-Three spec files map to three subsystems:
+Each spec file maps to one subsystem:
 
 - `cfi_spec.lua` drives `cfi.lua` via an injectable directory-tree Reader. Each `describe` block targets one documented CFI pitfall using a committed synthetic EPUB fixture.
 - `api_spec.lua` drives `booklore.koplugin/api.lua` against a local Python `http.server` that serves canned JSON responses from `tests/support/canned_responses/`. Real `socket.http` is used; no mocking.
 - `sync_spec.lua` drives `booklore_sync.koplugin/main.lua` by calling plugin methods directly (`sync:onReaderReady()`, `sync:onPageUpdate()`). A virtual clock drives UIManager's `scheduleIn` queue synchronously so the 30s debounce is exercisable without sleep.
+- `session_spec.lua` drives `booklore.koplugin/session.lua` (token lifecycle: pre-emptive refresh, 401 silent-renewal retry, token clearing, single-flight guard) against a scripted API double — the wire contract is api_spec's job.
+- `downloads_spec.lua` drives `booklore.koplugin/downloads.lua` and pins the registry key format and entry shape booklore_sync's `lookupBookId` reads — the only runtime contract between the two plugins.
+- `tailscale_spec.lua` drives `booklore.koplugin/tailscale.lua`. The install pipeline runs for real: the spec builds a genuine `.tgz` with the system tar, serves it from the local HTTP fixture, and the module's default shell exec runs real tar/cp/chmod against a per-test tmp dir. Daemon/up/down/autostart flows use a scripted fake exec because no tailscaled can run in the harness.
+- `library_cache_spec.lua` and `view_spec.lua` cover the offline snapshot and the sort/filter model.
 
 KOReader runtime modules (`UIManager`, `ffi/archiver`, `logger`, `datastorage`, `socket.http`, `ltn12`, `json`, `gettext`, `optmath`, KOReader widget classes) are shimmed under `tests/stubs/` and injected by prepending that directory to `package.path` in `tests/run.lua` before any plugin `require()`.
 
