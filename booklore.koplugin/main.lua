@@ -386,24 +386,49 @@ function BookLore:showLoginDialog()
 end
 
 function BookLore:doLogin(server_url, username, password)
-    if not NetworkMgr:isWifiOn() then NetworkMgr:turnOnWifi() end
-
-    local token, refresh_token, err = BookLoreApi:login(server_url, username, password)
-    if token and refresh_token then
-        -- Token persistence rationale (refresh-token storage, token_time
-        -- seeding) is documented in session.lua. (ref: DL-002, DL-004, DL-010)
-        self.session:setTokens(token, refresh_token)
-        self.server_url = server_url
-        self.username = username
-        self.settings:saveSetting("server_url", server_url)
-        self.settings:saveSetting("username", username)
-        self.settings:flush()
-        UIManager:show(InfoMessage:new{ text = _("Logged in successfully.") })
-    else
-        UIManager:show(InfoMessage:new{
-            text = T(_("Login failed:\n%1"), tostring(err)),
-        })
+    -- Callback form so the POST never fires while wifi is still
+    -- associating (the old fire-and-forget call raced association and
+    -- burned the whole connect timeout against a down interface).
+    if not NetworkMgr:isWifiOn() then
+        NetworkMgr:turnOnWifi(function()
+            self:_startLogin(server_url, username, password)
+        end)
+        return
     end
+    self:_startLogin(server_url, username, password)
+end
+
+function BookLore:_startLogin(server_url, username, password)
+    local busy = InfoMessage:new{ text = _("Logging in…") }
+    UIManager:show(busy)
+
+    -- Login is tokenless by definition, so it bypasses the session
+    -- dispatcher and just bridges the (token, refresh_token, err) triple.
+    self.async:run(function()
+        local token, refresh_token, err = BookLoreApi:login(
+            server_url, username, password)
+        return { token = token, refresh_token = refresh_token, err = err }
+    end, function(payload, async_err)
+        UIManager:close(busy)
+        local token = payload and payload.token
+        local refresh_token = payload and payload.refresh_token
+        local err = async_err or (payload and payload.err)
+        if token and refresh_token then
+            -- Token persistence rationale (refresh-token storage, token_time
+            -- seeding) is documented in session.lua. (ref: DL-002, DL-004, DL-010)
+            self.session:setTokens(token, refresh_token)
+            self.server_url = server_url
+            self.username = username
+            self.settings:saveSetting("server_url", server_url)
+            self.settings:saveSetting("username", username)
+            self.settings:flush()
+            UIManager:show(InfoMessage:new{ text = _("Logged in successfully.") })
+        else
+            UIManager:show(InfoMessage:new{
+                text = T(_("Login failed:\n%1"), tostring(err)),
+            })
+        end
+    end)
 end
 
 -- ─── Data loading ────────────────────────────────────────────────────
@@ -533,57 +558,99 @@ end
 -- Fetch the library online and render it. On a network-class failure, fall back
 -- to the cached snapshot. `snap` is non-nil only when browseLibrary's
 -- logged-out gate already loaded it; otherwise the fallback loads on demand.
+-- All three list calls run as ONE async batch task (one child session, at
+-- most one shared token refresh) while a tap-to-dismiss message shows;
+-- dismissing cancels the fetch and drops straight to the offline copy.
 function BookLore:fetchAndShowLibrary(snap)
-    local books, err = self:apiCall("getBooks")
-    if not books then
-        -- apiCall already surfaced Session-expired on 401 paths. For a
-        -- network-class failure, fall back to the cached snapshot if we have one.
-        -- "not-logged-in" (tokens cleared by a prior 401) is NOT a server-confirmed
-        -- auth failure -- we simply hold no credentials to try -- so it falls back
-        -- to the cached library like any offline case.
-        local auth_err = err and (err:match("^HTTP 401") or err == "refresh-in-progress")
-        if not auth_err then
-            snap = snap or self:loadSnapshot()
-            if snap then
-                self:renderOfflineLibrary(snap)
-                return
-            end
+    if self._library_loading then return end
+    self._library_loading = true
+
+    local job
+    local busy = InfoMessage:new{
+        text = _("Loading library…\n\nTap to use the offline copy instead."),
+        dismiss_callback = function()
+            self.async:cancel(job)
+        end,
+    }
+    UIManager:show(busy)
+
+    local task = self.session:buildBatchTask(self.server_url, {
+        { method = "getBooks" },
+        { method = "getShelves" },
+        { method = "getLibraries" },
+    })
+
+    local function fallBackToSnapshot(err, quiet)
+        snap = snap or self:loadSnapshot()
+        if snap then
+            self:renderOfflineLibrary(snap)
+            return
+        end
+        if not quiet then
             UIManager:show(InfoMessage:new{
                 text = T(_("Failed to fetch books:\n%1"), tostring(err)),
             })
         end
-        return
     end
 
-    self.offline_mode = false
+    job = self.async:run(task, function(payload, async_err)
+        self._library_loading = false
+        UIManager:close(busy)
 
-    if type(books) == "table" and type(books.content) == "table" then
-        books = books.content
-    end
+        if not payload then
+            -- Cancelled (user chose the offline copy: no error dialog) or
+            -- the task itself died; both degrade to the snapshot.
+            fallBackToSnapshot(async_err, async_err == "cancelled")
+            return
+        end
 
-    if type(books) ~= "table" or #books == 0 then
-        UIManager:show(InfoMessage:new{ text = _("No books found.") })
-        return
-    end
+        self.session:applyTokenSync(payload)
 
-    self.cached_books = books
+        local books = payload.results[1].result
+        local err = payload.results[1].err
+        if not books then
+            -- applyTokenSync already surfaced Session-expired on 401 paths. For a
+            -- network-class failure, fall back to the cached snapshot if we have one.
+            -- "not-logged-in" (tokens cleared by a prior 401) is NOT a server-confirmed
+            -- auth failure -- we simply hold no credentials to try -- so it falls back
+            -- to the cached library like any offline case.
+            local auth_err = err and (err:match("^HTTP 401") or err == "refresh-in-progress")
+            if not auth_err then
+                fallBackToSnapshot(err)
+            end
+            return
+        end
 
-    local shelves = self:apiCall("getShelves")
-    self.cached_shelves = (type(shelves) == "table") and shelves or {}
+        self.offline_mode = false
 
-    local libraries = self:apiCall("getLibraries")
-    self.cached_libraries = (type(libraries) == "table") and libraries or {}
+        if type(books) == "table" and type(books.content) == "table" then
+            books = books.content
+        end
 
-    -- Persist a fresh snapshot for offline use.
-    self:saveSnapshot(books, self.cached_shelves, self.cached_libraries)
+        if type(books) ~= "table" or #books == 0 then
+            UIManager:show(InfoMessage:new{ text = _("No books found.") })
+            return
+        end
 
-    self:indexShelves(books)
+        self.cached_books = books
 
-    -- Ensure cover cache directory exists
-    self.cover_cache_dir = DataStorage:getDataDir() .. "/cache/booklore"
-    lfs.mkdir(self.cover_cache_dir)
+        local shelves = payload.results[2].result
+        self.cached_shelves = (type(shelves) == "table") and shelves or {}
 
-    self:showDashboard()
+        local libraries = payload.results[3].result
+        self.cached_libraries = (type(libraries) == "table") and libraries or {}
+
+        -- Persist a fresh snapshot for offline use.
+        self:saveSnapshot(books, self.cached_shelves, self.cached_libraries)
+
+        self:indexShelves(books)
+
+        -- Ensure cover cache directory exists
+        self.cover_cache_dir = DataStorage:getDataDir() .. "/cache/booklore"
+        lfs.mkdir(self.cover_cache_dir)
+
+        self:showDashboard()
+    end)
 end
 
 -- ─── UI helpers ──────────────────────────────────────────────────────

@@ -272,13 +272,46 @@ function Session:buildCallTask(server_url, method_name, ...)
     end
 end
 
---- Apply a buildCallTask payload in the parent: persist rotated tokens,
--- clear on child-side clearing, fire on_expired, and hand back the
--- dispatch result. Returns (result, err) exactly like call().
-function Session:applyCallResult(payload)
-    if type(payload) ~= "table" then
-        return nil, "bad-async-payload"
+--- Build a child-side task that dispatches SEVERAL methods through one
+-- child session, so a stale token costs one shared refresh instead of one
+-- per call. calls is an array of { method = "name", args = {...} }; the
+-- payload carries results[i] = { result, err } aligned with the input.
+function Session:buildBatchTask(server_url, calls)
+    local parent = self
+    return function()
+        local child = Session.new{
+            settings = newMemorySettings{
+                token = parent.token,
+                refresh_token = parent.refresh_token,
+                token_time = parent.token_time,
+            },
+            api = parent.api,
+            now = parent.now,
+        }
+        local expired = false
+        child.on_expired = function() expired = true end
+        local results = {}
+        for i = 1, #calls do
+            local c = calls[i]
+            local result, err = child:call(server_url, c.method, unpack(c.args or {}))
+            results[i] = { result = result, err = err }
+        end
+        return {
+            results = results,
+            expired = expired,
+            tokens = {
+                token = child.token,
+                refresh_token = child.refresh_token,
+                token_time = child.token_time,
+            },
+        }
     end
+end
+
+--- Sync the parent's token state from a task payload: persist a rotated
+-- pair, clear on child-side clearing, fire on_expired. Shared by single
+-- and batch apply paths.
+function Session:applyTokenSync(payload)
     local tokens = payload.tokens or {}
     if tokens.token == nil and tokens.refresh_token == nil then
         -- Child cleared the pair (unrecoverable 401 / failed refresh).
@@ -301,6 +334,16 @@ function Session:applyCallResult(payload)
     if payload.expired then
         self.on_expired()
     end
+end
+
+--- Apply a buildCallTask payload in the parent: persist rotated tokens,
+-- clear on child-side clearing, fire on_expired, and hand back the
+-- dispatch result. Returns (result, err) exactly like call().
+function Session:applyCallResult(payload)
+    if type(payload) ~= "table" then
+        return nil, "bad-async-payload"
+    end
+    self:applyTokenSync(payload)
     return payload.result, payload.err
 end
 

@@ -294,5 +294,58 @@ describe("Session", function()
             assert.are.equal("bad-async-payload", err)
             assert.is_true(ctx.session:isLoggedIn())
         end)
+
+        it("batch task shares ONE child refresh across all calls and aligns results", function()
+            local ctx = make_ctx(stale_tokens())
+            ctx.api.refresh_queue = { { access = "t2", refresh = "r2" } }
+            ctx.api.books_queue = { { result = { "books" } } }
+            function ctx.api:getShelves(server_url, token)
+                table.insert(ctx.api.calls, { method = "getShelves", token = token })
+                return { "shelves" }, nil
+            end
+            function ctx.api:getLibraries(server_url, token)
+                table.insert(ctx.api.calls, { method = "getLibraries", token = token })
+                return { "libraries" }, nil
+            end
+
+            local payload = ctx.session:buildBatchTask(SERVER, {
+                { method = "getBooks" },
+                { method = "getShelves" },
+                { method = "getLibraries" },
+            })()
+
+            local refreshes = 0
+            for i = 1, #ctx.api.calls do
+                if ctx.api.calls[i].method == "refreshToken" then
+                    refreshes = refreshes + 1
+                end
+            end
+            assert.are.equal(1, refreshes)
+            assert.same({ "books" }, payload.results[1].result)
+            assert.same({ "shelves" }, payload.results[2].result)
+            assert.same({ "libraries" }, payload.results[3].result)
+            -- Every call after the shared refresh used the rotated token.
+            assert.are.equal("t2", ctx.api.calls[#ctx.api.calls].token)
+
+            ctx.session:applyTokenSync(payload)
+            assert.are.equal("t2", ctx.settings:readSetting("token"))
+            assert.are.equal("r2", ctx.settings:readSetting("refresh_token"))
+        end)
+
+        it("batch task records per-call errors without aborting the batch", function()
+            local ctx = make_ctx(fresh_tokens())
+            ctx.api.books_queue = { { err = "HTTP 503: down" } }
+            function ctx.api:getShelves(server_url, token)
+                table.insert(ctx.api.calls, { method = "getShelves", token = token })
+                return { "shelves" }, nil
+            end
+            local payload = ctx.session:buildBatchTask(SERVER, {
+                { method = "getBooks" },
+                { method = "getShelves" },
+            })()
+            assert.is_nil(payload.results[1].result)
+            assert.matches("HTTP 503", payload.results[1].err)
+            assert.same({ "shelves" }, payload.results[2].result)
+        end)
     end)
 end)
