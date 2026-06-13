@@ -488,13 +488,12 @@ function BookLore:_startLogin(server_url, username, password)
 end
 
 -- ─── Data loading ────────────────────────────────────────────────────
-
--- apiCall: thin delegate to the session dispatcher so the many existing
--- call sites keep their (method_name, ...) shape. Token splicing, silent
--- refresh, and the 401 retry state machine live in session.lua.
-function BookLore:apiCall(method_name, ...)
-    return self.session:call(self.server_url, method_name, ...)
-end
+-- There is deliberately no synchronous apiCall helper: every server call
+-- runs off the UI thread via Session:buildCallTask / buildBatchTask through
+-- self.async (the child runs session:call -- token splicing, silent refresh,
+-- the 401 retry state machine -- and the parent applies the result). A
+-- blocking UI-thread wrapper here would reintroduce exactly the freezes this
+-- design removes.
 
 -- ─── Offline library snapshot ────────────────────────────────────────
 -- Persisted copy of the last successful library fetch so the library opens
@@ -843,10 +842,10 @@ function BookLore:buildTopBar(on_menu, on_search, on_close)
 end
 
 --- Resolve an already-cached cover file without any network request.
--- Deliberately calls BookLoreApi directly rather than through apiCall: the
--- probe needs no token, and apiCall's not-logged-in gate must never block
--- offline rendering. The filename scheme lives in findCachedCover (shared
--- with downloadCover's cache-hit path). Returns the path or nil.
+-- Deliberately calls BookLoreApi directly: the probe needs no token, runs no
+-- network, and must never be gated by login state (it backs offline
+-- rendering). The filename scheme lives in findCachedCover (shared with
+-- downloadCover's cache-hit path). Returns the path or nil.
 function BookLore:cachedCoverPath(book)
     if not (book and book.id and self.cover_cache_dir) then return nil end
     return (BookLoreApi:findCachedCover(book.id, book.coverUpdatedOn, self.cover_cache_dir))
