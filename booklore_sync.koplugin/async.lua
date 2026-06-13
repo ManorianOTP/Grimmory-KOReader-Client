@@ -55,6 +55,35 @@ local function getCodec()
     return encode, decode
 end
 
+-- Deep-copy a value keeping ONLY what survives the cross-fork codec: strings,
+-- numbers, booleans, and plain tables. Everything else -- functions, threads,
+-- and crucially the userdata/cdata sentinel some JSON decoders (e.g.
+-- rapidjson.null) return for JSON null -- is dropped. string.buffer.encode and
+-- the dump fallback both throw on userdata/cdata, so an API response carrying
+-- a null sentinel would otherwise fail to serialize and the task would come
+-- back as an error (manifesting as the library silently falling offline).
+-- Dropping a JSON-null value is the correct semantics anyway: absent == null.
+local function sanitizeForIPC(v, depth)
+    local t = type(v)
+    if t == "string" or t == "number" or t == "boolean" then
+        return v
+    elseif t == "table" then
+        depth = depth or 0
+        if depth > 100 then return nil end -- guard against pathological nesting
+        local out = {}
+        for k, val in pairs(v) do
+            local tk = type(k)
+            if tk == "string" or tk == "number" then
+                local sv = sanitizeForIPC(val, depth + 1)
+                if sv ~= nil then out[k] = sv end
+            end
+        end
+        return out
+    end
+    return nil -- userdata / cdata / function / thread: not serializable
+end
+Async.sanitizeForIPC = sanitizeForIPC
+
 function Async.new(opts)
     opts = opts or {}
     local self = setmetatable({}, Async)
@@ -161,10 +190,28 @@ end
 --- Fork; child runs the task and writes the encoded (result, err) pair to
 -- the pipe; parent polls done-or-readable on UIManager ticks (the Trapper
 -- collect pattern), so the UI loop keeps running for the whole task.
+--
+-- Robustness: if the subprocess cannot deliver a clean result for an
+-- INFRASTRUCTURE reason -- fork unavailable on this device, a truncated or
+-- undecodable pipe payload, an encode failure in the child -- the job is
+-- re-run inline (synchronously) so correctness never depends on the fork
+-- working. The blocking fallback can briefly freeze the UI, but a working
+-- (if slower) result beats silently degrading -- which is what surfaced as
+-- the library getting stuck offline. Our forked tasks are read-only or
+-- idempotent (GETs, latest-wins progress pushes, a temp-file download), so a
+-- re-run after a failed return is safe. A genuine task-level error (a network
+-- failure, a 404) comes back as payload.ok=true with an inner err and is NOT
+-- retried -- only the fork machinery failing triggers the fallback.
 function Async.subprocessExecutor(self, job)
     local ffiutil = require("ffi/util")
     local UIManager = require("ui/uimanager")
     local encode, decode = getCodec()
+
+    local function fallbackInline(reason)
+        logger.warn("BookLore async: subprocess path failed (" .. tostring(reason)
+            .. "); running task inline")
+        Async.inlineExecutor(self, job)
+    end
 
     local pid, parent_read_fd = ffiutil.runInSubProcess(function(_pid, child_write_fd)
         local payload
@@ -172,7 +219,9 @@ function Async.subprocessExecutor(self, job)
         if not ok then
             payload = { ok = false, err = "task crashed: " .. tostring(result) }
         else
-            payload = { ok = true, result = result, err = err }
+            -- Strip anything the codec can't encode (e.g. JSON-null userdata
+            -- sentinels) so a valid result never fails to cross the pipe.
+            payload = { ok = true, result = sanitizeForIPC(result), err = err }
         end
         local enc_ok, str = pcall(encode, payload)
         if not enc_ok then
@@ -182,7 +231,7 @@ function Async.subprocessExecutor(self, job)
     end, true) -- with_pipe
 
     if not pid then
-        self:_finish(job, nil, "fork failed: " .. tostring(parent_read_fd))
+        fallbackInline("fork failed: " .. tostring(parent_read_fd))
         return
     end
 
@@ -234,18 +283,22 @@ function Async.subprocessExecutor(self, job)
             UIManager:scheduleIn(COLLECT_SECONDS, collectAndClean)
         end
         if payload_str == "" then
-            self:_finish(job, nil, "subprocess returned no result")
+            fallbackInline("subprocess returned no result")
             return
         end
         local ok, payload = pcall(decode, payload_str)
         if not ok or type(payload) ~= "table" then
-            self:_finish(job, nil, "could not decode subprocess result: " .. tostring(payload))
+            fallbackInline("could not decode subprocess result: " .. tostring(payload))
             return
         end
         if payload.ok then
             self:_finish(job, payload.result, payload.err)
         else
-            self:_finish(job, nil, payload.err or "subprocess task failed")
+            -- The task crashed in the child or its result couldn't cross the
+            -- pipe. Re-run inline: no serialization is needed there, and a
+            -- task that genuinely raises will do so once more and surface its
+            -- error (inlineExecutor catches it and finishes -- no loop).
+            fallbackInline(payload.err or "subprocess task failed")
         end
     end
 

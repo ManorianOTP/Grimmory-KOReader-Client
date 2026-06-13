@@ -139,4 +139,34 @@ describe("async.lua", function()
         async:run(function() return true end, function() done = true end)
         assert.is_true(done)
     end)
+
+    describe("sanitizeForIPC", function()
+        -- Guards the cross-fork serialization: a JSON-null userdata sentinel
+        -- (rapidjson.null) in an API response must not make the whole payload
+        -- unencodable -- that was the bug that silently stuck the library
+        -- offline. Sanitize drops non-serializable values; JSON null -> absent.
+        it("passes through plain JSON-shaped data unchanged", function()
+            local books = {
+                { id = 1, metadata = { title = "A", authors = { "x", "y" } }, read = true },
+                { id = 2, metadata = { title = "B", seriesNumber = 3.5 } },
+            }
+            assert.same(books, Async.sanitizeForIPC(books))
+        end)
+
+        it("drops a userdata null sentinel (and the cdata/function family)", function()
+            local sentinel = io.stdout  -- a userdata stand-in for rapidjson.null
+            local cleaned = Async.sanitizeForIPC({
+                id = 7,
+                seriesName = sentinel,        -- JSON null -> dropped
+                cb = function() end,          -- not serializable -> dropped
+                nested = { ok = true, bad = sentinel },
+            })
+            assert.same({ id = 7, nested = { ok = true } }, cleaned)
+        end)
+
+        it("drops non-string/number table keys without crashing", function()
+            local cleaned = Async.sanitizeForIPC({ [io.stdout] = "x", good = 1 })
+            assert.same({ good = 1 }, cleaned)
+        end)
+    end)
 end)
