@@ -8,8 +8,25 @@ local ltn12 = require("ltn12")
 local json = require("json")
 local logger = require("logger")
 local lfs = require("libs/libkoreader-lfs")
+local socket = require("socket")
 
 local BookLoreApi = {}
+
+-- Per-socket-operation bound (connect, each read). Without this every
+-- request inherits luasocket's 60s default, and an unreachable host (an
+-- asleep tailnet peer drops packets rather than refusing) hangs for the
+-- full minute. 10s is generous for a healthy LAN/tailnet hop yet lets a
+-- dead-server subprocess give up promptly. Transfer DURATION is
+-- deliberately unbounded: each read just has to make progress within the
+-- window, and callers run requests in an async.lua subprocess, so a long
+-- transfer never touches the UI thread.
+local SOCKET_TIMEOUT_SECS = 10
+
+local function timedTCP()
+    local s = socket.tcp()
+    s:settimeout(SOCKET_TIMEOUT_SECS)
+    return s
+end
 
 local function redactToken(url)
     return (url:gsub("token=[^&]+", "token=REDACTED"))
@@ -55,6 +72,7 @@ function BookLoreApi:post(url, body, token)
         source = ltn12.source.string(request_body),
         sink = ltn12.sink.table(response_body),
         redirect = false,
+        create = timedTCP,
     }
 
     local raw = table.concat(response_body)
@@ -92,6 +110,7 @@ function BookLoreApi:get(url, token)
         headers = headers,
         sink = ltn12.sink.table(response_body),
         redirect = false,
+        create = timedTCP,
     }
 
     local raw = table.concat(response_body)
@@ -255,6 +274,7 @@ function BookLoreApi:downloadCover(server_url, book_id, cover_updated_on, token,
         url = url,
         sink = ltn12.sink.file(f),
         redirect = false,
+        create = timedTCP,
     }
 
     if code ~= 200 then
@@ -338,6 +358,7 @@ function BookLoreApi:downloadBook(server_url, book_id, token, dest_path, expecte
         },
         sink = ltn12.sink.file(f),
         redirect = false,
+        create = timedTCP,
     }
 
     if code ~= 200 then

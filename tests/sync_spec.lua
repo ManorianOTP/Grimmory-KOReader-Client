@@ -563,6 +563,35 @@ describe("BookLoreSync token-independent capture & per-account drain", function(
         assert.equals(1, sync.queue:size())
     end)
 
+    it("collectors return drainable slots and removeIfUnchanged guards on identity", function()
+        -- The async drain collects entries, forks to push, then removes on the
+        -- callback. A page turn that replaces a slot (latest-wins) in between
+        -- must NOT have its fresher progress dropped by the stale removal.
+        local q = require("queue").new{}
+        q:enqueue(99, "http://127.0.0.1", 42.0, nil, "alice")  -- current book
+        q:enqueue(88, "http://127.0.0.1", 30.0, nil, "alice")  -- other book
+
+        local current = q:currentBookDrainable(99, "alice")
+        assert.equals(1, #current)
+        assert.equals(99, current[1].entry.book_id)
+        local others = q:othersDrainable(99, "alice")
+        assert.equals(1, #others)
+        assert.equals(88, others[1].entry.book_id)
+
+        -- Simulate the race: after collecting 99's entry, a page turn replaces
+        -- it with fresher progress (a new entry table at the same key).
+        local stale_item = current[1]
+        q:enqueue(99, "http://127.0.0.1", 55.0, nil, "alice")
+        local removed = q:removeIfUnchanged(stale_item.key, stale_item.entry)
+        assert.is_false(removed, "stale removal must be refused once the slot was superseded")
+        assert.equals(55.0, q:peek(99, "alice").percentage,
+            "fresher progress survives the stale drain callback")
+
+        -- 88 was untouched, so its removal succeeds.
+        assert.is_true(q:removeIfUnchanged(others[1].key, others[1].entry))
+        assert.is_nil(q:peek(88, "alice"))
+    end)
+
     it("keeps both accounts' progress when they queue the same book", function()
         -- The multi-user guarantee at the queue layer: latest-wins applies
         -- per (account, book), so bob reading the same book must not destroy

@@ -75,45 +75,80 @@ function Queue:enqueue(book_id, server_url, percentage, cfi, username)
     self._store:flush()
 end
 
-function Queue:drainCurrentBook(book_id, current_username, push_fn)
-    -- The current book's progress can live in up to three slots: the legacy
-    -- bare key, the unowned key (enqueued with no username), and this
-    -- account's key. Drain oldest-first so a stale slot never pushes after a
-    -- fresher one (bare predates unowned predates owned: usernames are only
-    -- ever gained over time, never unset).
+-- Ordered drainable {key, entry} list for the current book. Its progress can
+-- live in up to three slots: the legacy bare key, the unowned key (enqueued
+-- with no username), and this account's key. Returned oldest-first so a stale
+-- slot never pushes after a fresher one (bare predates unowned predates owned:
+-- usernames are only ever gained over time, never unset).
+function Queue:currentBookDrainable(book_id, current_username)
     local keys = { tostring(book_id), entryKey(nil, book_id) }
     if current_username ~= nil then
         keys[#keys + 1] = entryKey(current_username, book_id)
     end
+    local out = {}
     for _, key in ipairs(keys) do
         local entry = self._store.data[key]
         if entry and ownedBy(entry, current_username) then
-            local ok, result = pcall(push_fn, entry)
-            if ok and result then
-                self._store.data[key] = nil
-                self._store:flush()
-            end
+            out[#out + 1] = { key = key, entry = entry }
+        end
+    end
+    return out
+end
+
+-- Drainable {key, entry} list for every book EXCEPT current_book_id.
+function Queue:othersDrainable(current_book_id, current_username)
+    local skip_book = current_book_id and tostring(current_book_id) or nil
+    local out = {}
+    for key, entry in pairs(self._store.data) do
+        local is_current_book = skip_book and tostring(entry.book_id) == skip_book
+        if not is_current_book and ownedBy(entry, current_username) then
+            out[#out + 1] = { key = key, entry = entry }
+        end
+    end
+    return out
+end
+
+-- Remove a slot iff it still holds `entry` (identity). The async drain
+-- collects entries, forks to push them, then removes on the callback -- by
+-- then a page turn may have replaced a slot with fresher progress
+-- (latest-wins). The identity guard ensures only the exact entry that was
+-- pushed is removed, so newer progress is never dropped; it drains next cycle.
+function Queue:removeIfUnchanged(key, entry)
+    if self._store.data[key] == entry then
+        self._store.data[key] = nil
+        self._store:flush()
+        return true
+    end
+    return false
+end
+
+-- Synchronous drains, kept for any in-process caller (the async path in
+-- main.lua uses the collectors above directly). Reimplemented on the
+-- collectors so behavior is identical to the pre-async version.
+function Queue:drainCurrentBook(book_id, current_username, push_fn)
+    for _, item in ipairs(self:currentBookDrainable(book_id, current_username)) do
+        local ok, result = pcall(push_fn, item.entry)
+        if ok and result then
+            self:removeIfUnchanged(item.key, item.entry)
         end
     end
 end
 
 function Queue:drainOthers(current_book_id, current_username, push_fn)
-    local skip_book = current_book_id and tostring(current_book_id) or nil
     local to_remove = {}
-    for key, entry in pairs(self._store.data) do
+    for _, item in ipairs(self:othersDrainable(current_book_id, current_username)) do
         -- The current book is skipped by entry content, not key shape, so the
-        -- push-after-pull gate also covers its legacy/unowned slots — those
+        -- push-after-pull gate also covers its legacy/unowned slots -- those
         -- belong to drainCurrentBook, which main.lua gates on the pull.
-        local is_current_book = skip_book and tostring(entry.book_id) == skip_book
-        if not is_current_book and ownedBy(entry, current_username) then
-            local ok, result = pcall(push_fn, entry)
-            if ok and result then
-                to_remove[#to_remove + 1] = key
-            end
+        local ok, result = pcall(push_fn, item.entry)
+        if ok and result then
+            to_remove[#to_remove + 1] = item
         end
     end
-    for _, key in ipairs(to_remove) do
-        self._store.data[key] = nil
+    for _, item in ipairs(to_remove) do
+        if self._store.data[item.key] == item.entry then
+            self._store.data[item.key] = nil
+        end
     end
     if #to_remove > 0 then
         self._store:flush()

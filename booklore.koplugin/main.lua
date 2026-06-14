@@ -28,7 +28,6 @@ local LuaSettings = require("luasettings")
 local NetworkMgr = require("ui/network/manager")
 local Device = require("device")
 local Screen = Device.screen
-local logger = require("logger")
 local json = require("json")
 local util = require("util")
 local lfs = require("libs/libkoreader-lfs")
@@ -38,6 +37,10 @@ local T = require("ffi/util").template
 local BookLoreApi = require("api")
 local BookLoreView = require("view")
 local LibraryCache = require("library_cache")
+local Downloads = require("downloads")
+local Session = require("session")
+local Tailscale = require("tailscale")
+local Async = require("async")
 
 -- Absolute path to this plugin's directory, for loading bundled assets
 -- (icons/*.svg). Derived from this chunk's source so it works wherever the
@@ -50,9 +53,10 @@ local BookLore = WidgetContainer:extend{
 }
 
 
-local function registryKey(server_url, book_id)
-    return server_url .. "|" .. tostring(book_id)
-end
+-- init() runs once per ReaderUI/FileManager instantiation (i.e. on every
+-- document open); this module-level flag scopes the Tailscale autostart
+-- attempt to once per KOReader process.
+local tailscale_autostart_attempted = false
 
 -- ─── Initialisation ──────────────────────────────────────────────────
 
@@ -63,23 +67,46 @@ function BookLore:init()
     self.server_url = self.settings:readSetting("server_url", "http://192.168.1.50:6060")
     self.username = self.settings:readSetting("username", "")
 
-    -- Token state is loaded as-is; expiry is determined reactively by the
-    -- refresh flow in apiCall (401-driven) and pre-emptively by token_time
-    -- against PREEMPTIVE_REFRESH_SECS. A client-side age heuristic
-    -- (DL-008, rejected) would discard a valid refresh token and force a
-    -- manual re-login that silent renewal makes unnecessary. (ref: DL-003)
-    self.token = self.settings:readSetting("token")
-    self.refresh_token = self.settings:readSetting("refresh_token")
-    self.token_time = self.settings:readSetting("token_time")
-
-    self.download_registry = LuaSettings:open(
-        DataStorage:getSettingsDir() .. "/booklore_downloads.lua"
-    )
+    -- Token lifecycle (load, silent refresh, 401 retry, clearing) lives in
+    -- session.lua; the only UI side effect is the expiry notice injected here.
+    self.session = Session.new{
+        settings = self.settings,
+        api = BookLoreApi,
+        on_expired = function()
+            -- Fires when the server reachably rejected our stored login (an
+            -- expired/invalid token that couldn't be refreshed). Distinct from
+            -- "offline": the message tells the user the fix is to log in again,
+            -- not to check Wi-Fi. Kept short and action-first for casual users.
+            -- Deferred a tick so it lands on TOP of any library/snapshot the
+            -- caller renders synchronously right after applyTokenSync (a widget
+            -- shown later sits above an InfoMessage shown now).
+            UIManager:scheduleIn(0.1, function()
+                UIManager:show(InfoMessage:new{
+                    text = _("BookLore sign-in expired. Log in again to sync the latest."),
+                })
+            end)
+        end,
+    }
 
     self.download_dir = self.settings:readSetting(
         "download_dir",
         DataStorage:getFullDataDir() .. "/booklore/downloads"
     )
+    self.downloads = Downloads.new{ download_dir = self.download_dir }
+
+    -- All network work (and long shell commands) funnels through this
+    -- queue: one forked subprocess at a time, UI loop never blocked.
+    -- Serialization is load-bearing -- see async.lua on refresh-token
+    -- rotation -- so always reuse this instance, never construct another.
+    self.async = Async.new{}
+
+    self.tailscale = Tailscale.new{
+        wifi_is_on = function() return NetworkMgr:isWifiOn() end,
+        -- Run the silent autostart's blocking `tailscale up` (up to 30s) in a
+        -- subprocess so it never freezes the reader seconds after boot. The
+        -- standalone module defaults this to a synchronous runner (tests).
+        run_blocking = function(task, on_done) self.async:run(task, on_done) end,
+    }
 
     self.view_state = {
         sort = {
@@ -93,6 +120,14 @@ function BookLore:init()
     -- True while the library is rendered read-only from the on-disk snapshot
     -- (device offline / server unreachable). Recomputed on every browseLibrary.
     self.offline_mode = false
+
+    if self.settings:readSetting("tailscale_autostart") == true
+            and not tailscale_autostart_attempted then
+        tailscale_autostart_attempted = true
+        -- Delay past startup so the attempt never slows boot or competes
+        -- with the first paint; autostart() itself is silent (logs only).
+        UIManager:scheduleIn(5, function() self.tailscale:autostart() end)
+    end
 
     self.ui.menu:registerToMainMenu(self)
 end
@@ -125,6 +160,18 @@ function BookLore:addToMainMenu(menu_items)
                         text = _("Disconnect"),
                         callback = function() self:tailscaleDisconnect() end,
                     },
+                    {
+                        text = _("Autostart on KOReader start"),
+                        keep_menu_open = true,
+                        checked_func = function()
+                            return self.settings:readSetting("tailscale_autostart") == true
+                        end,
+                        callback = function()
+                            local enabled = self.settings:readSetting("tailscale_autostart") == true
+                            self.settings:saveSetting("tailscale_autostart", not enabled)
+                            self.settings:flush()
+                        end,
+                    },
                 },
             },
         },
@@ -132,261 +179,49 @@ function BookLore:addToMainMenu(menu_items)
 end
 
 -- ─── Tailscale ───────────────────────────────────────────────────────
+-- Process logic (install pipeline, daemon detection, up/down/status,
+-- silent autostart) lives in tailscale.lua so it is unit-testable off
+-- device; the wrappers below own the dialogs and the QR auth flow.
 
-local TAILSCALE_BIN_DIR = "/mnt/us/extensions/tailscale/bin"
-local TAILSCALE_CMD = TAILSCALE_BIN_DIR .. "/tailscale"
-local TAILSCALED_CMD = TAILSCALE_BIN_DIR .. "/tailscaled"
-local TAILSCALE_STATE = TAILSCALE_BIN_DIR .. "/tailscaled.state"
-
---- Run a shell command and capture its stdout + exit code.
--- @param cmd string: shell command
--- @return string: stdout output (trimmed)
--- @return number: exit code
-local function shellExec(cmd)
-    local handle = io.popen(cmd .. " 2>&1; echo __EXIT_$?")
-    if not handle then return "", -1 end
-    local raw = handle:read("*a")
-    handle:close()
-    local code = tonumber(raw:match("__EXIT_(%d+)%s*$")) or -1
-    local output = raw:gsub("__EXIT_%d+%s*$", ""):gsub("^%s+", ""):gsub("%s+$", "")
-    return output, code
-end
-
---- Check whether both tailscale binaries exist on disk.
-local function isTailscaleInstalled()
-    local f1 = io.open(TAILSCALE_CMD, "r")
-    if not f1 then return false end
-    f1:close()
-    local f2 = io.open(TAILSCALED_CMD, "r")
-    if not f2 then return false end
-    f2:close()
-    return true
-end
-
---- Check whether tailscaled is currently running.
--- BusyBox pgrep may not support -x; try multiple detection methods.
-local function isTailscaledRunning()
-    -- Method 1: pidof (usually reliable on BusyBox)
-    local _out, code = shellExec("pidof tailscaled")
-    if code == 0 then return true end
-    -- Method 2: check the socket file
-    local f = io.open("/var/run/tailscale/tailscaled.sock")
-    if f then f:close() return true end
-    -- Method 3: pgrep without -x
-    _out, code = shellExec("pgrep tailscaled")
-    return code == 0
-end
-
---- Start the tailscaled daemon (TUN mode, the default).
--- Async: result delivered via on_done(ok, err) after a 3-second UIManager delay.
--- @param on_done function(boolean, string|nil)
-function BookLore:startTailscaled(on_done)
-    if isTailscaledRunning() then return on_done(true, nil) end
-
-    -- Ensure socket dir exists and clean up stale socket
-    shellExec("mkdir -p /var/run/tailscale")
-    shellExec("rm -f /var/run/tailscale/tailscaled.sock")
-
-    local log_path = TAILSCALE_BIN_DIR .. "/tailscaled_start_log.txt"
-    local cmd = TAILSCALED_CMD
-        .. " --state=" .. TAILSCALE_STATE
-        .. " > " .. log_path .. " 2>&1 &"
-    local _out, code = shellExec(cmd)
-    if code ~= 0 then
-        return on_done(false, "Failed to start tailscaled (exit " .. tostring(code) .. ")")
-    end
-
-    UIManager:scheduleIn(3, function()
-        if not isTailscaledRunning() then
-            local log_tail = shellExec("tail -5 " .. log_path)
-            return on_done(false, "tailscaled exited immediately.\n\n" .. (log_tail or ""))
-        end
-        on_done(true, nil)
-    end)
-end
-
---- Run a shell command and return false + message on non-zero exit.
-local function checkedExec(cmd)
-    local out, code = shellExec(cmd)
-    if code ~= 0 then
-        return false, cmd .. " failed (exit " .. tostring(code) .. "): " .. (out or "")
-    end
-    return true, nil
-end
-
---- Install Tailscale from static ARM binaries.
--- Downloads the latest stable release using KOReader's LuaSec HTTPS.
--- BusyBox wget on Kindle cannot complete TLS handshakes with GitHub/pkgs.tailscale.com.
+--- Install Tailscale from static ARM binaries (UI shell around
+-- Tailscale:install()).
 function BookLore:tailscaleInstall()
-    if not NetworkMgr:isWifiOn() then NetworkMgr:turnOnWifi() end
+    -- Callback form so the download doesn't start mid-association.
+    if not NetworkMgr:isWifiOn() then
+        NetworkMgr:turnOnWifi(function() self:_startTailscaleInstall() end)
+        return
+    end
+    self:_startTailscaleInstall()
+end
 
-    UIManager:show(InfoMessage:new{
-        text = _("Installing Tailscale…\n\nFetching latest version…"),
-        timeout = 60,
-    })
+function BookLore:_startTailscaleInstall()
+    -- The whole install pipeline (fetch version, download ~30 MB, extract,
+    -- copy, chmod) runs in a subprocess; it used to block the UI for minutes.
+    -- A tap-to-cancel message stands in for live stage updates (the async
+    -- gateway carries one result, not a progress stream). Cancel kills the
+    -- child; install() cleans tmp_root on any failure path.
+    local job
+    local busy = InfoMessage:new{
+        text = _("Installing Tailscale…\n\nDownloading the latest release (~30 MB).\nThis can take a minute.\n\nTap to cancel."),
+        dismiss_callback = function() self.async:cancel(job) end,
+    }
+    UIManager:show(busy)
 
-    UIManager:scheduleIn(0.2, function()
-        local https = require("ssl.https")
-        local ltn12 = require("ltn12")
-
-        -- Determine CPU architecture (confirmed armv7l on PW6)
-        local arch_raw = shellExec("uname -m")
-        local arch = "arm"
-        if arch_raw:match("aarch64") or arch_raw:match("arm64") then
-            arch = "arm64"
-        end
-
-        -- Fetch latest stable version tag from GitHub API
-        local api_url = "https://api.github.com/repos/tailscale/tailscale/releases/latest"
-        local resp_body = {}
-        local result, resp_code, resp_headers = https.request{
-            url = api_url,
-            sink = ltn12.sink.table(resp_body),
-            headers = {
-                ["User-Agent"] = "KOReader-BookLore/1.0",
-            },
-        }
-
-        if not result or resp_code ~= 200 then
-            UIManager:show(InfoMessage:new{
-                text = T(_("Failed to fetch latest Tailscale version.\n\nHTTP %1"), tostring(resp_code)),
-                width = Screen:getWidth() * 0.9,
-            })
-            return
-        end
-
-        local api_json = table.concat(resp_body)
-        local version = api_json:match('"tag_name"%s*:%s*"v([^"]+)"')
-
-        if not version then
-            UIManager:show(InfoMessage:new{
-                text = T(_("Could not parse version from GitHub response.\n\nFirst 200 chars:\n%1"), api_json:sub(1, 200)),
-                width = Screen:getWidth() * 0.9,
-            })
-            return
-        end
-
-        logger.info("BookLore: installing Tailscale", version, "for", arch)
-
-        -- Download the static binary tarball
-        local tarball = "tailscale_" .. version .. "_" .. arch .. ".tgz"
-        local url = "https://pkgs.tailscale.com/stable/" .. tarball
-        local tmp_dir = "/mnt/us/tailscale_install"
-        local tmp_tgz = tmp_dir .. "/" .. tarball
-
-        shellExec("rm -rf " .. tmp_dir)
-        shellExec("mkdir -p " .. tmp_dir)
-
-        local f, open_err = io.open(tmp_tgz, "wb")
-        if not f then
-            shellExec("rm -rf " .. tmp_dir)
-            UIManager:show(InfoMessage:new{
-                text = T(_("Cannot create temp file:\n%1"), tostring(open_err)),
-            })
-            return
-        end
-
-        logger.info("BookLore: downloading", url)
-
-        local dl_result, dl_code = https.request{
-            url = url,
-            sink = ltn12.sink.file(f),  -- closes f automatically
-            headers = {
-                ["User-Agent"] = "KOReader-BookLore/1.0",
-            },
-        }
-
-        if not dl_result or dl_code ~= 200 then
-            shellExec("rm -rf " .. tmp_dir)
-            UIManager:show(InfoMessage:new{
-                text = T(_("Download failed.\n\nURL: %1\n\nHTTP %2"), url, tostring(dl_code)),
-                width = Screen:getWidth() * 0.9,
-            })
-            return
-        end
-
-        -- Verify file size (ARM tarball is ~25+ MB; < 1 MB is suspect)
-        local size_out = shellExec("wc -c < " .. tmp_tgz)
-        local file_size = tonumber(size_out) or 0
-        if file_size < 1048576 then
-            shellExec("rm -rf " .. tmp_dir)
-            UIManager:show(InfoMessage:new{
-                text = T(_("Downloaded file too small — likely a server error.\nSize: %1 KB"), tostring(math.floor(file_size / 1024))),
-            })
-            return
-        end
-
-        logger.info("BookLore: downloaded", string.format("%.1f MB", file_size / 1048576))
-
-        -- Extract tarball
-        local tar_out, tar_code = shellExec("cd " .. tmp_dir .. " && tar xzf " .. tarball)
-        if tar_code ~= 0 then
-            shellExec("rm -rf " .. tmp_dir)
-            UIManager:show(InfoMessage:new{
-                text = T(_("Failed to extract tarball.\n\n%1"), tar_out or ""),
-            })
-            return
-        end
-
-        -- The tarball extracts to tailscale_{version}_{arch}/
-        local extract_dir = tmp_dir .. "/tailscale_" .. version .. "_" .. arch
-
-        -- Verify extracted binaries exist
-        local check_f = io.open(extract_dir .. "/tailscale", "r")
-        if not check_f then
-            shellExec("rm -rf " .. tmp_dir)
-            UIManager:show(InfoMessage:new{
-                text = T(_("Extracted archive does not contain expected binaries.\nExpected: %1"), extract_dir .. "/tailscale"),
-            })
-            return
-        end
-        check_f:close()
-
-        -- Create target directory and install binaries
-        local ok, cerr
-        ok, cerr = checkedExec("mkdir -p " .. TAILSCALE_BIN_DIR)
-        if not ok then
-            shellExec("rm -rf " .. tmp_dir)
-            UIManager:show(InfoMessage:new{ text = cerr })
-            return
-        end
-        ok, cerr = checkedExec("cp " .. extract_dir .. "/tailscale " .. TAILSCALE_CMD)
-        if not ok then
-            shellExec("rm -rf " .. tmp_dir)
-            UIManager:show(InfoMessage:new{ text = cerr })
-            return
-        end
-        ok, cerr = checkedExec("cp " .. extract_dir .. "/tailscaled " .. TAILSCALED_CMD)
-        if not ok then
-            shellExec("rm -rf " .. tmp_dir)
-            UIManager:show(InfoMessage:new{ text = cerr })
-            return
-        end
-        ok, cerr = checkedExec("chmod +x " .. TAILSCALE_CMD)
-        if not ok then
-            shellExec("rm -rf " .. tmp_dir)
-            UIManager:show(InfoMessage:new{ text = cerr })
-            return
-        end
-        ok, cerr = checkedExec("chmod +x " .. TAILSCALED_CMD)
-        if not ok then
-            shellExec("rm -rf " .. tmp_dir)
-            UIManager:show(InfoMessage:new{ text = cerr })
-            return
-        end
-
-        -- Clean up (best-effort; install already succeeded)
-        shellExec("rm -rf " .. tmp_dir)
-
-        -- Final verification
-        if isTailscaleInstalled() then
-            logger.info("BookLore: Tailscale", version, "installed successfully")
+    job = self.async:run(function()
+        local version, err = self.tailscale:install()
+        return { version = version, err = err }
+    end, function(res, async_err)
+        UIManager:close(busy)
+        if async_err == "cancelled" then return end
+        local version = res and res.version
+        if version then
             UIManager:show(InfoMessage:new{
                 text = T(_("Tailscale %1 installed successfully.\n\nUse Connect to join your tailnet."), version),
             })
         else
             UIManager:show(InfoMessage:new{
-                text = _("Installation failed — binary not found after copy."),
+                text = T(_("Tailscale install failed:\n%1"), tostring(res and res.err or async_err)),
+                width = Screen:getWidth() * 0.9,
             })
         end
     end)
@@ -396,7 +231,7 @@ end
 -- If already installed, calls the provided callback immediately.
 -- @param then_do function: called after installation succeeds or if already installed
 function BookLore:ensureTailscaleInstalled(then_do)
-    if isTailscaleInstalled() then
+    if self.tailscale:isInstalled() then
         if then_do then then_do() end
         return
     end
@@ -414,12 +249,12 @@ function BookLore:ensureTailscaleInstalled(then_do)
 end
 
 function BookLore:showTailscaleStatus()
-    if not isTailscaleInstalled() then
+    if not self.tailscale:isInstalled() then
         self:ensureTailscaleInstalled()
         return
     end
 
-    if not isTailscaledRunning() then
+    if not self.tailscale:isDaemonRunning() then
         UIManager:show(InfoMessage:new{
             text = _("Tailscale is installed but the daemon is not running.\n\n"
                 .. "Use Connect to start it."),
@@ -427,139 +262,165 @@ function BookLore:showTailscaleStatus()
         return
     end
 
-    local output, code = shellExec(TAILSCALE_CMD .. " status")
-    if code ~= 0 then
-        local msg = output ~= "" and output or "Unknown error."
+    -- `tailscale status` is local IPC (fast normally) but shares the
+    -- unbounded io.popen, so a wedged daemon would hang the UI. Run it off
+    -- the UI thread like every other shell-out.
+    self.async:run(function()
+        local output, code = self.tailscale:status()
+        return { output = output, code = code }
+    end, function(res)
+        if not res or res.code ~= 0 then
+            local msg = (res and res.output ~= "" and res.output) or "Unknown error."
+            UIManager:show(InfoMessage:new{
+                text = T(_("tailscale status failed:\n%1"), msg),
+                width = Screen:getWidth() * 0.9,
+            })
+            return
+        end
         UIManager:show(InfoMessage:new{
-            text = T(_("tailscale status failed:\n%1"), msg),
+            text = res.output,
             width = Screen:getWidth() * 0.9,
         })
-        return
-    end
-    UIManager:show(InfoMessage:new{
-        text = output,
-        width = Screen:getWidth() * 0.9,
-    })
+    end)
 end
 
 function BookLore:tailscaleConnect()
-    if not isTailscaleInstalled() then
+    if not self.tailscale:isInstalled() then
         self:ensureTailscaleInstalled()
         return
     end
 
-    if not NetworkMgr:isWifiOn() then NetworkMgr:turnOnWifi() end
+    -- Callback form so the daemon/up flow doesn't start mid-association.
+    if not NetworkMgr:isWifiOn() then
+        NetworkMgr:turnOnWifi(function() self:tailscaleConnect() end)
+        return
+    end
 
-    -- Start daemon if not running
-    if not isTailscaledRunning() then
-        UIManager:show(InfoMessage:new{
-            text = _("Starting tailscaled…"),
-            timeout = 3,
-        })
-
-        UIManager:scheduleIn(0.2, function()
-            self:startTailscaled(function(ok, err)
-                if not ok then
-                    UIManager:show(InfoMessage:new{
-                        text = T(_("Failed to start tailscaled:\n%1"), tostring(err)),
-                        width = Screen:getWidth() * 0.9,
-                    })
-                    return
-                end
-                -- Daemon is running, now bring tailscale up
-                self:_tailscaleUp()
-            end)
+    -- Start daemon if not running. startDaemon is already non-blocking (it
+    -- backgrounds the launch and settles via UIManager:scheduleIn).
+    if not self.tailscale:isDaemonRunning() then
+        local busy = InfoMessage:new{ text = _("Starting tailscaled…") }
+        UIManager:show(busy)
+        self.tailscale:startDaemon(function(ok, err)
+            UIManager:close(busy)
+            if not ok then
+                UIManager:show(InfoMessage:new{
+                    text = T(_("Failed to start tailscaled:\n%1"), tostring(err)),
+                    width = Screen:getWidth() * 0.9,
+                })
+                return
+            end
+            -- Daemon is running, now bring tailscale up
+            self:_tailscaleUp()
         end)
         return
     end
 
-    -- Daemon already running — check if already connected
-    local status_out, status_code = shellExec(TAILSCALE_CMD .. " status")
-    if status_code == 0
-        and not status_out:match("Logged out")
-        and not status_out:match("stopped") then
-        UIManager:show(InfoMessage:new{
-            text = T(_("Tailscale is already connected.\n\n%1"), status_out),
-            width = Screen:getWidth() * 0.9,
-        })
-        return
-    end
-
-    self:_tailscaleUp()
+    -- Daemon already running — check if already connected (status() is a
+    -- shell-out, so run it off the UI thread) before bringing it up.
+    local busy = InfoMessage:new{ text = _("Checking Tailscale status…") }
+    UIManager:show(busy)
+    self.async:run(function()
+        local connected, status_out = self.tailscale:isConnected()
+        return { connected = connected, status_out = status_out }
+    end, function(res)
+        UIManager:close(busy)
+        if res and res.connected then
+            UIManager:show(InfoMessage:new{
+                text = T(_("Tailscale is already connected.\n\n%1"), res.status_out),
+                width = Screen:getWidth() * 0.9,
+            })
+            return
+        end
+        self:_tailscaleUp()
+    end)
 end
 
---- Internal: run `tailscale up` and handle the auth URL flow.
+--- Internal: run `tailscale up` (up to 30s) in a subprocess and handle the
+-- auth URL flow on completion.
 function BookLore:_tailscaleUp()
-    UIManager:show(InfoMessage:new{
-        text = _("Connecting to Tailscale…"),
-        timeout = 3,
-    })
+    local job
+    local busy = InfoMessage:new{
+        text = _("Connecting to Tailscale…\n\nTap to cancel."),
+        dismiss_callback = function() self.async:cancel(job) end,
+    }
+    UIManager:show(busy)
 
-    UIManager:scheduleIn(0.2, function()
-        local output, code = shellExec(
-            TAILSCALE_CMD .. " up --timeout=30s --accept-routes")
-        if code == 0 then
+    job = self.async:run(function()
+        local ok, auth_url, output = self.tailscale:up()
+        return { ok = ok, auth_url = auth_url, output = output }
+    end, function(res, async_err)
+        UIManager:close(busy)
+        if async_err == "cancelled" then return end
+        if res and res.ok then
             UIManager:show(InfoMessage:new{
                 text = _("Tailscale connected successfully."),
             })
-        else
-            -- Look for an auth URL in the output
-            local auth_url = output:match("(https://login%.tailscale%.com/[^%s]+)")
-            if auth_url then
-                -- Try to show a QR code for easy scanning
-                local qr_ok, QRMessage = pcall(require, "ui/widget/qrmessage")
-                if qr_ok and QRMessage then
-                    -- Show instructions first, then QR on dismiss
-                    UIManager:show(InfoMessage:new{
-                        text = _("Tailscale authentication required.\n\n"
-                            .. "Scan the QR code on the next screen "
-                            .. "with your phone to log in.\n\n"
-                            .. "Tap anywhere to show the QR code."),
-                        dismiss_callback = function()
-                            UIManager:show(QRMessage:new{
-                                text = auth_url,
-                                width = Screen:getWidth() * 0.9,
-                                height = Screen:getHeight() * 0.9,
-                            })
-                        end,
-                    })
-                else
-                    -- Fallback: plain text
-                    UIManager:show(InfoMessage:new{
-                        text = T(_("Auth required. Visit this URL on another device:\n\n%1"), auth_url),
-                        width = Screen:getWidth() * 0.9,
-                    })
-                end
-            else
-                local msg = output ~= "" and output or "Unknown error."
+        elseif res and res.auth_url then
+            -- Try to show a QR code for easy scanning
+            local qr_ok, QRMessage = pcall(require, "ui/widget/qrmessage")
+            if qr_ok and QRMessage then
+                -- Show instructions first, then QR on dismiss
                 UIManager:show(InfoMessage:new{
-                    text = T(_("Tailscale connect failed:\n%1"), msg),
+                    text = _("Tailscale authentication required.\n\n"
+                        .. "Scan the QR code on the next screen "
+                        .. "with your phone to log in.\n\n"
+                        .. "Tap anywhere to show the QR code."),
+                    dismiss_callback = function()
+                        UIManager:show(QRMessage:new{
+                            text = res.auth_url,
+                            width = Screen:getWidth() * 0.9,
+                            height = Screen:getHeight() * 0.9,
+                        })
+                    end,
+                })
+            else
+                -- Fallback: plain text
+                UIManager:show(InfoMessage:new{
+                    text = T(_("Auth required. Visit this URL on another device:\n\n%1"), res.auth_url),
                     width = Screen:getWidth() * 0.9,
                 })
             end
+        else
+            local output = res and res.output
+            local msg = (output and output ~= "") and output or "Unknown error."
+            UIManager:show(InfoMessage:new{
+                text = T(_("Tailscale connect failed:\n%1"), msg),
+                width = Screen:getWidth() * 0.9,
+            })
         end
     end)
 end
 
 function BookLore:tailscaleDisconnect()
-    if not isTailscaleInstalled() then
+    if not self.tailscale:isInstalled() then
         UIManager:show(InfoMessage:new{
             text = _("Tailscale is not installed."),
         })
         return
     end
 
-    local output, code = shellExec(TAILSCALE_CMD .. " down")
-    if code == 0 then
-        UIManager:show(InfoMessage:new{
-            text = _("Tailscale disconnected."),
-        })
-    else
-        local msg = output ~= "" and output or "Unknown error."
-        UIManager:show(InfoMessage:new{
-            text = T(_("Tailscale disconnect failed:\n%1"), msg),
-        })
-    end
+    -- `tailscale down` is a shell-out with no --timeout, so a wedged daemon
+    -- could hang the UI indefinitely; run it off the UI thread.
+    local busy = InfoMessage:new{ text = _("Disconnecting Tailscale…") }
+    UIManager:show(busy)
+    self.async:run(function()
+        local ok, output = self.tailscale:down()
+        return { ok = ok, output = output }
+    end, function(res)
+        UIManager:close(busy)
+        if res and res.ok then
+            UIManager:show(InfoMessage:new{
+                text = _("Tailscale disconnected."),
+            })
+        else
+            local output = res and res.output
+            local msg = (output and output ~= "") and output or "Unknown error."
+            UIManager:show(InfoMessage:new{
+                text = T(_("Tailscale disconnect failed:\n%1"), msg),
+            })
+        end
+    end)
 end
 
 -- ─── Login ───────────────────────────────────────────────────────────
@@ -592,212 +453,58 @@ function BookLore:showLoginDialog()
 end
 
 function BookLore:doLogin(server_url, username, password)
-    if not NetworkMgr:isWifiOn() then NetworkMgr:turnOnWifi() end
-
-    local token, refresh_token, err = BookLoreApi:login(server_url, username, password)
-    if token and refresh_token then
-        self.token = token
-        self.refresh_token = refresh_token
-        -- token_time seeds the pre-emptive refresh threshold in apiCall. (ref: DL-002)
-        self.token_time = os.time()
-        self.server_url = server_url
-        self.username = username
-        self.settings:saveSetting("server_url", server_url)
-        self.settings:saveSetting("username", username)
-        self.settings:saveSetting("token", token)
-        -- Refresh token persisted: revocable and scoped, not reusable across services.
-        -- Storing credentials (DL-010, rejected) trades revocability for convenience;
-        -- refresh tokens carry lower blast-radius on exfiltration than passwords.
-        -- (ref: DL-004, DL-010)
-        self.settings:saveSetting("refresh_token", refresh_token)
-        self.settings:saveSetting("token_time", self.token_time)
-        self.settings:flush()
-        UIManager:show(InfoMessage:new{ text = _("Logged in successfully.") })
-    else
-        UIManager:show(InfoMessage:new{
-            text = T(_("Login failed:\n%1"), tostring(err)),
-        })
+    -- Callback form so the POST never fires while wifi is still
+    -- associating (the old fire-and-forget call raced association and
+    -- burned the whole connect timeout against a down interface).
+    if not NetworkMgr:isWifiOn() then
+        NetworkMgr:turnOnWifi(function()
+            self:_startLogin(server_url, username, password)
+        end)
+        return
     end
+    self:_startLogin(server_url, username, password)
+end
+
+function BookLore:_startLogin(server_url, username, password)
+    local busy = InfoMessage:new{ text = _("Logging in…") }
+    UIManager:show(busy)
+
+    -- Login is tokenless by definition, so it bypasses the session
+    -- dispatcher and just bridges the (token, refresh_token, err) triple.
+    self.async:run(function()
+        local token, refresh_token, err = BookLoreApi:login(
+            server_url, username, password)
+        return { token = token, refresh_token = refresh_token, err = err }
+    end, function(payload, async_err)
+        UIManager:close(busy)
+        local token = payload and payload.token
+        local refresh_token = payload and payload.refresh_token
+        local err = async_err or (payload and payload.err)
+        if token and refresh_token then
+            -- Token persistence rationale (refresh-token storage, token_time
+            -- seeding) is documented in session.lua. (ref: DL-002, DL-004, DL-010)
+            self.session:setTokens(token, refresh_token)
+            self.server_url = server_url
+            self.username = username
+            self.settings:saveSetting("server_url", server_url)
+            self.settings:saveSetting("username", username)
+            self.settings:flush()
+            UIManager:show(InfoMessage:new{ text = _("Logged in successfully.") })
+        else
+            UIManager:show(InfoMessage:new{
+                text = T(_("Login failed:\n%1"), tostring(err)),
+            })
+        end
+    end)
 end
 
 -- ─── Data loading ────────────────────────────────────────────────────
-
--- 50 min chosen so long reading sessions refresh well before the 10-hour
--- server access-token TTL without excessive refresh calls for short
--- sessions. (ref: DL-002)
-local PREEMPTIVE_REFRESH_SECS = 50 * 60
-
--- Any BookLoreApi method routed through apiCall MUST be registered here --
--- unregistered calls fail at runtime with unmapped-api-method.
-local METHOD_ARG_LAYOUT = {
-    getBooks           = "token-second",
-    getBook            = "token-second",
-    getRecommendations = "token-second",
-    getShelves         = "token-second",
-    getLibraries  = "token-second",
-    downloadBook  = "download-book",
-    downloadCover = "download-cover",
-}
-
--- _performRefresh: exchanges the stored refresh_token for a rotated pair.
--- Single-flight: if another call is already inside this function, return
--- refresh-in-progress immediately. Actual wait loops are not portable on
--- KOReader without coroutines; callers treat the transient error by
--- surfacing Session-expired and letting the user retry. (ref: DL-005, DL-006)
-function BookLore:_performRefresh()
-    if self._refreshing then
-        return false, "refresh-in-progress"
-    end
-    self._refreshing = true
-
-    local ok, inner_success, inner_err = pcall(function()
-        local new_access, new_refresh, ref_err = BookLoreApi:refreshToken(
-            self.server_url, self.refresh_token)
-
-        if not new_access or not new_refresh then
-            return false, ref_err or "refresh failed"
-        end
-
-        self.token = new_access
-        self.refresh_token = new_refresh
-        self.token_time = os.time()
-
-        self.settings:saveSetting("token", new_access)
-        self.settings:saveSetting("refresh_token", new_refresh)
-        self.settings:saveSetting("token_time", self.token_time)
-        self.settings:flush()
-
-        return true, nil
-    end)
-
-    if ok then
-        self._refreshing = false
-        if inner_success == false then
-            -- Refresh call returned failure; clear all token state.
-            -- delSetting, not saveSetting(k, nil), so keys are absent
-            -- on next init rather than present-but-nil. (ref: DL-005)
-            self.token = nil
-            self.refresh_token = nil
-            self.token_time = nil
-            self.settings:delSetting("token")
-            self.settings:delSetting("refresh_token")
-            self.settings:delSetting("token_time")
-            self.settings:flush()
-            return false, inner_err
-        end
-        return true, nil
-    else
-        -- pcall caught a Lua error; inner_success holds the error object.
-        self._refreshing = false
-        self.token = nil
-        self.refresh_token = nil
-        self.token_time = nil
-        self.settings:delSetting("token")
-        self.settings:delSetting("refresh_token")
-        self.settings:delSetting("token_time")
-        self.settings:flush()
-        return false, tostring(inner_success)
-    end
-end
-
--- apiCall: token-injecting, refresh-aware dispatcher for BookLoreApi methods.
--- Call sites pass only method-specific args (no server_url, no token) and
--- this helper splices self.token into the slot METHOD_ARG_LAYOUT specifies.
--- unpack (NOT table.unpack) is used because KOReader on Kindle is LuaJIT/5.1
--- where table.unpack does not exist. (ref: DL-001, DL-011)
-function BookLore:apiCall(method_name, ...)
-    local extra_args = {...}
-
-    -- G1: unknown-api-method
-    if type(BookLoreApi[method_name]) ~= "function" then
-        return nil, "unknown-api-method:" .. tostring(method_name)
-    end
-
-    -- G2: unmapped-api-method
-    if METHOD_ARG_LAYOUT[method_name] == nil then
-        logger.warn("BookLore:apiCall unmapped method", method_name,
-            "-- add entry to METHOD_ARG_LAYOUT")
-        return nil, "unmapped-api-method:" .. tostring(method_name)
-    end
-
-    -- G3: not-logged-in
-    if not self.token and not self.refresh_token then
-        return nil, "not-logged-in"
-    end
-
-    -- Pre-emptive refresh when token is stale or absent but refresh token exists
-    if self.refresh_token and (
-        not self.token
-        or not self.token_time
-        or (os.time() - self.token_time) > PREEMPTIVE_REFRESH_SECS
-    ) then
-        local ok, ref_err = self:_performRefresh()
-        if not ok then
-            return nil, ref_err
-        end
-    end
-
-    local function dispatch()
-        local layout = METHOD_ARG_LAYOUT[method_name]
-        if layout == "token-second" then
-            return BookLoreApi[method_name](BookLoreApi, self.server_url, self.token, unpack(extra_args))
-        elseif layout == "download-book" then
-            -- extra_args: book_id, dest_path, expected_size_kb
-            return BookLoreApi:downloadBook(self.server_url, extra_args[1], self.token, extra_args[2], extra_args[3])
-        elseif layout == "download-cover" then
-            -- extra_args: book_id, cover_updated_on, cache_dir
-            return BookLoreApi:downloadCover(self.server_url, extra_args[1], extra_args[2], self.token, extra_args[3])
-        end
-    end
-
-    local result, err = dispatch()
-
-    -- 401 handling — anchored match covers both "HTTP 401:" (get/post)
-    -- and bare "HTTP 401" (downloadCover/downloadBook) formats.
-    if err and err:match("^HTTP 401") then
-        if self.refresh_token then
-            -- Case A: refresh token present — attempt silent renewal then retry once
-            local ok, ref_err = self:_performRefresh()
-            if not ok then
-                if ref_err ~= "refresh-in-progress" then
-                    self.token = nil
-                    self.refresh_token = nil
-                    self.token_time = nil
-                    self.settings:delSetting("token")
-                    self.settings:delSetting("refresh_token")
-                    self.settings:delSetting("token_time")
-                    self.settings:flush()
-                    UIManager:show(InfoMessage:new{ text = _("Session expired. Please login again.") })
-                end
-                return nil, ref_err
-            end
-            result, err = dispatch()
-            if err and err:match("^HTTP 401") then
-                self.token = nil
-                self.refresh_token = nil
-                self.token_time = nil
-                self.settings:delSetting("token")
-                self.settings:delSetting("refresh_token")
-                self.settings:delSetting("token_time")
-                self.settings:flush()
-                UIManager:show(InfoMessage:new{ text = _("Session expired. Please login again.") })
-                return nil, err
-            end
-        else
-            -- Case B: legacy install — no refresh token; clear and prompt re-login
-            self.token = nil
-            self.token_time = nil
-            self.settings:delSetting("token")
-            self.settings:delSetting("refresh_token")
-            self.settings:delSetting("token_time")
-            self.settings:flush()
-            UIManager:show(InfoMessage:new{ text = _("Session expired. Please login again.") })
-            return nil, err
-        end
-    end
-
-    return result, err
-end
+-- There is deliberately no synchronous apiCall helper: every server call
+-- runs off the UI thread via Session:buildCallTask / buildBatchTask through
+-- self.async (the child runs session:call -- token splicing, silent refresh,
+-- the 401 retry state machine -- and the parent applies the result). A
+-- blocking UI-thread wrapper here would reintroduce exactly the freezes this
+-- design removes.
 
 -- ─── Offline library snapshot ────────────────────────────────────────
 -- Persisted copy of the last successful library fetch so the library opens
@@ -869,7 +576,7 @@ function BookLore:renderOfflineLibrary(snap)
 end
 
 function BookLore:browseLibrary()
-    local logged_in = self.token or self.refresh_token
+    local logged_in = self.session:isLoggedIn()
 
     -- The snapshot is loaded lazily: decoding a large library JSON from disk
     -- on every open would penalize the common online path, which never needs
@@ -917,57 +624,114 @@ end
 -- Fetch the library online and render it. On a network-class failure, fall back
 -- to the cached snapshot. `snap` is non-nil only when browseLibrary's
 -- logged-out gate already loaded it; otherwise the fallback loads on demand.
+-- All three list calls run as ONE async batch task (one child session, at
+-- most one shared token refresh) while a tap-to-dismiss message shows;
+-- dismissing cancels the fetch and drops straight to the offline copy.
 function BookLore:fetchAndShowLibrary(snap)
-    local books, err = self:apiCall("getBooks")
-    if not books then
-        -- apiCall already surfaced Session-expired on 401 paths. For a
-        -- network-class failure, fall back to the cached snapshot if we have one.
-        -- "not-logged-in" (tokens cleared by a prior 401) is NOT a server-confirmed
-        -- auth failure -- we simply hold no credentials to try -- so it falls back
-        -- to the cached library like any offline case.
-        local auth_err = err and (err:match("^HTTP 401") or err == "refresh-in-progress")
-        if not auth_err then
-            snap = snap or self:loadSnapshot()
-            if snap then
-                self:renderOfflineLibrary(snap)
-                return
-            end
+    if self._library_loading then return end
+    self._library_loading = true
+    -- Fresh online load: let previously-failed cover downloads be retried.
+    self._cover_attempted = {}
+
+    local job
+    local busy = InfoMessage:new{
+        text = _("Loading library…\n\nTap to use the offline copy instead."),
+        dismiss_callback = function()
+            self.async:cancel(job)
+        end,
+    }
+    UIManager:show(busy)
+
+    local task = self.session:buildBatchTask(self.server_url, {
+        { method = "getBooks" },
+        { method = "getShelves" },
+        { method = "getLibraries" },
+    })
+
+    local function fallBackToSnapshot(err, quiet)
+        snap = snap or self:loadSnapshot()
+        if snap then
+            self:renderOfflineLibrary(snap)
+            return
+        end
+        if not quiet then
             UIManager:show(InfoMessage:new{
                 text = T(_("Failed to fetch books:\n%1"), tostring(err)),
             })
         end
-        return
     end
 
-    self.offline_mode = false
+    job = self.async:run(task, function(payload, async_err)
+        self._library_loading = false
+        UIManager:close(busy)
 
-    if type(books) == "table" and type(books.content) == "table" then
-        books = books.content
-    end
+        if not payload then
+            -- Cancelled (user chose the offline copy: no error dialog) or
+            -- the task itself died; both degrade to the snapshot.
+            fallBackToSnapshot(async_err, async_err == "cancelled")
+            return
+        end
 
-    if type(books) ~= "table" or #books == 0 then
-        UIManager:show(InfoMessage:new{ text = _("No books found.") })
-        return
-    end
+        self.session:applyTokenSync(payload)
 
-    self.cached_books = books
+        local books = payload.results[1].result
+        local err = payload.results[1].err
+        if not books then
+            -- Always show the cached copy so the user keeps reading; the
+            -- message tells them whether to act. Three cases:
+            --  * payload.expired: the server reachably rejected our login
+            --    (token expired / couldn't refresh). applyTokenSync above
+            --    already showed the "sign-in expired, log in again" notice, so
+            --    stay quiet here and just render the copy.
+            --  * not-logged-in: we hold no credentials at all -- prompt a login
+            --    (this is NOT an offline case; the server may be perfectly
+            --    reachable, we just have nothing to authenticate with).
+            --  * otherwise: a network/server failure -- render the copy, or
+            --    surface the error if there is no copy. The offline banner
+            --    already signals a plain connectivity drop.
+            if payload.expired then
+                fallBackToSnapshot(err, true)
+            elseif err == "not-logged-in" then
+                fallBackToSnapshot(err, true)
+                UIManager:show(InfoMessage:new{
+                    text = _("You're signed out of BookLore. Log in again to load your library."),
+                })
+            else
+                fallBackToSnapshot(err, false)
+            end
+            return
+        end
 
-    local shelves = self:apiCall("getShelves")
-    self.cached_shelves = (type(shelves) == "table") and shelves or {}
+        self.offline_mode = false
 
-    local libraries = self:apiCall("getLibraries")
-    self.cached_libraries = (type(libraries) == "table") and libraries or {}
+        if type(books) == "table" and type(books.content) == "table" then
+            books = books.content
+        end
 
-    -- Persist a fresh snapshot for offline use.
-    self:saveSnapshot(books, self.cached_shelves, self.cached_libraries)
+        if type(books) ~= "table" or #books == 0 then
+            UIManager:show(InfoMessage:new{ text = _("No books found.") })
+            return
+        end
 
-    self:indexShelves(books)
+        self.cached_books = books
 
-    -- Ensure cover cache directory exists
-    self.cover_cache_dir = DataStorage:getDataDir() .. "/cache/booklore"
-    lfs.mkdir(self.cover_cache_dir)
+        local shelves = payload.results[2].result
+        self.cached_shelves = (type(shelves) == "table") and shelves or {}
 
-    self:showDashboard()
+        local libraries = payload.results[3].result
+        self.cached_libraries = (type(libraries) == "table") and libraries or {}
+
+        -- Persist a fresh snapshot for offline use.
+        self:saveSnapshot(books, self.cached_shelves, self.cached_libraries)
+
+        self:indexShelves(books)
+
+        -- Ensure cover cache directory exists
+        self.cover_cache_dir = DataStorage:getDataDir() .. "/cache/booklore"
+        lfs.mkdir(self.cover_cache_dir)
+
+        self:showDashboard()
+    end)
 end
 
 -- ─── UI helpers ──────────────────────────────────────────────────────
@@ -1102,13 +866,77 @@ function BookLore:buildTopBar(on_menu, on_search, on_close)
 end
 
 --- Resolve an already-cached cover file without any network request.
--- Deliberately calls BookLoreApi directly rather than through apiCall: the
--- probe needs no token, and apiCall's not-logged-in gate must never block
--- offline rendering. The filename scheme lives in findCachedCover (shared
--- with downloadCover's cache-hit path). Returns the path or nil.
+-- Deliberately calls BookLoreApi directly: the probe needs no token, runs no
+-- network, and must never be gated by login state (it backs offline
+-- rendering). The filename scheme lives in findCachedCover (shared with
+-- downloadCover's cache-hit path). Returns the path or nil.
 function BookLore:cachedCoverPath(book)
     if not (book and book.id and self.cover_cache_dir) then return nil end
     return (BookLoreApi:findCachedCover(book.id, book.coverUpdatedOn, self.cover_cache_dir))
+end
+
+-- ─── Deferred render-time network work ───────────────────────────────
+-- Cover downloads and detail-page enrichment used to run synchronously
+-- inside widget construction, so rendering a dashboard or detail page did
+-- N blocking HTTP requests before anything painted. Now construction is
+-- pure and instant: cache hits render immediately, misses queue here, and
+-- _flushDeferredCalls runs the whole queue as ONE async batch (one child
+-- session, one shared token refresh), re-rendering in place when results
+-- land. The view paints now; covers and blurbs fill in a moment later.
+
+function BookLore:_resetDeferred()
+    self._deferred_calls = {}
+end
+
+-- Queue a cover cache miss for the deferred batch. Keyed by id+stamp so a
+-- changed cover re-fetches across opens, but each miss is attempted only
+-- once per online library load (reset in fetchAndShowLibrary): a cover that
+-- fails to download must not re-queue forever on each in-place re-render.
+function BookLore:_noteCoverMiss(book)
+    if not (book and book.id and self.cover_cache_dir) then return end
+    local key = tostring(book.id) .. "_" .. tostring(book.coverUpdatedOn)
+    self._cover_attempted = self._cover_attempted or {}
+    if self._cover_attempted[key] then return end
+    self._cover_attempted[key] = true
+    self._deferred_calls = self._deferred_calls or {}
+    self._deferred_calls[#self._deferred_calls + 1] = {
+        method = "downloadCover",
+        args = { book.id, book.coverUpdatedOn, self.cover_cache_dir },
+    }
+end
+
+-- Run the render's queued calls as one async batch, then re-render in
+-- place. current_fn is an identity guard: a completion that lands after the
+-- user navigated away (widget reference replaced) is dropped rather than
+-- popping a stale view back on screen.
+function BookLore:_flushDeferredCalls(current_fn, rerender_fn)
+    local calls = self._deferred_calls or {}
+    self._deferred_calls = {}
+    if #calls == 0 then return end
+    local task = self.session:buildBatchTask(self.server_url, calls)
+    self.async:run(task, function(payload, async_err)
+        if not payload then return end -- cancelled or task died: leave the view as-is
+        self.session:applyTokenSync(payload)
+        local changed = false
+        for i = 1, #calls do
+            local res = payload.results[i]
+            if calls[i].apply then
+                if calls[i].apply(res.result, res.err) then changed = true end
+            elseif res.result then
+                changed = true -- a cover downloaded to disk
+            end
+        end
+        if changed and current_fn() then
+            rerender_fn()
+        end
+    end)
+end
+
+function BookLore:_refreshDashboard()
+    if not self.dashboard_widget then return end
+    UIManager:close(self.dashboard_widget)
+    self:showDashboard()
+    UIManager:setDirty(self.dashboard_widget, "ui")
 end
 
 --- Build a single cover card (cover image + title + author).
@@ -1126,15 +954,17 @@ function BookLore:buildCoverCard(book, card_w, on_tap)
         if #meta.authors > 1 then authors = authors .. " …" end
     end
 
-    -- Try to load cover from cache (download if needed).
-    -- Guard accepts refresh_token alone: apiCall triggers a pre-emptive
-    -- refresh so the cover call has a live access token. (ref: DL-001, DL-006)
+    -- Cache-only: a hit renders the image now, a miss renders a placeholder
+    -- and queues the download for the deferred batch (_noteCoverMiss). No
+    -- network happens during construction, so the row paints instantly and
+    -- covers fill in on the in-place re-render. (ref: DL-001, DL-006)
     local cover_widget = nil
     local path
     if self.offline_mode then
         path = self:cachedCoverPath(book)
-    elseif book.id and (self.token or self.refresh_token) and self.cover_cache_dir then
-        path = self:apiCall("downloadCover", book.id, book.coverUpdatedOn, self.cover_cache_dir)
+    elseif book.id and self.session:isLoggedIn() and self.cover_cache_dir then
+        path = self:cachedCoverPath(book)
+        if not path then self:_noteCoverMiss(book) end
     end
     if path then
         local ok, img = pcall(ImageWidget.new, ImageWidget, {
@@ -1265,12 +1095,16 @@ end
 function BookLore:showDashboard()
     local books = self.cached_books
     if not books then return end
+    self:_resetDeferred()
     local screen_w = Screen:getWidth()
     local screen_h = Screen:getHeight()
 
     local on_tap_book = function(book)
         if self.dashboard_widget then
             UIManager:close(self.dashboard_widget)
+            -- Drop the reference so a late cover-batch completion's identity
+            -- guard (dashboard_widget == captured) fails and won't re-show it.
+            self.dashboard_widget = nil
         end
         self._back_from_detail = function() self:showDashboard() end
         self:showBookDetail(book)
@@ -1284,6 +1118,7 @@ function BookLore:showDashboard()
         function()  -- Search
             if self.dashboard_widget then
                 UIManager:close(self.dashboard_widget)
+                self.dashboard_widget = nil
             end
             self:showSearch()
         end,
@@ -1354,6 +1189,13 @@ function BookLore:showDashboard()
 
     UIManager:show(self.dashboard_widget)
     UIManager:setDirty("all", "ui")
+
+    -- Download any missing covers off-thread, then repaint in place. Guarded
+    -- on widget identity so navigating away before covers land is a no-op.
+    local shown = self.dashboard_widget
+    self:_flushDeferredCalls(
+        function() return self.dashboard_widget == shown end,
+        function() self:_refreshDashboard() end)
 end
 
 -- ─── Sidebar overlay ─────────────────────────────────────────────────
@@ -2237,37 +2079,19 @@ end
 
 -- ─── Download infrastructure ─────────────────────────────────────────
 
+-- Registry + destination-path logic lives in downloads.lua (the registry is
+-- the contract booklore_sync reads to map file paths back to book ids);
+-- these thin delegates keep the existing call sites unchanged.
 function BookLore:buildDestPath(book)
-    local raw_name = book.fileName or ("book_" .. tostring(book.id))
-    local safe_name = util.getSafeFilename(raw_name, self.download_dir)
-    local path = self.download_dir .. "/" .. safe_name
-    return util.fixUtf8(path, "_")
+    return self.downloads:destPath(book)
 end
 
 function BookLore:getLocalPath(book)
-    if not book.id then return nil end
-    local key = registryKey(self.server_url, book.id)
-    local entry = self.download_registry:readSetting(key)
-    if entry and entry.path then
-        if lfs.attributes(entry.path, "mode") == "file" then
-            return entry.path
-        else
-            self.download_registry:delSetting(key)
-            self.download_registry:flush()
-            return nil
-        end
-    end
-    return nil
+    return self.downloads:localPath(self.server_url, book)
 end
 
 function BookLore:registerDownload(book, path)
-    local key = registryKey(self.server_url, book.id)
-    self.download_registry:saveSetting(key, {
-        path = path,
-        server_id = book.id,
-        server_url = self.server_url,
-    })
-    self.download_registry:flush()
+    self.downloads:register(self.server_url, book, path)
 end
 
 function BookLore:refreshDetailView(book)
@@ -2287,33 +2111,108 @@ function BookLore:refreshDetailView(book)
 end
 
 function BookLore:downloadBook(book)
-    if not self.token and not self.refresh_token then
+    if not self.session:isLoggedIn() then
         UIManager:show(InfoMessage:new{ text = _("Not logged in.") })
         return
     end
-    if not NetworkMgr:isWifiOn() then NetworkMgr:turnOnWifi() end
+    if self._downloading_id then return end -- one transfer at a time
+    -- Callback form, NOT fire-and-forget turnOnWifi(): association takes
+    -- seconds on Kindle, and a request fired before it completes burns its
+    -- whole connect timeout against a down interface.
+    if not NetworkMgr:isWifiOn() then
+        NetworkMgr:turnOnWifi(function() self:_startBookDownload(book) end)
+        return
+    end
+    self:_startBookDownload(book)
+end
 
+--- Run the download in an async subprocess: child streams to dest..".part",
+-- parent polls the part-file size for live progress and renames into place
+-- on success. Tapping the progress message cancels (kills the child).
+function BookLore:_startBookDownload(book)
     local dest = self:buildDestPath(book)
+    local tmp = dest .. ".part"
+    local title = (book.metadata or {}).title or book.fileName or _("book")
+    local expected_bytes = (book.fileSizeKb or 0) * 1024
 
     self._downloading_id = book.id
     self:refreshDetailView(book)
 
-    UIManager:scheduleIn(0.1, function()
-        local ok, err = self:apiCall("downloadBook", book.id, dest, book.fileSizeKb)
+    local job
+    local progress_box
+    local last_pct_shown = -100
+    local function showProgress(pct)
+        if progress_box then UIManager:close(progress_box) end
+        local pct_text = pct and string.format(" %d%%", pct) or ""
+        progress_box = InfoMessage:new{
+            text = T(_("Downloading %1…%2\n\nTap to cancel."), title, pct_text),
+            dismiss_callback = function()
+                progress_box = nil
+                self.async:cancel(job)
+            end,
+        }
+        UIManager:show(progress_box)
+    end
+
+    local task = self.session:buildCallTask(
+        self.server_url, "downloadBook", book.id, tmp, book.fileSizeKb)
+
+    job = self.async:run(task, function(payload, async_err)
+        if progress_box then
+            UIManager:close(progress_box)
+            progress_box = nil
+        end
         self._downloading_id = nil
+        if async_err == "cancelled" or not payload then
+            os.remove(tmp)
+            self:refreshDetailView(book)
+            if async_err and async_err ~= "cancelled" then
+                UIManager:show(InfoMessage:new{
+                    text = T(_("Download failed:\n%1"), tostring(async_err)),
+                })
+            end
+            return
+        end
+        local ok, err = self.session:applyCallResult(payload)
         if ok then
+            os.remove(dest)
+            os.rename(tmp, dest)
             self:registerDownload(book, dest)
             self:refreshDetailView(book)
-        elseif not (err and (err:match("^HTTP 401") or err == "refresh-in-progress" or err == "not-logged-in")) then
-            -- Suppress double dialog when apiCall already surfaced auth
-            -- errors. Auto-login (DL-009, rejected) would interrupt the
-            -- reader; silent refresh in apiCall is preferred. (ref: DL-001, DL-006, DL-009)
-            UIManager:show(InfoMessage:new{
-                text = T(_("Download failed:\n%1"), tostring(err)),
-            })
+        else
+            os.remove(tmp)
             self:refreshDetailView(book)
+            if not (err and (err:match("^HTTP 401") or err == "refresh-in-progress" or err == "not-logged-in")) then
+                -- Suppress double dialog when applyCallResult already surfaced
+                -- auth errors. Auto-login (DL-009, rejected) would interrupt the
+                -- reader; silent refresh in the task is preferred. (ref: DL-001, DL-006, DL-009)
+                UIManager:show(InfoMessage:new{
+                    text = T(_("Download failed:\n%1"), tostring(err)),
+                })
+            end
         end
-    end)
+    end, {
+        on_progress = function()
+            if not progress_box then return end -- dismissed; cancel in flight
+            local size = lfs.attributes(tmp, "size") or 0
+            if expected_bytes > 0 then
+                local pct = math.floor(size / expected_bytes * 100)
+                if pct > 99 then pct = 99 end
+                -- Decile steps keep e-ink repaints to at most ten per transfer.
+                if pct - last_pct_shown >= 10 then
+                    last_pct_shown = pct
+                    showProgress(pct)
+                end
+            end
+        end,
+    })
+
+    -- Skip when the job already completed: the inline fallback executor
+    -- finishes synchronously inside run(), and a box shown now would have
+    -- no closer left to run.
+    if not job.finished then
+        showProgress(expected_bytes > 0 and 0 or nil)
+    end
 end
 
 function BookLore:openBook(file_path)
@@ -2368,20 +2267,34 @@ function BookLore:showBookDetail(book)
     local meta = book.metadata or {}
     book.metadata = meta   -- ensure enrichment below persists on the cached book
 
+    self:_resetDeferred()
+
     -- The list endpoint (getBooks) omits the description, so fetch the full
     -- record once to get the blurb (and any other heavy fields the list view
-    -- drops), merging it into the cached book so reopens are instant. Guarded
-    -- by _enriched so Show more / Reveal rebuilds don't refetch.
-    if book.id and not meta._enriched and not self.offline_mode and (self.token or self.refresh_token) then
-        local full = self:apiCall("getBook", book.id)
-        if type(full) == "table" and type(full.metadata) == "table" then
-            for k, v in pairs(full.metadata) do
-                if meta[k] == nil then meta[k] = v end
-            end
-            -- Mark enriched only on success, so a transient fetch failure
-            -- retries on the next open instead of permanently hiding the blurb.
-            meta._enriched = true
-        end
+    -- drops), merging it into the cached book so reopens are instant. The
+    -- fetch is DEFERRED into the page's async batch: the page paints now
+    -- (without the blurb), and the in-place re-render fills it in. Guarded by
+    -- _enriched (so Show more / Reveal rebuilds don't refetch) and by
+    -- _detail_extras_id (so the post-fetch re-render doesn't re-queue it).
+    if book.id and not meta._enriched and not self.offline_mode
+            and self.session:isLoggedIn() and self._detail_extras_id ~= book.id then
+        self._deferred_calls[#self._deferred_calls + 1] = {
+            method = "getBook",
+            args = { book.id },
+            apply = function(full)
+                if type(full) == "table" and type(full.metadata) == "table" then
+                    for k, v in pairs(full.metadata) do
+                        if meta[k] == nil then meta[k] = v end
+                    end
+                    -- Mark enriched only on success, so a transient fetch
+                    -- failure retries on the next open rather than permanently
+                    -- hiding the blurb.
+                    meta._enriched = true
+                    return true
+                end
+                return false
+            end,
+        }
     end
 
     local screen_w = Screen:getWidth()
@@ -2408,6 +2321,8 @@ function BookLore:showBookDetail(book)
         self._detail_scroll_y = 0
         self._detail_recs = nil
         self._detail_recs_id = nil
+        -- New book: allow its blurb + recommendations to be fetched once.
+        self._detail_extras_id = nil
     end
 
     -- Create the page widget early so the horizontally-scrollable cover strips
@@ -2507,7 +2422,8 @@ function BookLore:showBookDetail(book)
     if self.offline_mode then
         cover_path = self:cachedCoverPath(book)
     elseif book.id and self.cover_cache_dir then
-        cover_path = self:apiCall("downloadCover", book.id, book.coverUpdatedOn, self.cover_cache_dir)
+        cover_path = self:cachedCoverPath(book)
+        if not cover_path and self.session:isLoggedIn() then self:_noteCoverMiss(book) end
     end
     if cover_path then
         local ok, img = pcall(ImageWidget.new, ImageWidget, {
@@ -2889,24 +2805,35 @@ function BookLore:showBookDetail(book)
     end
 
     -- ── 8. Similar Books (recommendations endpoint, horizontal scroll) ──
-    -- Mirrors the web "Similar Books" strip. Fetched once per book and cached
-    -- so Show more / Reveal rebuilds don't refetch. series_ids is unused now
-    -- that this is server-driven rather than derived from the cached list.
-    if book.id and not self.offline_mode and (self.token or self.refresh_token) then
-        if not self._detail_recs or self._detail_recs_id ~= book.id then
-            local recs = self:apiCall("getRecommendations", book.id)
-            local list = {}
-            if type(recs) == "table" then
-                for _, r in ipairs(recs) do
-                    if type(r) == "table" and type(r.book) == "table" then
-                        table.insert(list, r.book)
+    -- Mirrors the web "Similar Books" strip. The fetch is DEFERRED into the
+    -- page's async batch (guarded by _detail_extras_id so the post-fetch
+    -- re-render doesn't re-queue it); the strip renders on the re-render once
+    -- _detail_recs is populated, and its cover cards queue their own covers
+    -- for a second batch. series_ids is unused now that this is server-driven.
+    if book.id and not self.offline_mode and self.session:isLoggedIn() then
+        if (not self._detail_recs or self._detail_recs_id ~= book.id)
+                and self._detail_extras_id ~= book.id then
+            self._deferred_calls[#self._deferred_calls + 1] = {
+                method = "getRecommendations",
+                args = { book.id },
+                apply = function(recs)
+                    local list = {}
+                    if type(recs) == "table" then
+                        for _, r in ipairs(recs) do
+                            if type(r) == "table" and type(r.book) == "table" then
+                                table.insert(list, r.book)
+                            end
+                        end
                     end
-                end
-            end
-            self._detail_recs = list
-            self._detail_recs_id = book.id
+                    -- Record the id even on an empty/failed result so a later
+                    -- re-render treats it as fetched rather than re-queueing.
+                    self._detail_recs = list
+                    self._detail_recs_id = book.id
+                    return #list > 0
+                end,
+            }
         end
-        if #self._detail_recs > 0 then
+        if self._detail_recs and #self._detail_recs > 0 then
             rule()
             add(sectionHeader(_("Similar Books")))
             local r = scrollStrip(self._detail_recs, on_tap_detail)
@@ -3088,6 +3015,15 @@ function BookLore:showBookDetail(book)
     table.insert(self.detail_widget, frame)
     UIManager:show(self.detail_widget)
     UIManager:setDirty("all", "ui")
+
+    -- Mark this book's blurb + recommendations as attempted so the in-place
+    -- re-render below doesn't re-queue them (covers re-queue freely via their
+    -- own attempted set), then run the page's deferred batch and repaint.
+    self._detail_extras_id = book.id
+    local shown = self.detail_widget
+    self:_flushDeferredCalls(
+        function() return self.detail_widget == shown end,
+        function() self:refreshDetailView(book) end)
 end
 
 return BookLore

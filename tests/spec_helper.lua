@@ -11,9 +11,9 @@ local spec_helper = {}
 
 local PLUGIN_PREFIXES = {
     "booklore", "booklore_sync", "cfi", "api", "view",
-    "queue", "library_cache",
+    "queue", "library_cache", "downloads", "session", "tailscale", "async",
     "logger", "luasettings", "datastorage",
-    "json", "ltn12", "optmath", "gettext",
+    "json", "ltn12", "optmath", "gettext", "util",
 }
 
 local function purge_plugin_modules()
