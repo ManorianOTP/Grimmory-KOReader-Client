@@ -323,6 +323,41 @@ function Tailscale:isConnected()
         status_out
 end
 
+--- A concise, user-facing status summary parsed from `tailscale status --json`,
+-- so the UI can show "connected, this device, IP, N peers online" instead of
+-- the raw `tailscale status` dump (every peer + a trailing health-check block).
+-- @return table { state, hostname, ip, dns, self_online, peers_online,
+--                 peers_total } on success, or nil + error message.
+function Tailscale:statusSummary()
+    local out, code = self.exec(self.cmd .. " status --json")
+    if code ~= 0 then
+        return nil, (out ~= "" and out) or "tailscale status failed"
+    end
+    local json = require("json")
+    local ok, data = pcall(json.decode, out)
+    if not ok or type(data) ~= "table" then
+        return nil, "could not parse tailscale status"
+    end
+    local node = data.Self or {}
+    local ips = node.TailscaleIPs or {}
+    local peers_online, peers_total = 0, 0
+    if type(data.Peer) == "table" then
+        for _, peer in pairs(data.Peer) do
+            peers_total = peers_total + 1
+            if peer.Online then peers_online = peers_online + 1 end
+        end
+    end
+    return {
+        state = data.BackendState,   -- Running / Stopped / NeedsLogin / NoState / …
+        hostname = node.HostName,
+        dns = node.DNSName,
+        ip = ips[1],
+        self_online = node.Online,
+        peers_online = peers_online,
+        peers_total = peers_total,
+    }
+end
+
 --- Run `tailscale up` and classify the result.
 -- @return true on success;
 --         false, auth_url|nil, output on failure (auth_url present when

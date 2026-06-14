@@ -286,6 +286,38 @@ describe("Tailscale", function()
         end)
     end)
 
+    describe("statusSummary", function()
+        it("summarizes the JSON status (state, self, peer counts)", function()
+            local json_out = [[{
+                "BackendState": "Running",
+                "Self": { "HostName": "my-kindle", "DNSName": "my-kindle.tail.ts.net.",
+                          "TailscaleIPs": ["100.64.0.5"], "Online": true },
+                "Peer": {
+                    "k1": { "HostName": "laptop", "Online": true },
+                    "k2": { "HostName": "phone",  "Online": false }
+                }
+            }]]
+            local ts = make_ts({ exec = make_fake_exec({
+                { pattern = "status %-%-json", out = json_out, code = 0 },
+            }) })
+            local s = ts:statusSummary()
+            assert.are.equal("Running", s.state)
+            assert.are.equal("my-kindle", s.hostname)
+            assert.are.equal("100.64.0.5", s.ip)
+            assert.are.equal(1, s.peers_online)
+            assert.are.equal(2, s.peers_total)
+        end)
+
+        it("returns an error when the status command fails", function()
+            local ts = make_ts({ exec = make_fake_exec({
+                { pattern = "status %-%-json", out = "boom", code = 1 },
+            }) })
+            local s, err = ts:statusSummary()
+            assert.is_nil(s)
+            assert.matches("boom", err)
+        end)
+    end)
+
     describe("installed/daemon detection", function()
         it("isInstalled requires both binaries on disk", function()
             local ts = make_ts({ exec = make_fake_exec({}) })

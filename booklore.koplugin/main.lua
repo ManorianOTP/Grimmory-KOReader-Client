@@ -334,25 +334,43 @@ function BookLore:showTailscaleStatus()
         return
     end
 
-    -- `tailscale status` is local IPC (fast normally) but shares the
-    -- unbounded io.popen, so a wedged daemon would hang the UI. Run it off
-    -- the UI thread like every other shell-out.
+    -- `tailscale status --json` is local IPC (fast normally) but shares the
+    -- unbounded io.popen, so a wedged daemon would hang the UI. Run it off the
+    -- UI thread like every other shell-out. We summarize the JSON rather than
+    -- dump the raw peer list + trailing health-check block.
     self.async:run(function()
-        local output, code = self.tailscale:status()
-        return { output = output, code = code }
+        local summary, err = self.tailscale:statusSummary()
+        return { summary = summary, err = err }
     end, function(res)
-        if not res or res.code ~= 0 then
-            local msg = (res and res.output ~= "" and res.output) or "Unknown error."
+        if not res or not res.summary then
             UIManager:show(InfoMessage:new{
-                text = T(_("tailscale status failed:\n%1"), msg),
+                text = T(_("Couldn't read Tailscale status:\n%1"),
+                    tostring(res and res.err or "unknown error")),
                 width = Screen:getWidth() * 0.9,
             })
             return
         end
-        UIManager:show(InfoMessage:new{
-            text = res.output,
-            width = Screen:getWidth() * 0.9,
-        })
+        local s = res.summary
+        local state_label
+        if s.state == "Running" then state_label = _("Connected")
+        elseif s.state == "Stopped" then state_label = _("Stopped (use Connect)")
+        elseif s.state == "NeedsLogin" then state_label = _("Needs sign-in (use Connect)")
+        elseif s.state == "NeedsMachineAuth" then state_label = _("Waiting for admin approval")
+        elseif s.state == "Starting" then state_label = _("Starting…")
+        else state_label = tostring(s.state or _("Unknown")) end
+
+        local lines = { T(_("Status: %1"), state_label) }
+        if s.hostname and s.hostname ~= "" then
+            lines[#lines + 1] = T(_("This device: %1"), s.hostname)
+        end
+        if s.ip and s.ip ~= "" then
+            lines[#lines + 1] = T(_("Tailscale IP: %1"), s.ip)
+        end
+        if (s.peers_total or 0) > 0 then
+            lines[#lines + 1] = T(_("Peers online: %1 of %2"),
+                tostring(s.peers_online), tostring(s.peers_total))
+        end
+        UIManager:show(InfoMessage:new{ text = table.concat(lines, "\n") })
     end)
 end
 
@@ -413,7 +431,9 @@ end
 function BookLore:_tailscaleUp()
     local job
     local busy = InfoMessage:new{
-        text = _("Connecting to Tailscale…\n\nTap to cancel."),
+        text = _("Connecting to Tailscale…\n\n"
+            .. "On the first connect this can take up to 30 seconds before the "
+            .. "sign-in QR code appears — please wait.\n\nTap to cancel."),
         dismiss_callback = function() self.async:cancel(job) end,
     }
     UIManager:show(busy)

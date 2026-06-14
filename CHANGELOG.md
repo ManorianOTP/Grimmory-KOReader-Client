@@ -22,12 +22,21 @@ release.
 - README, INSTALL (USB / AppStore / scp install paths), and TROUBLESHOOTING docs.
 - `scripts/deploy.sh` (one-command scp deploy) and `scripts/release.sh`
   (test-gated release builder).
+- **Tailscale ▸ Update Tailscale** menu item (Tailscale doesn't self-update here):
+  checks the installed version against the latest and updates if newer.
+- Uninstall (erase-everything) now also removes the app-installed Tailscale.
 
 ### Changed
 - The login dialog no longer pre-fills a hardcoded personal server URL; the field
   starts from your saved value (empty on first run) with an example hint.
-- Tailscale install retries a transient download failure once and verifies the
-  node actually connected.
+- Tailscale install now reads the version + exact filename from
+  pkgs.tailscale.com's own manifest, fixing a download 404 caused by the GitHub
+  release tag running ahead of the published static build. Retries a transient
+  download failure once.
+- Tailscale **Status** now shows a clean summary (connection state, this device,
+  IP, peers online) instead of dumping every peer plus the health-check block.
+- The Tailscale connect screen warns that the first connect can take up to ~30 s
+  before the sign-in QR code appears.
 - Library shows an explicit empty-state message when filters/search match nothing.
 - Active filters now persist across restarts (like sort/order already did).
 
