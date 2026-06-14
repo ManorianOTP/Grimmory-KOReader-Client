@@ -678,10 +678,9 @@ function BookLore:showAccountSwitcher()
             if identity then
                 self.server_url = identity.server_url
                 self.username = identity.username
-                UIManager:show(InfoMessage:new{
-                    text = T(_("Switched to %1. Loading library…"),
-                        tostring(identity.username)),
-                })
+                -- browseLibrary shows its own "Loading library…" indicator and
+                -- closes it when the library renders, so don't stack a second,
+                -- never-closed message on top (it would orphan behind the list).
                 self:browseLibrary()
             end
         end,
