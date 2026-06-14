@@ -1,0 +1,29 @@
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Personal shell / tool configs that sometimes live in the work tree
+.bash_profile
+.bashrc
+.profile
+.zprofile
+.zshrc
+.gitconfig
+.ripgreprc
+
+.mcp.json
+
+# Test harness local artifacts (see tests/.gitignore for fixtures/recorded)
+tests/.busted-cache/
+
+# Release build staging produced by scripts/release.sh
+/build/
+/dist/
+*.koplugin.tar.gz
+*.sha256
