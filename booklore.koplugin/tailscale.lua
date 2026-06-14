@@ -209,20 +209,28 @@ function Tailscale:install(notify)
     self.exec("rm -rf " .. self.tmp_root)
     self.exec("mkdir -p " .. self.tmp_root)
 
-    local f, open_err = io.open(tmp_tgz, "wb")
-    if not f then
-        return fail("Cannot create temp file: " .. tostring(open_err))
-    end
-
     logger.info("BookLore: downloading", url)
 
-    local dl_result, dl_code = self:_request{
-        url = url,
-        sink = ltn12.sink.file(f),  -- closes f automatically
-        headers = {
-            ["User-Agent"] = "KOReader-BookLore/1.0",
-        },
-    }
+    -- Retry once on a transient failure: a dropped connection partway through
+    -- the ~30 MB download used to leave a partial tarball and fail permanently.
+    local dl_result, dl_code
+    for attempt = 1, (self.download_attempts or 2) do
+        local f, open_err = io.open(tmp_tgz, "wb")
+        if not f then
+            return fail("Cannot create temp file: " .. tostring(open_err))
+        end
+        dl_result, dl_code = self:_request{
+            url = url,
+            sink = ltn12.sink.file(f),  -- closes f automatically
+            headers = {
+                ["User-Agent"] = "KOReader-BookLore/1.0",
+            },
+        }
+        if dl_result and dl_code == 200 then break end
+        logger.warn("BookLore: Tailscale download attempt", attempt,
+            "failed (HTTP", tostring(dl_code), ")")
+        self.exec("rm -f " .. tmp_tgz)  -- clear the partial before retrying
+    end
     if not dl_result or dl_code ~= 200 then
         return fail("Download failed (HTTP " .. tostring(dl_code) .. "):\n" .. url)
     end

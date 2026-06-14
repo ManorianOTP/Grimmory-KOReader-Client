@@ -127,6 +127,47 @@ describe("Tailscale", function()
             assert.are.equal(2, #progress)
         end)
 
+        it("retries once when the tarball download has a transient failure", function()
+            local tgz, tgz_name = build_tarball("1.80.0")
+            http_handle = spec_helper.start_http_fixture({
+                { path = "/releases/latest", body = '{"tag_name": "v1.80.0"}' },
+                { path = "/stable/" .. tgz_name, body_file = tgz },
+            })
+            local real = require("socket.http").request
+            local tgz_attempts = 0
+            local flaky = function(req)
+                if req.url:match("%.tgz$") then
+                    tgz_attempts = tgz_attempts + 1
+                    if tgz_attempts == 1 then return nil, 500 end  -- dropped connection
+                end
+                return real(req)
+            end
+            local ts = make_ts({ request = flaky })
+            local version, err = ts:install()
+            assert.is_nil(err)
+            assert.are.equal("1.80.0", version)
+            assert.are.equal(2, tgz_attempts)  -- failed once, then succeeded
+            assert.is_true(ts:isInstalled())
+        end)
+
+        it("gives up and cleans up after the retry budget is exhausted", function()
+            local _tgz, tgz_name = build_tarball("1.80.0")
+            http_handle = spec_helper.start_http_fixture({
+                { path = "/releases/latest", body = '{"tag_name": "v1.80.0"}' },
+                { path = "/stable/" .. tgz_name, body_file = _tgz },
+            })
+            local real = require("socket.http").request
+            local flaky = function(req)
+                if req.url:match("%.tgz$") then return nil, 500 end
+                return real(req)
+            end
+            local ts = make_ts({ request = flaky })
+            local version, err = ts:install()
+            assert.is_nil(version)
+            assert.matches("Download failed", err)
+            assert.are_not.equal(0, os.execute("test -d '" .. ts.tmp_root .. "'"))
+        end)
+
         it("fails when the release feed returns an HTTP error", function()
             http_handle = spec_helper.start_http_fixture({
                 { path = "/releases/latest", status = 500, body = "boom" },

@@ -123,7 +123,8 @@ function BookLore:init()
             dir = self.settings:readSetting("view_sort_dir", "asc"),
         },
         combine = self.settings:readSetting("view_combine", "AND"),
-        filters = {},
+        -- Persisted like sort/combine so an active filter survives a restart.
+        filters = self.settings:readSetting("view_filters") or {},
     }
 
     -- True while the library is rendered read-only from the on-disk snapshot
@@ -1808,10 +1809,6 @@ function BookLore:showSidebar()
         end)
     end
 
-    -- ── MAGIC SHELVES ──
-    addSeparator()
-    addHeader(_("MAGIC SHELVES"))
-
     -- Sidebar left panel
     local sidebar_panel = FrameContainer:new{
         width = sidebar_w,
@@ -1953,6 +1950,16 @@ function BookLore:showBookList(base_set, title, back_callback)
             mandatory = status,
             info = authors,
             book_data = book,
+        })
+    end
+
+    -- Empty state: a filtered view with no matches would otherwise render as a
+    -- blank list under the view-options row, reading as "broken".
+    if #view_result == 0 then
+        table.insert(item_table, {
+            text = (n_active > 0) and _("No books match these filters.")
+                or _("No books here."),
+            is_empty_state = true,
         })
     end
 
@@ -2165,6 +2172,14 @@ end
 
 -- ─── Filter menu (dimension list) ────────────────────────────────────
 
+-- Persist the active filter selection so it survives a restart (sort + combine
+-- already persist). The table is plain nested booleans, so LuaSettings can
+-- serialize it directly.
+function BookLore:_saveFilters()
+    self.settings:saveSetting("view_filters", self.view_state.filters)
+    self.settings:flush()
+end
+
 function BookLore:showFilterMenu(base_set, parent_title, back_callback)
     local navigated = false
 
@@ -2251,6 +2266,7 @@ function BookLore:showFilterMenu(base_set, parent_title, back_callback)
             end
             if item.is_clear_all then
                 self.view_state.filters = {}
+                self:_saveFilters()
                 refresh_in_place()
                 return
             end
@@ -2354,6 +2370,7 @@ function BookLore:showFilterValues(base_set, parent_title, back_callback, dim_ke
                 local cur = self.view_state.filters[dim_key][item.value_key]
                 self.view_state.filters[dim_key][item.value_key] = not cur
             end
+            self:_saveFilters()
 
             -- Refresh picker in-place (preserves scroll position; no close/reopen).
             -- Falls back gracefully if switchItemTable is not available.
