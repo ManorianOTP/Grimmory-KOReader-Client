@@ -495,10 +495,10 @@ end
 
 function BookLore:showLoginDialog()
     -- "Set as default" controls whether this login overwrites the saved
-    -- server URL + username (the dialog pre-fill). Defaults ON; turn it off
-    -- for a one-off login to another server/account without losing your
-    -- usual default. The checkmark is a self-managed toggle button.
-    if self._login_set_default == nil then self._login_set_default = true end
+    -- server URL + username (the dialog pre-fill). Reset ON every time the
+    -- dialog opens; turn it off for a one-off login to another server/account
+    -- without losing your usual default. The checkmark is a self-managed toggle.
+    self._login_set_default = true
     local function default_label()
         return (self._login_set_default and "☑ " or "☐ ") .. _("Set as default")
     end
@@ -753,14 +753,16 @@ end
 function BookLore:_purgePaths()
     local paths = {}
     local settings_dir = DataStorage:getSettingsDir()
-    local ok, iter = pcall(lfs.dir, settings_dir)
-    if ok then
-        for entry in iter do
+    -- Wrap the whole iteration in pcall and use the direct lfs.dir idiom so the
+    -- directory object stays alive in the generic-for state (capturing just the
+    -- iterator could let it be GC'd mid-scan).
+    pcall(function()
+        for entry in lfs.dir(settings_dir) do
             if type(entry) == "string" and entry:match("^booklore") then
                 paths[#paths+1] = settings_dir .. "/" .. entry
             end
         end
-    end
+    end)
     paths[#paths+1] = DataStorage:getDataDir() .. "/cache/booklore"
     paths[#paths+1] = self.download_dir
     return paths

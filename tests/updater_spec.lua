@@ -67,6 +67,17 @@ describe("Updater", function()
         end)
     end)
 
+    describe("construction", function()
+        it("derives staging_dir as a sibling of plugins_root by default", function()
+            local up = Updater.new{ plugins_root = "/x/plugins" }
+            assert.are.equal("/x/plugins/.booklore_update", up.staging_dir)
+        end)
+        it("honors an explicit staging_dir override", function()
+            local up = Updater.new{ plugins_root = "/x/plugins", staging_dir = "/tmp/stage" }
+            assert.are.equal("/tmp/stage", up.staging_dir)
+        end)
+    end)
+
     describe("parseManifest", function()
         it("accepts a well-formed manifest", function()
             local m, err = Updater.parseManifest(

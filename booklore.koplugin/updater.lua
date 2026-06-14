@@ -47,10 +47,6 @@ local DEFAULT_MANAGED_DIRS = { "booklore_sync.koplugin", "booklore.koplugin" }
 
 local DEFAULTS = {
     plugins_root = "/mnt/us/koreader/plugins",
-    -- Sibling of the plugin dirs so promote/swap renames stay same-filesystem
-    -- (and therefore atomic). Dot-prefixed + non-.koplugin so KOReader's plugin
-    -- scanner ignores it.
-    staging_dir = "/mnt/us/koreader/plugins/.booklore_update",
     manifest_url = "https://raw.githubusercontent.com/ManorianOTP/BookLore-KOReader-Client/main/release/manifest.json",
     -- A plugin .tar.gz is tens of KB; < 256 bytes is an HTML error page.
     min_artifact_bytes = 256,
@@ -80,6 +76,11 @@ function Updater.new(opts)
         if opts[k] ~= nil then self[k] = opts[k] else self[k] = default end
     end
     self.managed_dirs = opts.managed_dirs or DEFAULT_MANAGED_DIRS
+    -- Staging must be a SIBLING of the plugin dirs so promote/commit renames
+    -- stay on one filesystem (atomic). Derive from plugins_root unless given,
+    -- so a non-default deploy path still stages correctly. Dot-prefixed +
+    -- non-.koplugin so KOReader's plugin scanner ignores it.
+    self.staging_dir = opts.staging_dir or (self.plugins_root .. "/.booklore_update")
     self.exec = opts.exec or defaultExec
     self.request = opts.request
     self.hash_file = opts.hash_file or function(path)
@@ -262,7 +263,9 @@ function Updater:stageUpdate(manifest)
         if not looksLikeGzip(part) then
             return fail("downloaded " .. p.dir .. " is not a valid archive")
         end
-        if p.sha256 then
+        -- "" is truthy in Lua, so guard it explicitly: a manifest with a blank
+        -- checksum means "not provided", not "must equal empty".
+        if p.sha256 and p.sha256 ~= "" then
             local got = self.hash_file(part)
             if got and got:lower() ~= tostring(p.sha256):lower() then
                 return fail("checksum mismatch for " .. p.dir)
@@ -271,7 +274,9 @@ function Updater:stageUpdate(manifest)
 
         os.rename(part, tgz)
 
-        local _to, tar_code = self.exec("tar xzf " .. shq(tgz) .. " -C " .. shq(staging))
+        -- `cd <dir> && tar xzf` rather than `tar -C`: busybox tar on Kindle does
+        -- not reliably support -C. This mirrors the proven tailscale install.
+        local _to, tar_code = self.exec("cd " .. shq(staging) .. " && tar xzf " .. shq(tgz))
         if tar_code ~= 0 then
             return fail("could not extract " .. p.dir)
         end
