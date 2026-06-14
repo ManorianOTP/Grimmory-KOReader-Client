@@ -96,6 +96,150 @@ function Session:clearTokens()
     self.settings:flush()
 end
 
+-- ─── Multi-account store ─────────────────────────────────────────────
+-- A device can hold several BookLore logins (e.g. a shared household
+-- Kindle). The active account is the flat token/refresh_token/token_time
+-- triple above; every known account (including the active one) is also
+-- mirrored into the `accounts` list so the user can switch back without
+-- retyping a password. Switching snapshots the CURRENT active tokens into
+-- the store before loading the target, so a background refresh that rotated
+-- the pair is never lost. An inactive account's tokens are frozen (only the
+-- active account ever refreshes), so its stored refresh_token stays valid
+-- for resume until the server revokes it. (ref: DL-004)
+
+local function sameAccount(entry, server_url, username)
+    return entry ~= nil
+        and entry.server_url == server_url
+        and entry.username == username
+end
+
+function Session:_accounts()
+    return self.settings:readSetting("accounts") or {}
+end
+
+function Session:_saveAccounts(accounts)
+    self.settings:saveSetting("accounts", accounts)
+    self.settings:flush()
+end
+
+function Session:activeAccount()
+    return self.settings:readSetting("active_account")
+end
+
+--- Set the flat active triple WITHOUT reseeding token_time (unlike
+-- setTokens): resuming a saved account must preserve when its tokens were
+-- issued so the pre-emptive refresh window counts from the real issue time.
+function Session:loadTokens(token, refresh_token, token_time)
+    self.token = token
+    self.refresh_token = refresh_token
+    self.token_time = token_time
+    local function put(key, value)
+        if value == nil then self.settings:delSetting(key)
+        else self.settings:saveSetting(key, value) end
+    end
+    put("token", token)
+    put("refresh_token", refresh_token)
+    put("token_time", token_time)
+    self.settings:flush()
+end
+
+--- Snapshot the current active tokens into the store under (server_url,
+-- username) and mark that account active. Call after a successful login,
+-- and BEFORE a setTokens() that would overwrite a different account's live
+-- tokens, so the outgoing account's freshest pair is preserved.
+function Session:rememberActive(server_url, username)
+    if not server_url or not username then return end
+    local accounts = self:_accounts()
+    local entry
+    for i = 1, #accounts do
+        if sameAccount(accounts[i], server_url, username) then
+            entry = accounts[i]
+            break
+        end
+    end
+    if not entry then
+        entry = { server_url = server_url, username = username }
+        table.insert(accounts, entry)
+    end
+    entry.token = self.token
+    entry.refresh_token = self.refresh_token
+    entry.token_time = self.token_time
+    self.settings:saveSetting("active_account",
+        { server_url = server_url, username = username })
+    self:_saveAccounts(accounts)
+end
+
+--- One-time migration: fold a pre-multi-account login (flat tokens, no
+-- accounts list) into the store. No-op once migrated or when logged out.
+function Session:ensureMigrated(server_url, username)
+    if #self:_accounts() > 0 then return end
+    if not self:isLoggedIn() then return end
+    self:rememberActive(server_url, username)
+end
+
+--- Accounts with display/status info for the switcher UI. resumable means
+-- a refresh token is stored; whether it is still ACCEPTED is only known once
+-- the next request validates it (a revoked token then triggers on_expired).
+function Session:listAccounts()
+    local accounts = self:_accounts()
+    local active = self:activeAccount() or {}
+    local out = {}
+    for i = 1, #accounts do
+        local a = accounts[i]
+        out[i] = {
+            server_url = a.server_url,
+            username = a.username,
+            token_time = a.token_time,
+            resumable = a.refresh_token ~= nil,
+            active = sameAccount(a, active.server_url, active.username),
+        }
+    end
+    return out
+end
+
+--- Switch the active account: snapshot the current (possibly just-refreshed)
+-- active tokens back into the store, then load the target account's stored
+-- tokens into the flat active triple. Returns the target identity table, or
+-- nil if no such account is stored.
+function Session:switchTo(server_url, username)
+    local active = self:activeAccount()
+    if active and not sameAccount(active, server_url, username) then
+        self:rememberActive(active.server_url, active.username)
+    end
+    local accounts = self:_accounts()
+    local target
+    for i = 1, #accounts do
+        if sameAccount(accounts[i], server_url, username) then
+            target = accounts[i]
+            break
+        end
+    end
+    if not target then return nil end
+    self:loadTokens(target.token, target.refresh_token, target.token_time)
+    self.settings:saveSetting("active_account",
+        { server_url = server_url, username = username })
+    self.settings:flush()
+    return { server_url = target.server_url, username = target.username }
+end
+
+--- Sign out the active account: clear the live tokens and drop the account
+-- from the store so it no longer appears in the switcher.
+function Session:signOutActive()
+    local active = self:activeAccount()
+    self:clearTokens()
+    if not active then return end
+    local accounts = self:_accounts()
+    local kept = {}
+    for i = 1, #accounts do
+        if not sameAccount(accounts[i], active.server_url, active.username) then
+            table.insert(kept, accounts[i])
+        end
+    end
+    self:_saveAccounts(kept)
+    self.settings:delSetting("active_account")
+    self.settings:flush()
+end
+
 -- _performRefresh: exchanges the stored refresh_token for a rotated pair.
 -- Single-flight: if another call is already inside this function, return
 -- refresh-in-progress immediately. Actual wait loops are not portable on
