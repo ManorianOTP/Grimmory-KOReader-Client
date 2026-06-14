@@ -229,6 +229,10 @@ function BookLore:addToMainMenu(menu_items)
                         callback = function() self:tailscaleDisconnect() end,
                     },
                     {
+                        text = _("Update Tailscale"),
+                        callback = function() self:tailscaleUpdate() end,
+                    },
+                    {
                         text = _("Autostart on KOReader start"),
                         keep_menu_open = true,
                         checked_func = function()
@@ -486,6 +490,82 @@ function BookLore:tailscaleDisconnect()
             local msg = (output and output ~= "") and output or "Unknown error."
             UIManager:show(InfoMessage:new{
                 text = T(_("Tailscale disconnect failed:\n%1"), msg),
+            })
+        end
+    end)
+end
+
+--- Update Tailscale to the latest static build. Tailscale does not self-update
+-- here, so this is manual: check the published version against the installed
+-- one and, if newer, re-run the install pipeline (which overwrites the
+-- binaries). If not installed yet, fall through to the install prompt.
+function BookLore:tailscaleUpdate()
+    if not self.tailscale:isInstalled() then
+        self:ensureTailscaleInstalled()
+        return
+    end
+    if not NetworkMgr:isWifiOn() then
+        NetworkMgr:turnOnWifi(function() self:tailscaleUpdate() end)
+        return
+    end
+    local busy = InfoMessage:new{ text = _("Checking for a Tailscale update…") }
+    UIManager:show(busy)
+    self.async:run(function()
+        local latest, _tarball, err = self.tailscale:fetchLatestRelease()
+        local installed = self.tailscale:installedVersion()
+        return { latest = latest, installed = installed, err = err }
+    end, function(res)
+        UIManager:close(busy)
+        if not res or not res.latest then
+            UIManager:show(InfoMessage:new{
+                text = T(_("Couldn't check for a Tailscale update:\n%1"),
+                    tostring(res and res.err or "unknown error")),
+                width = Screen:getWidth() * 0.9,
+            })
+            return
+        end
+        if res.installed and res.installed == res.latest then
+            UIManager:show(InfoMessage:new{
+                text = T(_("Tailscale is already up to date (%1)."), res.installed),
+            })
+            return
+        end
+        UIManager:show(ConfirmBox:new{
+            text = T(_("Update Tailscale %1 → %2?\n\nThis briefly disconnects "
+                .. "Tailscale; reconnect with Connect afterward."),
+                tostring(res.installed or "?"), tostring(res.latest)),
+            ok_text = _("Update"),
+            ok_callback = function() self:_startTailscaleUpdate() end,
+        })
+    end)
+end
+
+function BookLore:_startTailscaleUpdate()
+    local job
+    local busy = InfoMessage:new{
+        text = _("Updating Tailscale…\n\nDownloading the latest release (~30 MB).\n\nTap to cancel."),
+        dismiss_callback = function() self.async:cancel(job) end,
+    }
+    UIManager:show(busy)
+    job = self.async:run(function()
+        -- Stop the daemon first: overwriting a running tailscaled can fail with
+        -- "text file busy". pkill/killall are instant (unlike `tailscale down`).
+        os.execute("pkill tailscaled 2>/dev/null; killall tailscaled 2>/dev/null")
+        local version, err = self.tailscale:install()
+        return { version = version, err = err }
+    end, function(res, async_err)
+        UIManager:close(busy)
+        if async_err == "cancelled" then return end
+        local version = res and res.version
+        if version then
+            UIManager:show(InfoMessage:new{
+                text = T(_("Tailscale updated to %1.\n\nUse Connect to reconnect."), version),
+            })
+        else
+            UIManager:show(InfoMessage:new{
+                text = T(_("Tailscale update failed:\n%1"),
+                    tostring(res and res.err or async_err)),
+                width = Screen:getWidth() * 0.9,
             })
         end
     end)
