@@ -20,6 +20,15 @@ local logger = require("logger")
 local Session = {}
 Session.__index = Session
 
+-- True when an error string came from the server responding (an HTTP status),
+-- as opposed to a connection-class failure. api.lua wraps a real status as
+-- "HTTP <number>: ..." and a luasocket connect/timeout error as "HTTP
+-- <word>: ..." (e.g. "HTTP timeout"), so a leading digit after "HTTP "
+-- distinguishes "server rejected us" from "couldn't reach the server".
+local function serverRejected(err)
+    return type(err) == "string" and err:match("^HTTP %d") ~= nil
+end
+
 -- 50 min chosen so long reading sessions refresh well before the 10-hour
 -- server access-token TTL without excessive refresh calls for short
 -- sessions. (ref: DL-002)
@@ -167,6 +176,17 @@ function Session:call(server_url, method_name, ...)
     ) then
         local ok, ref_err = self:_performRefresh(server_url)
         if not ok then
+            -- A reachable server that REJECTED the refresh (any HTTP status:
+            -- 401 expired token, or 4xx from an endpoint mismatch) means the
+            -- stored credentials are unrecoverable -- signal expiry so the UI
+            -- can prompt a re-login instead of silently degrading to the cached
+            -- copy. A transient network failure (no HTTP status) or a
+            -- concurrent refresh is recoverable, so it stays silent. This
+            -- mirrors the reactive-401 path below; the pre-emptive path
+            -- previously missed it. (ref: DL-006)
+            if serverRejected(ref_err) then
+                self.on_expired()
+            end
             return nil, ref_err
         end
     end

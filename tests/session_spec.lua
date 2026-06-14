@@ -145,6 +145,25 @@ describe("Session", function()
             assert.is_nil(ctx.settings:readSetting("refresh_token"))
             assert.is_nil(ctx.settings:readSetting("token_time"))
         end)
+
+        it("fires on_expired when a reachable server REJECTS the pre-emptive refresh", function()
+            -- The signal the UI needs to prompt a re-login (vs degrade to the
+            -- cached copy): the server responded and refused our stored creds.
+            local ctx = make_ctx(stale_tokens())
+            ctx.api.refresh_queue = { { err = "HTTP 401: refresh revoked" } }
+            ctx.session:call(SERVER, "getBooks")
+            assert.are.equal(1, ctx.expired())
+        end)
+
+        it("does NOT fire on_expired when the pre-emptive refresh can't reach the server", function()
+            -- A connection-class failure (no HTTP status) is recoverable -- the
+            -- token may still be valid once online -- so the UI stays in the
+            -- quiet offline path rather than wrongly telling the user to log in.
+            local ctx = make_ctx(stale_tokens())
+            ctx.api.refresh_queue = { { err = "HTTP timeout" } }
+            ctx.session:call(SERVER, "getBooks")
+            assert.are.equal(0, ctx.expired())
+        end)
     end)
 
     describe("401 handling", function()
@@ -346,6 +365,22 @@ describe("Session", function()
             assert.is_nil(payload.results[1].result)
             assert.matches("HTTP 503", payload.results[1].err)
             assert.same({ "shelves" }, payload.results[2].result)
+        end)
+
+        it("batch task carries the expired flag so applyTokenSync prompts re-login", function()
+            -- The wiring the library UI depends on: a server-rejected refresh in
+            -- the child sets payload.expired, and applying it in the parent
+            -- fires on_expired (the "sign-in expired, log in again" notice).
+            local ctx = make_ctx(stale_tokens())
+            ctx.api.refresh_queue = { { err = "HTTP 401: refresh revoked" } }
+            local payload = ctx.session:buildBatchTask(SERVER, {
+                { method = "getBooks" },
+            })()
+            assert.is_true(payload.expired)
+            assert.are.equal(0, ctx.expired()) -- parent not notified until apply
+            ctx.session:applyTokenSync(payload)
+            assert.are.equal(1, ctx.expired())
+            assert.is_false(ctx.session:isLoggedIn())
         end)
     end)
 end)

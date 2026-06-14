@@ -73,7 +73,18 @@ function BookLore:init()
         settings = self.settings,
         api = BookLoreApi,
         on_expired = function()
-            UIManager:show(InfoMessage:new{ text = _("Session expired. Please login again.") })
+            -- Fires when the server reachably rejected our stored login (an
+            -- expired/invalid token that couldn't be refreshed). Distinct from
+            -- "offline": the message tells the user the fix is to log in again,
+            -- not to check Wi-Fi. Kept short and action-first for casual users.
+            -- Deferred a tick so it lands on TOP of any library/snapshot the
+            -- caller renders synchronously right after applyTokenSync (a widget
+            -- shown later sits above an InfoMessage shown now).
+            UIManager:scheduleIn(0.1, function()
+                UIManager:show(InfoMessage:new{
+                    text = _("BookLore sign-in expired. Log in again to sync the latest."),
+                })
+            end)
         end,
     }
 
@@ -666,14 +677,27 @@ function BookLore:fetchAndShowLibrary(snap)
         local books = payload.results[1].result
         local err = payload.results[1].err
         if not books then
-            -- applyTokenSync already surfaced Session-expired on 401 paths. For a
-            -- network-class failure, fall back to the cached snapshot if we have one.
-            -- "not-logged-in" (tokens cleared by a prior 401) is NOT a server-confirmed
-            -- auth failure -- we simply hold no credentials to try -- so it falls back
-            -- to the cached library like any offline case.
-            local auth_err = err and (err:match("^HTTP 401") or err == "refresh-in-progress")
-            if not auth_err then
-                fallBackToSnapshot(err)
+            -- Always show the cached copy so the user keeps reading; the
+            -- message tells them whether to act. Three cases:
+            --  * payload.expired: the server reachably rejected our login
+            --    (token expired / couldn't refresh). applyTokenSync above
+            --    already showed the "sign-in expired, log in again" notice, so
+            --    stay quiet here and just render the copy.
+            --  * not-logged-in: we hold no credentials at all -- prompt a login
+            --    (this is NOT an offline case; the server may be perfectly
+            --    reachable, we just have nothing to authenticate with).
+            --  * otherwise: a network/server failure -- render the copy, or
+            --    surface the error if there is no copy. The offline banner
+            --    already signals a plain connectivity drop.
+            if payload.expired then
+                fallBackToSnapshot(err, true)
+            elseif err == "not-logged-in" then
+                fallBackToSnapshot(err, true)
+                UIManager:show(InfoMessage:new{
+                    text = _("You're signed out of BookLore. Log in again to load your library."),
+                })
+            else
+                fallBackToSnapshot(err, false)
             end
             return
         end
