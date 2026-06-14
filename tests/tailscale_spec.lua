@@ -85,6 +85,13 @@ describe("Tailscale", function()
         return tgz, tgz_name
     end
 
+    -- The pkgs.tailscale.com/stable/?mode=json manifest the installer now reads:
+    -- version + the exact per-arch tarball filename, in lockstep.
+    local function ts_manifest(version, tgz_name)
+        return '{"Version":"' .. version .. '","Tarballs":{"'
+            .. detected_arch() .. '":"' .. tgz_name .. '"}}'
+    end
+
     local function make_ts(overrides)
         local tmp = spec_helper._tmp_dir
         local opts = {
@@ -95,7 +102,7 @@ describe("Tailscale", function()
             min_tarball_bytes = 16,
         }
         if http_handle then
-            opts.releases_url = http_handle.url("/releases/latest")
+            opts.pkgs_manifest_url = http_handle.url("/stable/manifest.json")
             opts.pkgs_base = http_handle.url("/stable/")
         end
         for k, v in pairs(overrides or {}) do opts[k] = v end
@@ -106,7 +113,7 @@ describe("Tailscale", function()
         it("downloads, extracts, installs, and marks both binaries executable", function()
             local tgz, tgz_name = build_tarball("1.80.0")
             http_handle = spec_helper.start_http_fixture({
-                { path = "/releases/latest", body = '{"tag_name": "v1.80.0"}' },
+                { path = "/stable/manifest.json", body = ts_manifest("1.80.0", tgz_name) },
                 { path = "/stable/" .. tgz_name, body_file = tgz },
             })
             local ts = make_ts()
@@ -127,29 +134,71 @@ describe("Tailscale", function()
             assert.are.equal(2, #progress)
         end)
 
-        it("fails when the release feed returns an HTTP error", function()
+        it("retries once when the tarball download has a transient failure", function()
+            local tgz, tgz_name = build_tarball("1.80.0")
             http_handle = spec_helper.start_http_fixture({
-                { path = "/releases/latest", status = 500, body = "boom" },
+                { path = "/stable/manifest.json", body = ts_manifest("1.80.0", tgz_name) },
+                { path = "/stable/" .. tgz_name, body_file = tgz },
             })
-            local ts = make_ts()
+            local real = require("socket.http").request
+            local tgz_attempts = 0
+            local flaky = function(req)
+                if req.url:match("%.tgz$") then
+                    tgz_attempts = tgz_attempts + 1
+                    if tgz_attempts == 1 then return nil, 500 end  -- dropped connection
+                end
+                return real(req)
+            end
+            local ts = make_ts({ request = flaky })
             local version, err = ts:install()
-            assert.is_nil(version)
-            assert.matches("Failed to fetch latest Tailscale version", err)
+            assert.is_nil(err)
+            assert.are.equal("1.80.0", version)
+            assert.are.equal(2, tgz_attempts)  -- failed once, then succeeded
+            assert.is_true(ts:isInstalled())
         end)
 
-        it("fails when the release feed has no version tag", function()
+        it("gives up and cleans up after the retry budget is exhausted", function()
+            local _tgz, tgz_name = build_tarball("1.80.0")
             http_handle = spec_helper.start_http_fixture({
-                { path = "/releases/latest", body = '{"message": "rate limited"}' },
+                { path = "/stable/manifest.json", body = ts_manifest("1.80.0", tgz_name) },
+                { path = "/stable/" .. tgz_name, body_file = _tgz },
+            })
+            local real = require("socket.http").request
+            local flaky = function(req)
+                if req.url:match("%.tgz$") then return nil, 500 end
+                return real(req)
+            end
+            local ts = make_ts({ request = flaky })
+            local version, err = ts:install()
+            assert.is_nil(version)
+            assert.matches("Download failed", err)
+            assert.are_not.equal(0, os.execute("test -d '" .. ts.tmp_root .. "'"))
+        end)
+
+        it("fails when the package list returns an HTTP error", function()
+            http_handle = spec_helper.start_http_fixture({
+                { path = "/stable/manifest.json", status = 500, body = "boom" },
             })
             local ts = make_ts()
             local version, err = ts:install()
             assert.is_nil(version)
-            assert.matches("Could not parse version", err)
+            assert.matches("Failed to fetch the Tailscale package list", err)
+        end)
+
+        it("fails when the package list has no build for this arch", function()
+            http_handle = spec_helper.start_http_fixture({
+                { path = "/stable/manifest.json", body = '{"Version":"1.80.0","Tarballs":{}}' },
+            })
+            local ts = make_ts()
+            local version, err = ts:install()
+            assert.is_nil(version)
+            assert.matches("No Tailscale static build for arch", err)
         end)
 
         it("fails and cleans up when the tarball download 404s", function()
+            local _t, tgz_name = build_tarball("1.80.0")  -- built for its name; not served
             http_handle = spec_helper.start_http_fixture({
-                { path = "/releases/latest", body = '{"tag_name": "v1.80.0"}' },
+                { path = "/stable/manifest.json", body = ts_manifest("1.80.0", tgz_name) },
             })
             local ts = make_ts()
             local version, err = ts:install()
@@ -161,7 +210,7 @@ describe("Tailscale", function()
         it("rejects a download below the size floor and cleans up", function()
             local tgz, tgz_name = build_tarball("1.80.0")
             http_handle = spec_helper.start_http_fixture({
-                { path = "/releases/latest", body = '{"tag_name": "v1.80.0"}' },
+                { path = "/stable/manifest.json", body = ts_manifest("1.80.0", tgz_name) },
                 { path = "/stable/" .. tgz_name, body_file = tgz },
             })
             local ts = make_ts({ min_tarball_bytes = 10 * 1048576 })
@@ -174,7 +223,7 @@ describe("Tailscale", function()
         it("fails when the archive lacks the expected directory layout", function()
             local tgz, tgz_name = build_tarball("1.80.0", { inner_dir = "unexpected_dir" })
             http_handle = spec_helper.start_http_fixture({
-                { path = "/releases/latest", body = '{"tag_name": "v1.80.0"}' },
+                { path = "/stable/manifest.json", body = ts_manifest("1.80.0", tgz_name) },
                 { path = "/stable/" .. tgz_name, body_file = tgz },
             })
             local ts = make_ts()
@@ -187,7 +236,7 @@ describe("Tailscale", function()
         it("fails when the archive is missing the daemon binary", function()
             local tgz, tgz_name = build_tarball("1.80.0", { omit_daemon = true })
             http_handle = spec_helper.start_http_fixture({
-                { path = "/releases/latest", body = '{"tag_name": "v1.80.0"}' },
+                { path = "/stable/manifest.json", body = ts_manifest("1.80.0", tgz_name) },
                 { path = "/stable/" .. tgz_name, body_file = tgz },
             })
             local ts = make_ts()
@@ -195,6 +244,77 @@ describe("Tailscale", function()
             assert.is_nil(version)
             assert.matches("tailscaled", err)
             assert.is_false(ts:isInstalled())
+        end)
+    end)
+
+    describe("fetchLatestRelease", function()
+        it("returns the version and arch tarball from the pkgs manifest", function()
+            local tgz_name = "tailscale_1.98.4_" .. detected_arch() .. ".tgz"
+            http_handle = spec_helper.start_http_fixture({
+                { path = "/stable/manifest.json", body = ts_manifest("1.98.4", tgz_name) },
+            })
+            local version, tarball = make_ts():fetchLatestRelease()
+            assert.are.equal("1.98.4", version)
+            assert.are.equal(tgz_name, tarball)
+        end)
+
+        it("errors when the manifest has no build for this arch", function()
+            http_handle = spec_helper.start_http_fixture({
+                { path = "/stable/manifest.json", body = '{"Version":"1.98.4","Tarballs":{}}' },
+            })
+            local version, tarball, err = make_ts():fetchLatestRelease()
+            assert.is_nil(version)
+            assert.is_nil(tarball)
+            assert.matches("No Tailscale static build for arch", err)
+        end)
+    end)
+
+    describe("installedVersion", function()
+        it("parses the version from `tailscale version`", function()
+            local ts = make_ts({ exec = make_fake_exec({
+                { pattern = " version", out = "1.80.0\n  go version: go1.x", code = 0 },
+            }) })
+            os.execute("mkdir -p '" .. ts.bin_dir .. "'")
+            write_file(ts.cmd, "x")
+            write_file(ts.daemon_cmd, "x")
+            assert.are.equal("1.80.0", ts:installedVersion())
+        end)
+
+        it("returns nil when Tailscale is not installed", function()
+            local ts = make_ts({ exec = make_fake_exec({}) })
+            assert.is_nil(ts:installedVersion())
+        end)
+    end)
+
+    describe("statusSummary", function()
+        it("summarizes the JSON status (state, self, peer counts)", function()
+            local json_out = [[{
+                "BackendState": "Running",
+                "Self": { "HostName": "my-kindle", "DNSName": "my-kindle.tail.ts.net.",
+                          "TailscaleIPs": ["100.64.0.5"], "Online": true },
+                "Peer": {
+                    "k1": { "HostName": "laptop", "Online": true },
+                    "k2": { "HostName": "phone",  "Online": false }
+                }
+            }]]
+            local ts = make_ts({ exec = make_fake_exec({
+                { pattern = "status %-%-json", out = json_out, code = 0 },
+            }) })
+            local s = ts:statusSummary()
+            assert.are.equal("Running", s.state)
+            assert.are.equal("my-kindle", s.hostname)
+            assert.are.equal("100.64.0.5", s.ip)
+            assert.are.equal(1, s.peers_online)
+            assert.are.equal(2, s.peers_total)
+        end)
+
+        it("returns an error when the status command fails", function()
+            local ts = make_ts({ exec = make_fake_exec({
+                { pattern = "status %-%-json", out = "boom", code = 1 },
+            }) })
+            local s, err = ts:statusSummary()
+            assert.is_nil(s)
+            assert.matches("boom", err)
         end)
     end)
 

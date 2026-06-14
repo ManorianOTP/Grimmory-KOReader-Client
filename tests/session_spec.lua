@@ -243,6 +243,112 @@ describe("Session", function()
         end)
     end)
 
+    -- The account switcher lets a shared device hold several logins and
+    -- resume one without retyping a password. The load-bearing property:
+    -- switching snapshots the CURRENT active tokens before loading the
+    -- target, so a background refresh that rotated the pair is never lost,
+    -- and an inactive account's refresh token stays valid for resume.
+    describe("multi-account store", function()
+        -- Log a named account in as the active one (mirrors main.lua's
+        -- post-login: setTokens then rememberActive).
+        local function login(ctx, server, user, token, refresh)
+            ctx.session:setTokens(token, refresh)
+            ctx.session:rememberActive(server, user)
+        end
+
+        it("remembers the active account and lists it as active + resumable", function()
+            local ctx = make_ctx(nil)
+            login(ctx, "http://a", "alice", "ta", "ra")
+            local accounts = ctx.session:listAccounts()
+            assert.are.equal(1, #accounts)
+            assert.are.equal("http://a", accounts[1].server_url)
+            assert.are.equal("alice", accounts[1].username)
+            assert.is_true(accounts[1].active)
+            assert.is_true(accounts[1].resumable)
+            assert.is_number(accounts[1].token_time)
+        end)
+
+        it("switchTo loads the target tokens, preserving their token_time", function()
+            local ctx = make_ctx(nil)
+            login(ctx, "http://a", "alice", "ta", "ra")
+            -- Freeze account B's issue time well in the past, then switch away
+            -- and back: loadTokens must NOT reseed token_time to now.
+            login(ctx, "http://b", "bob", "tb", "rb")
+            local b_time = ctx.session.token_time
+            ctx.session:switchTo("http://a", "alice")
+            local back = ctx.session:switchTo("http://b", "bob")
+            assert.are.same({ server_url = "http://b", username = "bob" }, back)
+            assert.are.equal("tb", ctx.session.token)
+            assert.are.equal("rb", ctx.session.refresh_token)
+            assert.are.equal(b_time, ctx.session.token_time)
+            -- active flat keys reflect the switch for the next KOReader start
+            assert.are.equal("tb", ctx.settings:readSetting("token"))
+        end)
+
+        it("returns nil when switching to an unknown account", function()
+            local ctx = make_ctx(nil)
+            login(ctx, "http://a", "alice", "ta", "ra")
+            assert.is_nil(ctx.session:switchTo("http://x", "nobody"))
+            -- active account is untouched
+            assert.are.equal("ta", ctx.session.token)
+        end)
+
+        it("captures a rotation that happened while active before leaving", function()
+            -- Account A's tokens get refreshed (setTokens) after login; when we
+            -- switch away to B and back to A, the rotated pair — not the login
+            -- pair — must come back. This is what keeps resume working after a
+            -- silent background refresh.
+            local ctx = make_ctx(nil)
+            login(ctx, "http://a", "alice", "ta", "ra")
+            login(ctx, "http://b", "bob", "tb", "rb")
+            ctx.session:switchTo("http://a", "alice")
+            ctx.session:setTokens("ta2", "ra2")  -- simulates a refresh while A active
+            ctx.session:switchTo("http://b", "bob")
+            ctx.session:switchTo("http://a", "alice")
+            assert.are.equal("ta2", ctx.session.token)
+            assert.are.equal("ra2", ctx.session.refresh_token)
+        end)
+
+        it("marks an account with no refresh token as not resumable", function()
+            local ctx = make_ctx(nil)
+            ctx.session:loadTokens("ta", nil, os.time())
+            ctx.session:rememberActive("http://a", "alice")
+            assert.is_false(ctx.session:listAccounts()[1].resumable)
+        end)
+
+        it("ensureMigrated folds a legacy flat login into the store once", function()
+            -- Pre-multi-account install: flat tokens present, no accounts list.
+            local ctx = make_ctx(fresh_tokens())
+            assert.are.equal(0, #ctx.session:listAccounts())
+            ctx.session:ensureMigrated("http://a", "alice")
+            local accounts = ctx.session:listAccounts()
+            assert.are.equal(1, #accounts)
+            assert.is_true(accounts[1].active)
+            -- idempotent: a second call does not duplicate the entry
+            ctx.session:ensureMigrated("http://a", "alice")
+            assert.are.equal(1, #ctx.session:listAccounts())
+        end)
+
+        it("ensureMigrated is a no-op when logged out", function()
+            local ctx = make_ctx(nil)
+            ctx.session:ensureMigrated("http://a", "alice")
+            assert.are.equal(0, #ctx.session:listAccounts())
+        end)
+
+        it("signOutActive clears tokens and drops the account from the store", function()
+            local ctx = make_ctx(nil)
+            login(ctx, "http://a", "alice", "ta", "ra")
+            login(ctx, "http://b", "bob", "tb", "rb")  -- B now active
+            ctx.session:signOutActive()
+            assert.is_false(ctx.session:isLoggedIn())
+            assert.is_nil(ctx.settings:readSetting("token"))
+            assert.is_nil(ctx.session:activeAccount())
+            local accounts = ctx.session:listAccounts()
+            assert.are.equal(1, #accounts)  -- only A remains
+            assert.are.equal("alice", accounts[1].username)
+        end)
+    end)
+
     -- buildCallTask runs in the forked child; applyCallResult runs in the
     -- parent. Specs execute the task closure directly (same contract as the
     -- inline executor) and assert the fork-boundary invariants: the child

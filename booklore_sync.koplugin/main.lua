@@ -2,8 +2,10 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local DataStorage = require("datastorage")
 local LuaSettings = require("luasettings")
 local MultiConfirmBox = require("ui/widget/multiconfirmbox")
+local InfoMessage = require("ui/widget/infomessage")
 local UIManager = require("ui/uimanager")
 local Event = require("ui/event")
+local T = require("ffi/util").template
 local Math = require("optmath")
 local http = require("socket.http")
 local ltn12 = require("ltn12")
@@ -146,6 +148,84 @@ function BookLoreSync:init()
     self.has_pages = nil
     self.queue = nil
     self._flush_fn = nil
+end
+
+-- ─── Status menu (read-only view into the otherwise-silent sync engine) ──
+
+-- Short one-line status for the menu item label.
+function BookLoreSync:_statusLine()
+    if not self.enabled then return _("Sync: off (server not configured)") end
+    if not self.book_id then return _("Sync: off for this book") end
+    local queued = self.queue and self.queue:size() or 0
+    if not self.pulled then return _("Sync: waiting for first pull") end
+    if queued > 0 then return T(_("Sync: %1 change(s) queued"), queued) end
+    return _("Sync: up to date")
+end
+
+-- Verbose status for the InfoMessage shown when the user taps the status line.
+function BookLoreSync:_statusDetail()
+    if not self.enabled then
+        return _("Reading-progress sync is off: no BookLore server is configured.\n\n"
+            .. "Open the BookLore app and log in first.")
+    end
+    if not self.book_id then
+        return _("This book is not synced.\n\n"
+            .. "Only books downloaded through the BookLore app sync their progress.")
+    end
+    local queued = self.queue and self.queue:size() or 0
+    local lines = {
+        T(_("Server: %1"), tostring(self.server_url or "?")),
+        self.pulled and _("Server position pulled: yes")
+            or _("Server position pulled: not yet (push is paused until it is)"),
+        T(_("Queued changes: %1"), queued),
+    }
+    if not self.token or self.token == "" then
+        lines[#lines + 1] = _("No sign-in token — open the BookLore app to log in.")
+    end
+    return table.concat(lines, "\n")
+end
+
+-- Manual drain. Page turns already enqueue + flush periodically; this is for
+-- users who want to push immediately before closing or switching devices.
+function BookLoreSync:syncNow()
+    if not self.enabled or not self.book_id then
+        UIManager:show(InfoMessage:new{ text = _("Nothing to sync for this book.") })
+        return
+    end
+    if not NetworkMgr:isWifiOn() then
+        UIManager:show(InfoMessage:new{ text = _("Turn on WiFi to sync.") })
+        return
+    end
+    local queued = self.queue and self.queue:size() or 0
+    pcall(function() self:_drainAll() end)
+    UIManager:show(InfoMessage:new{
+        text = (queued > 0) and _("Syncing your reading position…")
+            or _("Nothing to sync right now."),
+    })
+end
+
+function BookLoreSync:addToMainMenu(menu_items)
+    menu_items.booklore_sync = {
+        text = _("BookLore Sync"),
+        sorting_hint = "tools",
+        sub_item_table = {
+            {
+                text_func = function() return self:_statusLine() end,
+                keep_menu_open = true,
+                callback = function()
+                    UIManager:show(InfoMessage:new{ text = self:_statusDetail() })
+                end,
+            },
+            {
+                text = _("Sync now"),
+                keep_menu_open = true,
+                enabled_func = function()
+                    return self.enabled == true and self.book_id ~= nil
+                end,
+                callback = function() self:syncNow() end,
+            },
+        },
+    }
 end
 
 function BookLoreSync:onReaderReady()

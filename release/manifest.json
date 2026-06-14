@@ -1,0 +1,7 @@
+{
+  "version": "1.0.0",
+  "plugins": [
+    { "dir": "booklore_sync.koplugin", "url": "https://github.com/ManorianOTP/BookLore-KOReader-Client/releases/download/v1.0.0/booklore_sync.koplugin-1.0.0.tar.gz" },
+    { "dir": "booklore.koplugin", "url": "https://github.com/ManorianOTP/BookLore-KOReader-Client/releases/download/v1.0.0/booklore.koplugin-1.0.0.tar.gz" }
+  ]
+}

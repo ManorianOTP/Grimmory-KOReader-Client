@@ -47,6 +47,21 @@ local function mkdirs(path)
     end
 end
 
+--- Normalize a user-entered server URL: trim whitespace, prepend http:// when
+-- no scheme is given, and drop any trailing slash. Returns "" for blank input
+-- so callers can reject it before firing a doomed request. Pure (no IO), so it
+-- is unit-testable and safe to call on the UI thread.
+-- @param s string|nil: raw user input
+-- @return string: normalized URL, or "" if blank
+function BookLoreApi.normalizeServerUrl(s)
+    s = tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if s == "" then return "" end
+    if not s:match("^%w[%w%+%.%-]*://") then
+        s = "http://" .. s
+    end
+    return (s:gsub("/+$", ""))
+end
+
 --- Perform a POST request with a JSON body.
 -- @param url string: full URL
 -- @param body table: request body (will be JSON-encoded)

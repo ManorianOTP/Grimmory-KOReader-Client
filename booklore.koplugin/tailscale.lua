@@ -15,7 +15,7 @@
                      Defaults to LuaSec HTTPS: BusyBox wget on Kindle cannot
                      complete TLS handshakes with GitHub/pkgs.tailscale.com.
       wifi_is_on()   connectivity probe (autostart skips `up` when off)
-      bin_dir, tmp_root, releases_url, pkgs_base, socket_path,
+      bin_dir, tmp_root, pkgs_base, pkgs_manifest_url, socket_path,
       min_tarball_bytes
     Defaults target the real device; tests point the paths and URLs at a
     temp directory and the local HTTP fixture, so the pipeline runs the
@@ -31,7 +31,6 @@ Tailscale.__index = Tailscale
 local DEFAULTS = {
     bin_dir = "/mnt/us/extensions/tailscale/bin",
     tmp_root = "/mnt/us/tailscale_install",
-    releases_url = "https://api.github.com/repos/tailscale/tailscale/releases/latest",
     pkgs_base = "https://pkgs.tailscale.com/stable/",
     socket_path = "/var/run/tailscale/tailscaled.sock",
     -- ARM tarball is ~25+ MB; < 1 MB means an HTML error page or truncation.
@@ -60,6 +59,9 @@ function Tailscale.new(opts)
     end
     self.exec = opts.exec or defaultExec
     self.request = opts.request
+    -- Overridable so specs can point at a fixture path without a query string;
+    -- defaults to pkgs_base .. "?mode=json" inside fetchLatestRelease.
+    self.pkgs_manifest_url = opts.pkgs_manifest_url
     self.wifi_is_on = opts.wifi_is_on or function() return true end
     -- run_blocking(task, on_done): runs a blocking thunk and delivers its
     -- result to on_done. Defaults to synchronous (standalone use and specs);
@@ -144,32 +146,6 @@ function Tailscale:startDaemon(on_done)
     end)
 end
 
---- Fetch the latest stable version tag from the releases feed.
--- @return string version (e.g. "1.80.0") or nil, error message
-function Tailscale:fetchLatestVersion()
-    local ltn12 = require("ltn12")
-    local resp_body = {}
-    local result, resp_code = self:_request{
-        url = self.releases_url,
-        sink = ltn12.sink.table(resp_body),
-        headers = {
-            ["User-Agent"] = "KOReader-BookLore/1.0",
-        },
-    }
-    if not result or resp_code ~= 200 then
-        return nil, "Failed to fetch latest Tailscale version (HTTP "
-            .. tostring(resp_code) .. ")"
-    end
-
-    local api_json = table.concat(resp_body)
-    local version = api_json:match('"tag_name"%s*:%s*"v([^"]+)"')
-    if not version then
-        return nil, "Could not parse version from release response. First 200 chars:\n"
-            .. api_json:sub(1, 200)
-    end
-    return version
-end
-
 --- Determine the CPU architecture (confirmed armv7l on PW6).
 function Tailscale:detectArch()
     local arch_raw = self.exec("uname -m")
@@ -177,6 +153,52 @@ function Tailscale:detectArch()
         return "arm64"
     end
     return "arm"
+end
+
+--- Fetch the latest stable static build for THIS device's arch from
+-- pkgs.tailscale.com's own manifest (`?mode=json`). Returns the version AND the
+-- exact tarball filename together, so they're always in lockstep -- the
+-- previous approach asked GitHub releases/latest for the version and then
+-- guessed the filename, but the GitHub tag routinely runs ahead of the
+-- published static build, producing a download 404.
+-- @return string version, string tarball filename, or nil, nil, error message
+function Tailscale:fetchLatestRelease()
+    local ltn12 = require("ltn12")
+    local json = require("json")
+    local resp_body = {}
+    local manifest_url = self.pkgs_manifest_url or (self.pkgs_base .. "?mode=json")
+    local result, resp_code = self:_request{
+        url = manifest_url,
+        sink = ltn12.sink.table(resp_body),
+        headers = {
+            ["User-Agent"] = "KOReader-BookLore/1.0",
+        },
+    }
+    if not result or resp_code ~= 200 then
+        return nil, nil, "Failed to fetch the Tailscale package list (HTTP "
+            .. tostring(resp_code) .. ")"
+    end
+
+    local ok, manifest = pcall(json.decode, table.concat(resp_body))
+    if not ok or type(manifest) ~= "table" then
+        return nil, nil, "Could not parse the Tailscale package list."
+    end
+    local arch = self:detectArch()
+    local version = manifest.Version
+    local tarball = type(manifest.Tarballs) == "table" and manifest.Tarballs[arch] or nil
+    if type(version) ~= "string" or type(tarball) ~= "string" then
+        return nil, nil, "No Tailscale static build for arch '" .. tostring(arch) .. "'."
+    end
+    return version, tarball
+end
+
+--- Installed Tailscale version (parsed from `tailscale version`), or nil if
+-- not installed or unreadable.
+function Tailscale:installedVersion()
+    if not self:isInstalled() then return nil end
+    local out, code = self.exec(self.cmd .. " version")
+    if code ~= 0 then return nil end
+    return out:match("(%d+%.%d+%.%d+)")
 end
 
 --- Install Tailscale from static ARM binaries.
@@ -189,15 +211,13 @@ function Tailscale:install(notify)
     notify = notify or function() end
     local ltn12 = require("ltn12")
 
-    local version, version_err = self:fetchLatestVersion()
-    if not version then return nil, version_err end
+    local version, tarball, rel_err = self:fetchLatestRelease()
+    if not version then return nil, rel_err end
 
-    local arch = self:detectArch()
-    logger.info("BookLore: installing Tailscale", version, "for", arch)
+    logger.info("BookLore: installing Tailscale", version, "(", tarball, ")")
     notify("Downloading Tailscale " .. version .. "…")
 
-    -- Download the static binary tarball
-    local tarball = "tailscale_" .. version .. "_" .. arch .. ".tgz"
+    -- Download URL + temp path come straight from the manifest's filename.
     local url = self.pkgs_base .. tarball
     local tmp_tgz = self.tmp_root .. "/" .. tarball
 
@@ -209,20 +229,28 @@ function Tailscale:install(notify)
     self.exec("rm -rf " .. self.tmp_root)
     self.exec("mkdir -p " .. self.tmp_root)
 
-    local f, open_err = io.open(tmp_tgz, "wb")
-    if not f then
-        return fail("Cannot create temp file: " .. tostring(open_err))
-    end
-
     logger.info("BookLore: downloading", url)
 
-    local dl_result, dl_code = self:_request{
-        url = url,
-        sink = ltn12.sink.file(f),  -- closes f automatically
-        headers = {
-            ["User-Agent"] = "KOReader-BookLore/1.0",
-        },
-    }
+    -- Retry once on a transient failure: a dropped connection partway through
+    -- the ~30 MB download used to leave a partial tarball and fail permanently.
+    local dl_result, dl_code
+    for attempt = 1, (self.download_attempts or 2) do
+        local f, open_err = io.open(tmp_tgz, "wb")
+        if not f then
+            return fail("Cannot create temp file: " .. tostring(open_err))
+        end
+        dl_result, dl_code = self:_request{
+            url = url,
+            sink = ltn12.sink.file(f),  -- closes f automatically
+            headers = {
+                ["User-Agent"] = "KOReader-BookLore/1.0",
+            },
+        }
+        if dl_result and dl_code == 200 then break end
+        logger.warn("BookLore: Tailscale download attempt", attempt,
+            "failed (HTTP", tostring(dl_code), ")")
+        self.exec("rm -f " .. tmp_tgz)  -- clear the partial before retrying
+    end
     if not dl_result or dl_code ~= 200 then
         return fail("Download failed (HTTP " .. tostring(dl_code) .. "):\n" .. url)
     end
@@ -244,8 +272,9 @@ function Tailscale:install(notify)
         return fail("Failed to extract tarball:\n" .. (tar_out or ""))
     end
 
-    -- The tarball extracts to tailscale_{version}_{arch}/
-    local extract_dir = self.tmp_root .. "/tailscale_" .. version .. "_" .. arch
+    -- The tarball extracts to a dir named like the tarball without .tgz, e.g.
+    -- tailscale_1.80.0_arm/. Derive it from the filename rather than rebuilding.
+    local extract_dir = self.tmp_root .. "/" .. tarball:gsub("%.tgz$", "")
 
     -- Verify extracted binaries exist
     local check_f = io.open(extract_dir .. "/tailscale", "r")
@@ -292,6 +321,41 @@ function Tailscale:isConnected()
         and not status_out:match("Logged out")
         and not status_out:match("stopped"),
         status_out
+end
+
+--- A concise, user-facing status summary parsed from `tailscale status --json`,
+-- so the UI can show "connected, this device, IP, N peers online" instead of
+-- the raw `tailscale status` dump (every peer + a trailing health-check block).
+-- @return table { state, hostname, ip, dns, self_online, peers_online,
+--                 peers_total } on success, or nil + error message.
+function Tailscale:statusSummary()
+    local out, code = self.exec(self.cmd .. " status --json")
+    if code ~= 0 then
+        return nil, (out ~= "" and out) or "tailscale status failed"
+    end
+    local json = require("json")
+    local ok, data = pcall(json.decode, out)
+    if not ok or type(data) ~= "table" then
+        return nil, "could not parse tailscale status"
+    end
+    local node = data.Self or {}
+    local ips = node.TailscaleIPs or {}
+    local peers_online, peers_total = 0, 0
+    if type(data.Peer) == "table" then
+        for _, peer in pairs(data.Peer) do
+            peers_total = peers_total + 1
+            if peer.Online then peers_online = peers_online + 1 end
+        end
+    end
+    return {
+        state = data.BackendState,   -- Running / Stopped / NeedsLogin / NoState / …
+        hostname = node.HostName,
+        dns = node.DNSName,
+        ip = ips[1],
+        self_online = node.Online,
+        peers_online = peers_online,
+        peers_total = peers_total,
+    }
 end
 
 --- Run `tailscale up` and classify the result.

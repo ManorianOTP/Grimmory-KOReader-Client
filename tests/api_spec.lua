@@ -23,6 +23,26 @@ describe("BookLoreApi", function()
         spec_helper.teardown()
     end)
 
+    describe("normalizeServerUrl", function()
+        it("prepends http:// when no scheme is given", function()
+            assert.are.equal("http://192.168.1.50:6060",
+                BookLoreApi.normalizeServerUrl("192.168.1.50:6060"))
+        end)
+        it("preserves an explicit https scheme", function()
+            assert.are.equal("https://books.example.com",
+                BookLoreApi.normalizeServerUrl("https://books.example.com"))
+        end)
+        it("trims whitespace and drops a trailing slash", function()
+            assert.are.equal("http://host:6060",
+                BookLoreApi.normalizeServerUrl("  http://host:6060/  "))
+        end)
+        it("returns empty string for blank or nil input", function()
+            assert.are.equal("", BookLoreApi.normalizeServerUrl(""))
+            assert.are.equal("", BookLoreApi.normalizeServerUrl("   "))
+            assert.are.equal("", BookLoreApi.normalizeServerUrl(nil))
+        end)
+    end)
+
     describe("login", function()
         it("returns access and refresh tokens on success", function()
             fixture = spec_helper.start_http_fixture({
