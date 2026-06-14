@@ -74,9 +74,8 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for the common issues
 
 ## For developers
 
-Architecture notes live in [the project docs](the project docs); the off-device test harness
-is documented in [tests/README.md](tests/README.md). Run the tests with
-`scripts/test.sh`. To cut a release, see `scripts/release.sh`.
+The off-device test harness is documented in [tests/README.md](tests/README.md).
+Run the tests with `scripts/test.sh`. To cut a release, see `scripts/release.sh`.
 
 ## License
 
