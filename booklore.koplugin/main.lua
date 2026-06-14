@@ -764,6 +764,15 @@ function BookLore:_purgePaths()
     end)
     paths[#paths+1] = DataStorage:getDataDir() .. "/cache/booklore"
     paths[#paths+1] = self.download_dir
+    -- Tailscale was installed by this app, so a full erase removes it (binaries,
+    -- state, logs) and its install tmp dir too. A keep-settings uninstall leaves
+    -- it in place for a quick reinstall.
+    if self.tailscale and self.tailscale.bin_dir then
+        paths[#paths+1] = (self.tailscale.bin_dir:gsub("[/\\]bin[/\\]?$", ""))
+    end
+    if self.tailscale and self.tailscale.tmp_root then
+        paths[#paths+1] = self.tailscale.tmp_root
+    end
     return paths
 end
 
@@ -773,7 +782,8 @@ function BookLore:confirmUninstall()
     UIManager:show(MultiConfirmBox:new{
         text = _("Uninstall both BookLore plugins?\n\n"
             .. "Keep your saved settings (server URL, accounts, downloads) for an "
-            .. "easy reinstall, or erase everything?"),
+            .. "easy reinstall, or erase everything (settings, downloaded books, "
+            .. "and the Tailscale install)?"),
         choice1_text = _("Keep settings"),
         choice1_callback = function() self:_doUninstall(false) end,
         choice2_text = _("Erase everything"),
@@ -786,6 +796,11 @@ function BookLore:_doUninstall(purge)
     local busy = InfoMessage:new{ text = _("Uninstalling…") }
     UIManager:show(busy)
     self.async:run(function()
+        if purge then
+            -- Best-effort stop of the app-started Tailscale daemon (instant,
+            -- unlike `tailscale down` which can hang) before its binaries go.
+            os.execute("pkill tailscaled 2>/dev/null; killall tailscaled 2>/dev/null")
+        end
         self.updater:uninstall({ purge_settings = purge, extra_paths = extra })
         return true
     end, function()
