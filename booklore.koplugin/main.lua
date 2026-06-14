@@ -8,6 +8,7 @@ local HorizontalSpan = require("ui/widget/horizontalspan")
 local UIManager = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
 local ConfirmBox = require("ui/widget/confirmbox")
+local MultiConfirmBox = require("ui/widget/multiconfirmbox")
 local Menu = require("ui/widget/menu")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local InputDialog = require("ui/widget/inputdialog")
@@ -41,6 +42,7 @@ local Downloads = require("downloads")
 local Session = require("session")
 local Tailscale = require("tailscale")
 local Async = require("async")
+local Updater = require("updater")
 
 -- Absolute path to this plugin's directory, for loading bundled assets
 -- (icons/*.svg). Derived from this chunk's source so it works wherever the
@@ -57,6 +59,11 @@ local BookLore = WidgetContainer:extend{
 -- document open); this module-level flag scopes the Tailscale autostart
 -- attempt to once per KOReader process.
 local tailscale_autostart_attempted = false
+
+-- The interrupted-swap recovery only needs to run once per KOReader process
+-- (a swap takes effect on the next restart, so re-running it on every document
+-- open would be wasted shell-outs).
+local updater_reconcile_attempted = false
 
 -- ─── Initialisation ──────────────────────────────────────────────────
 
@@ -123,6 +130,28 @@ function BookLore:init()
     -- (device offline / server unreachable). Recomputed on every browseLibrary.
     self.offline_mode = false
 
+    -- In-app updater. plugins_root is the parent of this plugin's own dir
+    -- (PLUGIN_DIR ends with .../plugins/booklore.koplugin/), so it is correct
+    -- wherever the pair is deployed.
+    local plugins_root = PLUGIN_DIR:gsub("[/\\]+$", ""):gsub("[/\\][^/\\]+$", "")
+    self.updater = Updater.new{ plugins_root = plugins_root }
+    -- Recover from a swap a previous power loss interrupted. Deferred past the
+    -- first paint and gated to once per process so it never slows a book open.
+    if not updater_reconcile_attempted then
+        updater_reconcile_attempted = true
+        UIManager:scheduleIn(1, function() self.updater:reconcile() end)
+    end
+
+    -- Fold a pre-multi-account login into the account store (idempotent), then
+    -- let the active account (after a switch or one-off login) drive this
+    -- session even when it differs from the saved default pre-fill.
+    self.session:ensureMigrated(self.server_url, self.username)
+    local active = self.session:activeAccount()
+    if active then
+        self.server_url = active.server_url
+        self.username = active.username
+    end
+
     if self.settings:readSetting("tailscale_autostart") == true
             and not tailscale_autostart_attempted then
         tailscale_autostart_attempted = true
@@ -146,6 +175,42 @@ function BookLore:addToMainMenu(menu_items)
             {
                 text = _("Browse Library"),
                 callback = function() self:browseLibrary() end,
+            },
+            {
+                text = _("Settings"),
+                sub_item_table = {
+                    {
+                        text_func = function()
+                            if self.session:isLoggedIn() then
+                                return T(_("Signed in: %1 @ %2"),
+                                    self.username, self.server_url)
+                            end
+                            return _("Not signed in — tap to log in")
+                        end,
+                        keep_menu_open = true,
+                        callback = function() self:showLoginDialog() end,
+                    },
+                    {
+                        text = _("Switch account"),
+                        callback = function() self:showAccountSwitcher() end,
+                    },
+                    {
+                        text = _("Download folder"),
+                        callback = function() self:showDownloadFolderDialog() end,
+                    },
+                    {
+                        text = _("Sign out"),
+                        callback = function() self:confirmSignOut() end,
+                    },
+                    {
+                        text = _("Uninstall BookLore"),
+                        callback = function() self:confirmUninstall() end,
+                    },
+                },
+            },
+            {
+                text = _("Check for updates"),
+                callback = function() self:checkForUpdates() end,
             },
             {
                 text = _("Tailscale"),
@@ -428,6 +493,15 @@ end
 -- ─── Login ───────────────────────────────────────────────────────────
 
 function BookLore:showLoginDialog()
+    -- "Set as default" controls whether this login overwrites the saved
+    -- server URL + username (the dialog pre-fill). Defaults ON; turn it off
+    -- for a one-off login to another server/account without losing your
+    -- usual default. The checkmark is a self-managed toggle button.
+    if self._login_set_default == nil then self._login_set_default = true end
+    local function default_label()
+        return (self._login_set_default and "☑ " or "☐ ") .. _("Set as default")
+    end
+
     self.login_dialog = MultiInputDialog:new{
         title = _("BookLore Login"),
         fields = {
@@ -435,26 +509,47 @@ function BookLore:showLoginDialog()
             { text = self.username, hint = _("Username") },
             { text = "", hint = _("Password"), text_type = "password" },
         },
-        buttons = {{
+        buttons = {
             {
-                text = _("Cancel"), id = "close",
-                callback = function() UIManager:close(self.login_dialog) end,
+                {
+                    text = default_label(),
+                    id = "set_default",
+                    callback = function()
+                        self._login_set_default = not self._login_set_default
+                        -- Refresh the button label in place. Guarded so a
+                        -- KOReader without getButtonById still toggles state
+                        -- (only the checkmark redraw would be skipped).
+                        local bt = self.login_dialog.button_table
+                        local btn = bt and bt.getButtonById and bt:getButtonById("set_default")
+                        if btn and btn.setText then
+                            pcall(function() btn:setText(default_label(), btn.width) end)
+                            UIManager:setDirty(self.login_dialog, "ui")
+                        end
+                    end,
+                },
             },
             {
-                text = _("Login"), is_enter_default = true,
-                callback = function()
-                    local f = self.login_dialog:getFields()
-                    UIManager:close(self.login_dialog)
-                    self:doLogin(f[1], f[2], f[3])
-                end,
+                {
+                    text = _("Cancel"), id = "close",
+                    callback = function() UIManager:close(self.login_dialog) end,
+                },
+                {
+                    text = _("Login"), is_enter_default = true,
+                    callback = function()
+                        local f = self.login_dialog:getFields()
+                        local remember = self._login_set_default
+                        UIManager:close(self.login_dialog)
+                        self:doLogin(f[1], f[2], f[3], remember)
+                    end,
+                },
             },
-        }},
+        },
     }
     UIManager:show(self.login_dialog)
     self.login_dialog:onShowKeyboard()
 end
 
-function BookLore:doLogin(server_url, username, password)
+function BookLore:doLogin(server_url, username, password, remember)
     -- Normalize before anything else (adds http://, drops trailing slash) and
     -- reject a blank URL with an actionable message instead of a doomed POST.
     server_url = BookLoreApi.normalizeServerUrl(server_url)
@@ -469,14 +564,14 @@ function BookLore:doLogin(server_url, username, password)
     -- burned the whole connect timeout against a down interface).
     if not NetworkMgr:isWifiOn() then
         NetworkMgr:turnOnWifi(function()
-            self:_startLogin(server_url, username, password)
+            self:_startLogin(server_url, username, password, remember)
         end)
         return
     end
-    self:_startLogin(server_url, username, password)
+    self:_startLogin(server_url, username, password, remember)
 end
 
-function BookLore:_startLogin(server_url, username, password)
+function BookLore:_startLogin(server_url, username, password, remember)
     local busy = InfoMessage:new{ text = _("Logging in…") }
     UIManager:show(busy)
 
@@ -492,18 +587,279 @@ function BookLore:_startLogin(server_url, username, password)
         local refresh_token = payload and payload.refresh_token
         local err = async_err or (payload and payload.err)
         if token and refresh_token then
+            -- Snapshot the outgoing account's freshest tokens before setTokens
+            -- overwrites the live triple, so switching back to it still resumes.
+            if self.session:isLoggedIn()
+                    and (self.server_url ~= server_url or self.username ~= username) then
+                self.session:rememberActive(self.server_url, self.username)
+            end
             -- Token persistence rationale (refresh-token storage, token_time
             -- seeding) is documented in session.lua. (ref: DL-002, DL-004, DL-010)
             self.session:setTokens(token, refresh_token)
             self.server_url = server_url
             self.username = username
-            self.settings:saveSetting("server_url", server_url)
-            self.settings:saveSetting("username", username)
-            self.settings:flush()
+            -- Record + mark this account active in the multi-account store.
+            self.session:rememberActive(server_url, username)
+            -- Only overwrite the saved default pre-fill when "Set as default"
+            -- was left on (remember ~= false): a one-off login leaves it intact.
+            if remember ~= false then
+                self.settings:saveSetting("server_url", server_url)
+                self.settings:saveSetting("username", username)
+                self.settings:flush()
+            end
             UIManager:show(InfoMessage:new{ text = _("Logged in successfully.") })
         else
             UIManager:show(InfoMessage:new{
                 text = T(_("Login failed:\n%1"), tostring(err)),
+            })
+        end
+    end)
+end
+
+-- ─── Settings · accounts · updates ───────────────────────────────────
+
+--- Switcher over the saved accounts. Resumable accounts (a refresh token is
+-- stored) switch without a password; an expired one re-opens the login dialog
+-- prefilled. Mirrors the sort/filter Menu-in-InputContainer pattern.
+function BookLore:showAccountSwitcher()
+    local accounts = self.session:listAccounts()
+    if #accounts == 0 then
+        UIManager:show(InfoMessage:new{
+            text = _("No saved accounts yet. Use Login to add one."),
+        })
+        return
+    end
+
+    self.account_menu_widget = InputContainer:new{
+        dimen = Geom:new{ w = Screen:getWidth(), h = Screen:getHeight() },
+    }
+
+    local item_table = {}
+    for i = 1, #accounts do
+        local a = accounts[i]
+        local status
+        if a.active then
+            status = _("active")
+        elseif a.resumable then
+            status = T(_("resume · %1"), self:formatRelativeTime(a.token_time))
+        else
+            status = _("sign in again")
+        end
+        item_table[#item_table+1] = {
+            text = (a.active and "● " or "○ ")
+                .. tostring(a.username) .. " @ " .. tostring(a.server_url),
+            mandatory = status,
+            account = a,
+        }
+    end
+
+    local account_menu = Menu:new{
+        show_parent = self.account_menu_widget,
+        title = _("Switch Account"),
+        item_table = item_table,
+        width = Screen:getWidth(),
+        height = Screen:getHeight(),
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        onMenuChoice = function(menu_self, item)
+            local a = item.account
+            UIManager:close(self.account_menu_widget)
+            if a.active then return end
+            if not a.resumable then
+                -- No stored refresh token: prefill the login dialog instead.
+                self.server_url = a.server_url
+                self.username = a.username
+                self:showLoginDialog()
+                return
+            end
+            local identity = self.session:switchTo(a.server_url, a.username)
+            if identity then
+                self.server_url = identity.server_url
+                self.username = identity.username
+                UIManager:show(InfoMessage:new{
+                    text = T(_("Switched to %1. Loading library…"),
+                        tostring(identity.username)),
+                })
+                self:browseLibrary()
+            end
+        end,
+        close_callback = function()
+            UIManager:close(self.account_menu_widget)
+        end,
+    }
+
+    table.insert(self.account_menu_widget, account_menu)
+    UIManager:show(self.account_menu_widget)
+end
+
+--- Edit the download directory. Re-creates the Downloads helper on save.
+function BookLore:showDownloadFolderDialog()
+    local dialog
+    dialog = InputDialog:new{
+        title = _("Download folder"),
+        input = self.download_dir,
+        buttons = {{
+            {
+                text = _("Cancel"), id = "close",
+                callback = function() UIManager:close(dialog) end,
+            },
+            {
+                text = _("Save"), is_enter_default = true,
+                callback = function()
+                    local path = dialog:getInputText()
+                    UIManager:close(dialog)
+                    if path and path ~= "" then
+                        self.download_dir = path
+                        self.settings:saveSetting("download_dir", path)
+                        self.settings:flush()
+                        self.downloads = Downloads.new{ download_dir = path }
+                        UIManager:show(InfoMessage:new{
+                            text = T(_("Download folder set to:\n%1"), path),
+                        })
+                    end
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+--- Sign out the active account (clears its tokens, drops it from the switcher)
+-- and revert to the saved default pre-fill so the user need not retype it.
+function BookLore:confirmSignOut()
+    if not self.session:isLoggedIn() then
+        UIManager:show(InfoMessage:new{ text = _("You're not signed in.") })
+        return
+    end
+    UIManager:show(ConfirmBox:new{
+        text = T(_("Sign out of %1 @ %2?"),
+            tostring(self.username), tostring(self.server_url)),
+        ok_text = _("Sign out"),
+        ok_callback = function()
+            self.session:signOutActive()
+            self.server_url = self.settings:readSetting("server_url", "")
+            self.username = self.settings:readSetting("username", "")
+            UIManager:show(InfoMessage:new{ text = _("Signed out.") })
+        end,
+    })
+end
+
+--- Settings/registry/cache paths removed on a full uninstall. Scans the
+-- settings dir for booklore* files (settings, downloads registry, sync queue,
+-- per-account library caches) and adds the cover cache + downloads dir.
+function BookLore:_purgePaths()
+    local paths = {}
+    local settings_dir = DataStorage:getSettingsDir()
+    local ok, iter = pcall(lfs.dir, settings_dir)
+    if ok then
+        for entry in iter do
+            if type(entry) == "string" and entry:match("^booklore") then
+                paths[#paths+1] = settings_dir .. "/" .. entry
+            end
+        end
+    end
+    paths[#paths+1] = DataStorage:getDataDir() .. "/cache/booklore"
+    paths[#paths+1] = self.download_dir
+    return paths
+end
+
+--- Uninstall both plugins. MultiConfirmBox lets the user keep settings (for an
+-- easy reinstall) or erase everything. The actual rm runs off the UI thread.
+function BookLore:confirmUninstall()
+    UIManager:show(MultiConfirmBox:new{
+        text = _("Uninstall both BookLore plugins?\n\n"
+            .. "Keep your saved settings (server URL, accounts, downloads) for an "
+            .. "easy reinstall, or erase everything?"),
+        choice1_text = _("Keep settings"),
+        choice1_callback = function() self:_doUninstall(false) end,
+        choice2_text = _("Erase everything"),
+        choice2_callback = function() self:_doUninstall(true) end,
+    })
+end
+
+function BookLore:_doUninstall(purge)
+    local extra = purge and self:_purgePaths() or nil
+    local busy = InfoMessage:new{ text = _("Uninstalling…") }
+    UIManager:show(busy)
+    self.async:run(function()
+        self.updater:uninstall({ purge_settings = purge, extra_paths = extra })
+        return true
+    end, function()
+        UIManager:close(busy)
+        UIManager:show(InfoMessage:new{
+            text = _("BookLore uninstalled. Restart KOReader (or your Kindle) "
+                .. "to finish removing it."),
+            width = Screen:getWidth() * 0.9,
+        })
+    end)
+end
+
+--- Check the release manifest for a newer version and offer to install it.
+function BookLore:checkForUpdates()
+    if not NetworkMgr:isWifiOn() then
+        NetworkMgr:turnOnWifi(function() self:checkForUpdates() end)
+        return
+    end
+    local busy = InfoMessage:new{ text = _("Checking for updates…") }
+    UIManager:show(busy)
+    self.async:run(function()
+        local res, err = self.updater:checkForUpdate()
+        return { res = res, err = err }
+    end, function(payload)
+        UIManager:close(busy)
+        local res = payload and payload.res
+        local err = payload and payload.err
+        if not res then
+            UIManager:show(InfoMessage:new{
+                text = T(_("Couldn't check for updates:\n%1"),
+                    tostring(err or "unknown error")),
+                width = Screen:getWidth() * 0.9,
+            })
+            return
+        end
+        if not res.available then
+            UIManager:show(InfoMessage:new{
+                text = T(_("You're on the latest version (%1)."),
+                    tostring(res.installed or "?")),
+            })
+            return
+        end
+        UIManager:show(ConfirmBox:new{
+            text = T(_("Update available: %1 → %2.\n\n"
+                .. "Download and install now? KOReader will need to restart "
+                .. "afterward."), tostring(res.installed), tostring(res.latest)),
+            ok_text = _("Update"),
+            ok_callback = function() self:_performUpdate(res.manifest) end,
+        })
+    end)
+end
+
+function BookLore:_performUpdate(manifest)
+    local job
+    local busy = InfoMessage:new{
+        text = _("Downloading and installing update…\n\nTap to cancel."),
+        dismiss_callback = function() self.async:cancel(job) end,
+    }
+    UIManager:show(busy)
+    job = self.async:run(function()
+        local ok, info = self.updater:performUpdate(manifest)
+        return { ok = ok, info = info }
+    end, function(payload, async_err)
+        UIManager:close(busy)
+        if async_err == "cancelled" then return end
+        if payload and payload.ok then
+            UIManager:show(InfoMessage:new{
+                text = T(_("Updated to %1.\n\nPlease restart KOReader (or your "
+                    .. "Kindle) to apply."), tostring(payload.info)),
+                width = Screen:getWidth() * 0.9,
+            })
+        else
+            UIManager:show(InfoMessage:new{
+                text = T(_("Update failed:\n%1"),
+                    tostring((payload and payload.info) or async_err or "unknown error")),
+                width = Screen:getWidth() * 0.9,
             })
         end
     end)
