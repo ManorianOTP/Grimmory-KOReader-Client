@@ -64,7 +64,9 @@ function BookLore:init()
     self.settings = LuaSettings:open(
         DataStorage:getSettingsDir() .. "/booklore.lua"
     )
-    self.server_url = self.settings:readSetting("server_url", "http://192.168.1.50:6060")
+    -- No hardcoded default: a stranger's first login must show an empty field
+    -- (with an example hint) rather than someone else's server address.
+    self.server_url = self.settings:readSetting("server_url", "")
     self.username = self.settings:readSetting("username", "")
 
     -- Token lifecycle (load, silent refresh, 401 retry, clearing) lives in
@@ -429,7 +431,7 @@ function BookLore:showLoginDialog()
     self.login_dialog = MultiInputDialog:new{
         title = _("BookLore Login"),
         fields = {
-            { text = self.server_url, hint = _("Server URL") },
+            { text = self.server_url, hint = _("Server URL (e.g. 192.168.1.50:6060)") },
             { text = self.username, hint = _("Username") },
             { text = "", hint = _("Password"), text_type = "password" },
         },
@@ -453,6 +455,15 @@ function BookLore:showLoginDialog()
 end
 
 function BookLore:doLogin(server_url, username, password)
+    -- Normalize before anything else (adds http://, drops trailing slash) and
+    -- reject a blank URL with an actionable message instead of a doomed POST.
+    server_url = BookLoreApi.normalizeServerUrl(server_url)
+    if server_url == "" then
+        UIManager:show(InfoMessage:new{
+            text = _("Please enter your BookLore server URL (e.g. 192.168.1.50:6060)."),
+        })
+        return
+    end
     -- Callback form so the POST never fires while wifi is still
     -- associating (the old fire-and-forget call raced association and
     -- burned the whole connect timeout against a down interface).
