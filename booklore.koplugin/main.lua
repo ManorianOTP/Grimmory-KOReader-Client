@@ -2641,8 +2641,21 @@ function BookLore:_startBookDownload(book)
     local job
     local progress_box
     local last_pct_shown = -100
+    -- Closing an InfoMessage fires its dismiss_callback (KOReader runs it from
+    -- onCloseWidget on ANY close, not just a user tap). When WE close the box --
+    -- to swap in a new percentage, or on completion -- detach the callback first
+    -- so the close is not mistaken for a cancel. Without this, the first
+    -- percentage update closed the box, fired dismiss_callback, and cancelled the
+    -- download (killing the child), leaving an orphaned box stuck on screen.
+    local function closeProgress()
+        if progress_box then
+            progress_box.dismiss_callback = nil
+            UIManager:close(progress_box)
+            progress_box = nil
+        end
+    end
     local function showProgress(pct)
-        if progress_box then UIManager:close(progress_box) end
+        closeProgress()
         local pct_text = pct and string.format(" %d%%", pct) or ""
         progress_box = InfoMessage:new{
             text = T(_("Downloading %1…%2\n\nTap to cancel."), title, pct_text),
@@ -2658,10 +2671,7 @@ function BookLore:_startBookDownload(book)
         self.server_url, "downloadBook", book.id, tmp, book.fileSizeKb)
 
     job = self.async:run(task, function(payload, async_err)
-        if progress_box then
-            UIManager:close(progress_box)
-            progress_box = nil
-        end
+        closeProgress()
         self._downloading_id = nil
         if async_err == "cancelled" or not payload then
             os.remove(tmp)

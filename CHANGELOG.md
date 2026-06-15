@@ -40,6 +40,12 @@ release.
 - Library shows an explicit empty-state message when filters/search match nothing.
 - Active filters now persist across restarts (like sort/order already did).
 
+### Fixed
+- Book downloads no longer cancel themselves partway. Updating the progress
+  percentage swapped the on-screen message box, and closing the old box fired its
+  "Tap to cancel" handler — silently aborting the transfer and leaving it stuck
+  at the last shown percent. Downloads now run to completion.
+
 ## [1.0.0]
 
 - Initial baseline: BookLore library client (auth with silent token refresh,
