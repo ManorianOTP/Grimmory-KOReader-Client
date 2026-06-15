@@ -17,6 +17,7 @@ Thumbs.db
 .gitconfig
 .ripgreprc
 
+# Local MCP / tooling config
 .mcp.json
 
 # Test harness local artifacts (see tests/.gitignore for fixtures/recorded)

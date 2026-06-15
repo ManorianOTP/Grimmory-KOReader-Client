@@ -63,8 +63,8 @@ local function defaultExec(cmd)
     return output, code
 end
 
--- Single-quote a path for the shell (handles the repo's "BookLore KOReader Client"
--- space and anything else); '' escaping closes/reopens the quote.
+-- Single-quote a path for the shell (handles spaces and other special
+-- characters in paths); '' escaping closes/reopens the quote.
 local function shq(path)
     return "'" .. tostring(path):gsub("'", "'\\''") .. "'"
 end
