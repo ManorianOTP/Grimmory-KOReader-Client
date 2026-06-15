@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "plugins": [
-    { "dir": "booklore_sync.koplugin", "url": "https://github.com/ManorianOTP/BookLore-KOReader-Client/releases/download/v1.0.0/booklore_sync.koplugin-1.0.0.tar.gz", "sha256": "fb15783abad5921bdda6d42d584266c2946390096ebc47aa44995b5073510b29", "size": 21183 },
-    { "dir": "booklore.koplugin", "url": "https://github.com/ManorianOTP/BookLore-KOReader-Client/releases/download/v1.0.0/booklore.koplugin-1.0.0.tar.gz", "sha256": "c3fca78842f434bb579d5680ce5d706c64bf25043f138d5d2230020f42935684", "size": 65927 }
+    { "dir": "booklore_sync.koplugin", "url": "https://github.com/ManorianOTP/BookLore-KOReader-Client/releases/download/v1.0.0/booklore_sync.koplugin-1.0.0.tar.gz", "sha256": "3e8a7c2f36b1bc54c88872835691cbb7da61205e4fafac529470617e113cede1", "size": 21159 },
+    { "dir": "booklore.koplugin", "url": "https://github.com/ManorianOTP/BookLore-KOReader-Client/releases/download/v1.0.0/booklore.koplugin-1.0.0.tar.gz", "sha256": "a16132b45828f81c292ead038bf24be79d187b1494d0c07a4e8e2e4918580583", "size": 66117 }
   ]
 }
