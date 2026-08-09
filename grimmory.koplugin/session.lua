@@ -20,18 +20,25 @@ local logger = require("logger")
 local Session = {}
 Session.__index = Session
 
--- True when an error string came from the server responding (an HTTP status),
--- as opposed to a connection-class failure. api.lua wraps a real status as
+-- Extract a real HTTP status from api.lua's typed error. It wraps a status as
 -- "HTTP <number>: ..." and a luasocket connect/timeout error as "HTTP
--- <word>: ..." (e.g. "HTTP timeout"), so a leading digit after "HTTP "
--- distinguishes "server rejected us" from "couldn't reach the server".
-local function serverRejected(err)
-    return type(err) == "string" and err:match("^HTTP %d") ~= nil
+-- <word>: ..." (e.g. "HTTP timeout"), which intentionally returns nil here.
+local function httpStatus(err)
+    if type(err) ~= "string" then return nil end
+    return tonumber(err:match("^HTTP (%d%d%d)"))
 end
 
--- 50 min chosen so long reading sessions refresh well before the 10-hour
--- server access-token TTL without excessive refresh calls for short
--- sessions. (ref: DL-002)
+-- Grimmory returns 400/401/403 when the refresh credential itself is
+-- malformed, expired, revoked, or otherwise forbidden. A timeout, 429, 5xx,
+-- endpoint 404, or Lua-side transport exception says nothing definitive about
+-- that credential and must not sign the user out.
+local function refreshDefinitivelyInvalid(err)
+    local status = httpStatus(err)
+    return status == 400 or status == 401 or status == 403
+end
+
+-- 50 min chosen so long reading sessions refresh conservatively before the
+-- server access-token expiry without excessive calls for short sessions.
 local PREEMPTIVE_REFRESH_SECS = 50 * 60
 
 -- Any api method routed through call() MUST be registered here --
@@ -39,10 +46,13 @@ local PREEMPTIVE_REFRESH_SECS = 50 * 60
 local METHOD_ARG_LAYOUT = {
     getBooks           = "token-second",
     getBook            = "token-second",
+    getBookFiles       = "token-second",
+    getVersion         = "token-second",
     getRecommendations = "token-second",
     getShelves         = "token-second",
     getLibraries  = "token-second",
     downloadBook  = "download-book",
+    downloadBookFile = "download-book-file",
     downloadCover = "download-cover",
 }
 
@@ -243,8 +253,8 @@ end
 -- _performRefresh: exchanges the stored refresh_token for a rotated pair.
 -- Single-flight: if another call is already inside this function, return
 -- refresh-in-progress immediately. Actual wait loops are not portable on
--- KOReader without coroutines; callers treat the transient error by
--- surfacing Session-expired and letting the user retry. (ref: DL-005, DL-006)
+-- KOReader without coroutines; callers preserve credentials and let the user
+-- retry when the failure is transient.
 function Session:_performRefresh(server_url)
     if self._refreshing then
         return false, "refresh-in-progress"
@@ -274,14 +284,16 @@ function Session:_performRefresh(server_url)
     self._refreshing = false
     if ok then
         if inner_success == false then
-            -- Refresh call returned failure; clear all token state.
-            self:clearTokens()
+            if refreshDefinitivelyInvalid(inner_err) then
+                self:clearTokens()
+            end
             return false, inner_err
         end
         return true, nil
     else
         -- pcall caught a Lua error; inner_success holds the error object.
-        self:clearTokens()
+        -- A client/transport exception is transient with respect to the
+        -- credential. Preserve the pair so the next request can retry.
         return false, tostring(inner_success)
     end
 end
@@ -320,15 +332,10 @@ function Session:call(server_url, method_name, ...)
     ) then
         local ok, ref_err = self:_performRefresh(server_url)
         if not ok then
-            -- A reachable server that REJECTED the refresh (any HTTP status:
-            -- 401 expired token, or 4xx from an endpoint mismatch) means the
-            -- stored credentials are unrecoverable -- signal expiry so the UI
-            -- can prompt a re-login instead of silently degrading to the cached
-            -- copy. A transient network failure (no HTTP status) or a
-            -- concurrent refresh is recoverable, so it stays silent. This
-            -- mirrors the reactive-401 path below; the pre-emptive path
-            -- previously missed it. (ref: DL-006)
-            if serverRejected(ref_err) then
+            -- Only an explicit invalid/revoked response expires the account.
+            -- Rate limiting, server failures and network failures preserve the
+            -- pair and quietly allow a later retry.
+            if refreshDefinitivelyInvalid(ref_err) then
                 self.on_expired()
             end
             return nil, ref_err
@@ -342,6 +349,10 @@ function Session:call(server_url, method_name, ...)
         elseif layout == "download-book" then
             -- extra_args: book_id, dest_path, expected_size_kb
             return self.api:downloadBook(server_url, extra_args[1], self.token, extra_args[2], extra_args[3])
+        elseif layout == "download-book-file" then
+            -- extra_args: book_id, file_id, dest_path, expected_size_kb
+            return self.api:downloadBookFile(server_url, extra_args[1], extra_args[2],
+                self.token, extra_args[3], extra_args[4])
         elseif layout == "download-cover" then
             -- extra_args: book_id, cover_updated_on, cache_dir
             return self.api:downloadCover(server_url, extra_args[1], extra_args[2], self.token, extra_args[3])
@@ -357,8 +368,7 @@ function Session:call(server_url, method_name, ...)
             -- Case A: refresh token present — attempt silent renewal then retry once
             local ok, ref_err = self:_performRefresh(server_url)
             if not ok then
-                if ref_err ~= "refresh-in-progress" then
-                    self:clearTokens()
+                if refreshDefinitivelyInvalid(ref_err) then
                     self.on_expired()
                 end
                 return nil, ref_err

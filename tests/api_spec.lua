@@ -52,6 +52,8 @@ describe("GrimmoryApi", function()
                     status = 200,
                     headers = { ["Content-Type"] = "application/json" },
                     body_file = "login_ok.json",
+                    expect_headers = { ["Content-Type"] = "application/json" },
+                    expect_json = { username = "user", password = "pass" },
                     repeat_ = 1,
                 },
             })
@@ -89,6 +91,8 @@ describe("GrimmoryApi", function()
                     status = 200,
                     headers = { ["Content-Type"] = "application/json" },
                     body_file = "refresh_ok.json",
+                    expect_headers = { ["Content-Type"] = "application/json" },
+                    expect_json = { refreshToken = "old-refresh-token" },
                     repeat_ = 1,
                 },
             })
@@ -104,10 +108,24 @@ describe("GrimmoryApi", function()
             fixture = spec_helper.start_http_fixture({
                 {
                     method = "GET",
+                    path = "/api/v1/books/page",
+                    status = 404,
+                    expect_query = { page = "0", size = "100" },
+                    expect_headers = { Authorization = "Bearer test-token" },
+                    body = "not supported",
+                    repeat_ = 1,
+                },
+                {
+                    method = "GET",
                     path = "/api/v1/books",
                     status = 200,
                     headers = { ["Content-Type"] = "application/json" },
                     body_file = "library_books_page1.json",
+                    expect_query = {
+                        withDescription = "false",
+                        stripForListView = "true",
+                    },
+                    expect_headers = { Authorization = "Bearer test-token" },
                 },
             })
             local data, err = GrimmoryApi:getBooks(fixture.base_url(), "test-token")
@@ -118,6 +136,112 @@ describe("GrimmoryApi", function()
             assert.equals(1024, data[1].fileSizeKb)
             assert.equals("EPUB", data[1].bookType)
             assert.equals("2026-08-01T10:00:00Z", data[1].coverUpdatedOn)
+            assert.equals("2026-08-03T09:00:00Z", data[1].lastReadTime)
+            assert.equals("2026-07-01T08:00:00Z", data[1].addedOn)
+            assert.is_true(data[1].locked)
+            assert.equals(101, data[1].primaryFile.id)
+            assert.equals(2, #data[1].bookFiles)
+            assert.equals(2, #data[1].downloadFiles)
+            assert.equals(201, data[1].downloadFiles[2].id)
+            assert.equals("PDF", data[1].downloadFiles[2].bookType)
+            assert.is_true(data[1].downloadEligible)
+        end)
+
+        it("traverses every native Grimmory page", function()
+            fixture = spec_helper.start_http_fixture({
+                {
+                    method = "GET",
+                    path = "/api/v1/books/page",
+                    status = 200,
+                    headers = { ["Content-Type"] = "application/json" },
+                    expect_query = { page = "0", size = "100" },
+                    expect_headers = { Authorization = "Bearer page-token" },
+                    body = [[{"content":[{"id":1,"primaryFile":{"id":101,"bookId":1,"fileName":"one.epub","fileSizeKb":10,"bookType":"EPUB","book":true},"metadata":{"title":"One"},"alternativeFormats":[],"supplementaryFiles":[],"isPhysical":false}],"page":{"number":0,"size":100,"totalElements":2,"totalPages":2}}]],
+                    repeat_ = 1,
+                },
+                {
+                    method = "GET",
+                    path = "/api/v1/books/page",
+                    status = 200,
+                    headers = { ["Content-Type"] = "application/json" },
+                    expect_query = { page = "1", size = "100" },
+                    expect_headers = { Authorization = "Bearer page-token" },
+                    body = [[{"content":[{"id":2,"primaryFile":{"id":102,"bookId":2,"fileName":"two.pdf","fileSizeKb":20,"bookType":"PDF","book":true},"metadata":{"title":"Two"},"alternativeFormats":[],"supplementaryFiles":[],"isPhysical":false}],"page":{"number":1,"size":100,"totalElements":2,"totalPages":2}}]],
+                    repeat_ = 1,
+                },
+            })
+            local data, err = GrimmoryApi:getBooks(fixture.base_url(), "page-token")
+            assert.is_nil(err, tostring(err))
+            assert.equals(2, #data)
+            assert.equals(1, data[1].id)
+            assert.equals(2, data[2].id)
+            assert.equals("PDF", data[2].primaryFile.bookType)
+        end)
+
+        it("rejects a content wrapper with no totalPages instead of truncating", function()
+            fixture = spec_helper.start_http_fixture({
+                {
+                    method = "GET",
+                    path = "/api/v1/books/page",
+                    status = 200,
+                    headers = { ["Content-Type"] = "application/json" },
+                    expect_query = { page = "0", size = "100" },
+                    body = [[{"content":[{"id":1}]}]],
+                    repeat_ = 1,
+                },
+            })
+            local data, err = GrimmoryApi:getBooks(fixture.base_url(), "test-token")
+            assert.is_nil(data)
+            assert.matches("omitted totalPages", err)
+        end)
+
+        it("keeps a BookLore-era flat primary file downloadable", function()
+            local book = GrimmoryApi.normalizeBook({
+                id = 77,
+                fileName = "legacy.epub",
+                fileSizeKb = 123,
+                bookType = "EPUB",
+                createdAt = "2024-01-01T00:00:00Z",
+                lastReadAt = "2024-02-01T00:00:00Z",
+                metadata = { title = "Legacy" },
+            })
+            assert.equals("legacy.epub", book.primaryFile.fileName)
+            assert.is_true(book.primaryFile.isPrimary)
+            assert.is_true(book.downloadEligible)
+            assert.equals("2024-01-01T00:00:00Z", book.addedOn)
+            assert.equals("2024-02-01T00:00:00Z", book.lastReadTime)
+        end)
+    end)
+
+    describe("getVersion", function()
+        it("discovers Grimmory v3 capabilities", function()
+            fixture = spec_helper.start_http_fixture({{
+                method = "GET",
+                path = "/api/v1/version",
+                status = 200,
+                headers = { ["Content-Type"] = "application/json" },
+                expect_headers = { Authorization = "Bearer test-token" },
+                body = [[{"current":"3.3.1","latest":"3.3.1"}]],
+            }})
+            local info, err = GrimmoryApi:getVersion(fixture.base_url(), "test-token")
+            assert.is_nil(err, tostring(err))
+            assert.is_true(info.available)
+            assert.equals("3.3.1", info.current)
+            assert.is_true(info.capabilities.paginatedBooks)
+            assert.is_true(info.capabilities.bookFiles)
+        end)
+
+        it("gracefully reports an absent BookLore-era version endpoint", function()
+            fixture = spec_helper.start_http_fixture({{
+                method = "GET",
+                path = "/api/v1/version",
+                status = 404,
+                body = "not found",
+            }})
+            local info, err = GrimmoryApi:getVersion(fixture.base_url(), "test-token")
+            assert.is_nil(err, tostring(err))
+            assert.is_false(info.available)
+            assert.is_false(info.capabilities.paginatedBooks)
         end)
     end)
 
@@ -130,6 +254,8 @@ describe("GrimmoryApi", function()
                     status = 200,
                     headers = { ["Content-Type"] = "application/json" },
                     body_file = "book_metadata.json",
+                    expect_query = { withDescription = "true" },
+                    expect_headers = { Authorization = "Bearer test-token" },
                 },
             })
             -- Arg order is (server_url, token, book_id) to match "token-second".
@@ -142,6 +268,55 @@ describe("GrimmoryApi", function()
             assert.equals(1024, data.fileSizeKb)
             assert.equals("EPUB", data.bookType)
             assert.equals("2026-08-01T10:00:00Z", data.coverUpdatedOn)
+            assert.equals(201, data.alternativeFormats[1].id)
+            assert.equals("test_book_one.pdf", data.alternativeFormats[1].fileName)
+            assert.equals(2, #data.downloadFiles)
+        end)
+    end)
+
+    describe("Book Files", function()
+        it("lists only book files and preserves exact file identity", function()
+            fixture = spec_helper.start_http_fixture({{
+                method = "GET",
+                path = "/api/v1/books/9/files",
+                status = 200,
+                headers = { ["Content-Type"] = "application/json" },
+                expect_query = { isBook = "true" },
+                expect_headers = { Authorization = "Bearer files-token" },
+                body = [=[[{"id":901,"bookId":9,"fileName":"nine.pdf","fileSizeKb":55,"bookType":"PDF","extension":"pdf","book":true,"folderBased":false}]]=],
+            }})
+            local files, err = GrimmoryApi:getBookFiles(
+                fixture.base_url(), "files-token", 9)
+            assert.is_nil(err, tostring(err))
+            assert.equals(1, #files)
+            assert.equals(901, files[1].id)
+            assert.equals(9, files[1].bookId)
+            assert.equals("PDF", files[1].bookType)
+            assert.is_true(files[1].downloadEligible)
+        end)
+
+        it("marks physical and audiobook-only records ineligible", function()
+            local physical = GrimmoryApi.normalizeBook({
+                id = 10,
+                metadata = { title = "On paper" },
+                isPhysical = true,
+                alternativeFormats = {},
+                supplementaryFiles = {},
+            })
+            assert.is_false(physical.downloadEligible)
+
+            local audio = GrimmoryApi.normalizeBook({
+                id = 11,
+                primaryFile = {
+                    id = 1101,
+                    bookId = 11,
+                    fileName = "audio.m4b",
+                    bookType = "AUDIOBOOK",
+                    book = true,
+                },
+                metadata = { title = "Audio" },
+            })
+            assert.is_false(audio.downloadEligible)
         end)
     end)
 
@@ -154,6 +329,7 @@ describe("GrimmoryApi", function()
                     status = 200,
                     headers = { ["Content-Type"] = "application/json" },
                     body_file = "recommendations.json",
+                    expect_headers = { Authorization = "Bearer test-token" },
                 },
             })
             local data, err = GrimmoryApi:getRecommendations(fixture.base_url(), "test-token", 1)
@@ -167,7 +343,7 @@ describe("GrimmoryApi", function()
     end)
 
     describe("progress GET", function()
-        it("parses cfi, percentage, lastReadAt fields", function()
+        it("parses native cfi, percentage, href, and lastReadTime fields", function()
             fixture = spec_helper.start_http_fixture({
                 {
                     method = "GET",
@@ -184,6 +360,8 @@ describe("GrimmoryApi", function()
             assert.is_table(prog)
             assert.is_string(prog.cfi)
             assert.is_number(prog.percentage)
+            assert.is_string(prog.href)
+            assert.equals("2026-04-26T20:00:00Z", data.lastReadTime)
         end)
     end)
 
@@ -216,6 +394,7 @@ describe("GrimmoryApi", function()
                     headers = {
                         ["Content-Type"] = "application/epub+zip",
                     },
+                    expect_headers = { Authorization = "Bearer test-token" },
                     body_file = "download_book.bin",
                     repeat_ = 1,
                 },
@@ -239,6 +418,28 @@ describe("GrimmoryApi", function()
             f2:close()
             os.remove(dest)
             assert.equals(expected, got)
+        end)
+
+        it("downloads an exact alternative file ID with Bearer auth", function()
+            fixture = spec_helper.start_http_fixture({{
+                method = "GET",
+                path = "/api/v1/books/7/files/701/download",
+                status = 200,
+                headers = { ["Content-Type"] = "application/pdf" },
+                expect_headers = { Authorization = "Bearer file-token" },
+                body_file = "download_book.bin",
+                repeat_ = 1,
+            }})
+            local tmpdir = os.getenv("TMPDIR") or "/tmp"
+            local dest = tmpdir .. "/grimmory_file_dl_" .. tostring(os.time()) ..
+                "_" .. tostring(math.random(99999)) .. ".pdf"
+            local ok, err = GrimmoryApi:downloadBookFile(
+                fixture.base_url(), 7, 701, "file-token", dest, nil)
+            assert.is_truthy(ok, tostring(err))
+            local f = assert(io.open(dest, "rb"))
+            assert.truthy(#f:read("*a") > 0)
+            f:close()
+            os.remove(dest)
         end)
     end)
 
@@ -278,6 +479,7 @@ describe("GrimmoryApi", function()
                     status = 200,
                     headers = { ["Content-Type"] = "image/gif" },
                     body = "GIF89a-fake-gif-bytes",
+                    expect_query = { token = "test-token" },
                     repeat_ = 1,
                 },
             })

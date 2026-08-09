@@ -6,15 +6,35 @@
     "bookId": 1,
     "fileName": "test_book_one.epub",
     "fileSizeKb": 1024,
-    "bookType": "EPUB"
+    "bookType": "EPUB",
+    "extension": "epub",
+    "book": true,
+    "folderBased": false
   },
+  "lastReadTime": "2026-08-03T09:00:00Z",
+  "addedOn": "2026-07-01T08:00:00Z",
   "metadata": {
     "title": "Test Book One",
     "authors": ["Author A"],
     "publisher": "Test Publisher",
     "publishedDate": "2024-01-01",
-    "coverUpdatedOn": "2026-08-01T10:00:00Z"
+    "coverUpdatedOn": "2026-08-01T10:00:00Z",
+    "allMetadataLocked": true
   },
+  "alternativeFormats": [
+    {
+      "id": 201,
+      "bookId": 1,
+      "fileName": "test_book_one.pdf",
+      "fileSizeKb": 2048,
+      "bookType": "PDF",
+      "extension": "pdf",
+      "book": true,
+      "folderBased": false
+    }
+  ],
+  "supplementaryFiles": [],
+  "isPhysical": false,
   "epubProgress": null,
   "_captured_against": "Grimmory v3.3.1"
 }

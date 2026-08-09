@@ -4,10 +4,10 @@
     The registry file (grimmory_downloads.lua in the settings dir) is the
     only runtime contract between the two plugins: grimmory_sync reads it
     directly (lookupBookId in grimmory_sync.koplugin/main.lua) to map the
-    currently open file path back to a Grimmory book_id. The key format
-    (server_url .. "|" .. book_id) and the entry shape
-    { path, server_id, server_url } must not change without updating that
-    reader.
+    currently open file path back to a Grimmory book_id. Primary downloads
+    retain the key (server_url .. "|" .. book_id); alternative formats append
+    their exact file ID. Every entry retains path/server_id/server_url for the
+    sync reader and adds native file identity for multi-format safety.
 
     Standalone module — no KOReader widget dependencies — so the registry
     contract and the stale-entry pruning are unit-testable off device.
@@ -21,8 +21,14 @@ local util = require("util")
 local Downloads = {}
 Downloads.__index = Downloads
 
-function Downloads.registryKey(server_url, book_id)
-    return server_url .. "|" .. tostring(book_id)
+function Downloads.registryKey(server_url, book_id, file_id, is_primary)
+    local key = server_url .. "|" .. tostring(book_id)
+    -- Preserve the long-standing primary-file key read by existing installs.
+    -- Alternative files need their exact Grimmory ID to coexist safely.
+    if file_id ~= nil and not is_primary then
+        key = key .. "|file:" .. tostring(file_id)
+    end
+    return key
 end
 
 --- @param opts table:
@@ -39,8 +45,9 @@ function Downloads.new(opts)
 end
 
 --- Destination path for a book download, sanitized for the device FS.
-function Downloads:destPath(book)
-    local raw_name = book.fileName or ("book_" .. tostring(book.id))
+function Downloads:destPath(book, book_file)
+    book_file = book_file or book.primaryFile or book
+    local raw_name = book_file.fileName or ("book_" .. tostring(book.id))
     local safe_name = util.getSafeFilename(raw_name, self.download_dir)
     local path = self.download_dir .. "/" .. safe_name
     return util.fixUtf8(path, "_")
@@ -49,9 +56,11 @@ end
 --- Resolve the on-disk path for an already-downloaded book, or nil.
 -- A registry entry whose file no longer exists (user deleted it from the
 -- file manager) is pruned so the detail page offers Download again.
-function Downloads:localPath(server_url, book)
+function Downloads:localPath(server_url, book, book_file)
     if not book.id then return nil end
-    local key = Downloads.registryKey(server_url, book.id)
+    book_file = book_file or book.primaryFile
+    local key = Downloads.registryKey(server_url, book.id,
+        book_file and book_file.id, book_file == nil or book_file.isPrimary == true)
     local entry = self.registry:readSetting(key)
     if entry and entry.path then
         if lfs.attributes(entry.path, "mode") == "file" then
@@ -66,12 +75,19 @@ function Downloads:localPath(server_url, book)
 end
 
 --- Record a completed download so localPath (and grimmory_sync) can find it.
-function Downloads:register(server_url, book, path)
-    local key = Downloads.registryKey(server_url, book.id)
+function Downloads:register(server_url, book, path, book_file)
+    book_file = book_file or book.primaryFile
+    local is_primary = book_file == nil or book_file.isPrimary == true
+    local key = Downloads.registryKey(server_url, book.id,
+        book_file and book_file.id, is_primary)
     self.registry:saveSetting(key, {
         path = path,
         server_id = book.id,
         server_url = server_url,
+        file_id = book_file and book_file.id or nil,
+        file_name = book_file and book_file.fileName or book.fileName,
+        book_type = book_file and book_file.bookType or book.bookType,
+        is_primary = is_primary,
     })
     self.registry:flush()
 end

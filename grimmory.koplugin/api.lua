@@ -12,6 +12,16 @@ local socket = require("socket")
 
 local GrimmoryApi = {}
 
+local BOOK_PAGE_SIZE = 100
+local KOREADER_BOOK_TYPES = {
+    EPUB = true,
+    PDF = true,
+    CBX = true,
+    FB2 = true,
+    MOBI = true,
+    AZW3 = true,
+}
+
 -- Per-socket-operation bound (connect, each read). Without this every
 -- request inherits luasocket's 60s default, and an unreachable host (an
 -- asleep tailnet peer drops packets rather than refusing) hangs for the
@@ -67,21 +77,114 @@ end
 -- live under primaryFile while cover versioning lives under metadata.
 -- Mutating the decoded table keeps cached snapshots and recommendation books
 -- on the same shape as top-level library results.
+function GrimmoryApi.normalizeBookFile(file, defaults)
+    if type(file) ~= "table" then return file end
+    defaults = defaults or {}
+
+    -- Jackson serializes Java's `isBook` bean property as `book` in the
+    -- current OpenAPI shape. Accept both spellings so older snapshots remain
+    -- usable, but expose one canonical field to the rest of the plugin.
+    if file.isBook == nil then file.isBook = file.book end
+    if file.isBook == nil then file.isBook = defaults.isBook end
+    if file.bookId == nil then file.bookId = defaults.bookId end
+    if file.isPrimary == nil then file.isPrimary = defaults.isPrimary == true end
+
+    if file.extension == nil and type(file.fileName) == "string" then
+        file.extension = file.fileName:match("%.([^%.]+)$")
+    end
+    if type(file.extension) == "string" then
+        file.extension = file.extension:lower()
+    end
+
+    file.downloadEligible = file.isBook ~= false
+        and type(file.fileName) == "string"
+        and file.fileName ~= ""
+        and KOREADER_BOOK_TYPES[tostring(file.bookType or ""):upper()] == true
+        and (file.isPrimary or file.id ~= nil)
+
+    return file
+end
+
+function GrimmoryApi.isDownloadEligible(file)
+    return type(file) == "table" and file.downloadEligible == true
+end
+
 function GrimmoryApi.normalizeBook(book)
     if type(book) ~= "table" then return book end
 
-    local primary = type(book.primaryFile) == "table" and book.primaryFile or {}
+    local primary = type(book.primaryFile) == "table"
+        and GrimmoryApi.normalizeBookFile(book.primaryFile, {
+            bookId = book.id,
+            isBook = true,
+            isPrimary = true,
+        }) or {}
+    if not next(primary) and type(book.fileName) == "string" then
+        primary = GrimmoryApi.normalizeBookFile({
+            bookId = book.id,
+            fileName = book.fileName,
+            fileSizeKb = book.fileSizeKb,
+            bookType = book.bookType,
+        }, {
+            bookId = book.id,
+            isBook = true,
+            isPrimary = true,
+        })
+    end
     local metadata = type(book.metadata) == "table" and book.metadata or {}
 
-    if book.fileName == nil then book.fileName = primary.fileName end
-    if book.fileSizeKb == nil then book.fileSizeKb = primary.fileSizeKb end
-    if book.bookType == nil then book.bookType = primary.bookType end
+    book.primaryFile = next(primary) and primary or nil
+
+    local alternatives = type(book.alternativeFormats) == "table"
+        and book.alternativeFormats or {}
+    for i, file in ipairs(alternatives) do
+        alternatives[i] = GrimmoryApi.normalizeBookFile(file, {
+            bookId = book.id,
+            isBook = true,
+            isPrimary = false,
+        })
+    end
+    book.alternativeFormats = alternatives
+
+    local supplementary = type(book.supplementaryFiles) == "table"
+        and book.supplementaryFiles or {}
+    for i, file in ipairs(supplementary) do
+        supplementary[i] = GrimmoryApi.normalizeBookFile(file, {
+            bookId = book.id,
+            isBook = false,
+            isPrimary = false,
+        })
+    end
+    book.supplementaryFiles = supplementary
+
+    -- The flattened fields are a compatibility surface for the existing UI,
+    -- while primaryFile/alternativeFormats retain Grimmory's native identity.
+    -- Always refresh them from canonical fields when present so a merged book
+    -- detail cannot leave stale list-view values behind.
+    if primary.fileName ~= nil then book.fileName = primary.fileName end
+    if primary.fileSizeKb ~= nil then book.fileSizeKb = primary.fileSizeKb end
+    if primary.bookType ~= nil then book.bookType = primary.bookType end
+    if book.lastReadTime == nil then book.lastReadTime = book.lastReadAt end
+    if book.addedOn == nil then book.addedOn = book.createdAt end
+    if book.locked == nil then book.locked = metadata.allMetadataLocked end
+
     if book.coverUpdatedOn == nil then
         book.coverUpdatedOn = metadata.coverUpdatedOn
     end
     if book.title == nil then
         book.title = metadata.title or primary.fileName
     end
+
+    book.bookFiles = {}
+    book.downloadFiles = {}
+    if next(primary) then
+        table.insert(book.bookFiles, primary)
+        if primary.downloadEligible then table.insert(book.downloadFiles, primary) end
+    end
+    for _, file in ipairs(alternatives) do
+        table.insert(book.bookFiles, file)
+        if file.downloadEligible then table.insert(book.downloadFiles, file) end
+    end
+    book.downloadEligible = #book.downloadFiles > 0
 
     return book
 end
@@ -92,7 +195,53 @@ local function normalizeBookList(data)
     for i, book in ipairs(books) do
         books[i] = GrimmoryApi.normalizeBook(book)
     end
-    return data
+    return books
+end
+
+local function httpStatus(err)
+    if type(err) ~= "string" then return nil end
+    return tonumber(err:match("^HTTP (%d%d%d)"))
+end
+
+local function paginationMetadata(data)
+    if type(data) ~= "table" then return nil end
+    if type(data.page) == "table" then return data.page end
+    if data.totalPages ~= nil or data.number ~= nil then return data end
+    return nil
+end
+
+local function pagedUrl(server_url, endpoint, page)
+    return server_url .. endpoint .. "?page=" .. tostring(page)
+        .. "&size=" .. tostring(BOOK_PAGE_SIZE)
+end
+
+local function collectPagedBooks(api, server_url, token, endpoint, first)
+    if type(first) ~= "table" or type(first.content) ~= "table" then
+        return nil, "invalid paginated books response"
+    end
+    local meta = paginationMetadata(first)
+    local total_pages = meta and tonumber(meta.totalPages)
+    local first_number = meta and tonumber(meta.number) or 0
+    if not total_pages then
+        return nil, "paginated books response omitted totalPages; refusing partial library"
+    end
+
+    local books = normalizeBookList(first)
+    for page = first_number + 1, total_pages - 1 do
+        local data, err = api:get(pagedUrl(server_url, endpoint, page), token)
+        if not data then return nil, err end
+        if type(data) ~= "table" or type(data.content) ~= "table" then
+            return nil, "invalid books page " .. tostring(page)
+        end
+        local page_meta = paginationMetadata(data)
+        if page_meta and tonumber(page_meta.number)
+                and tonumber(page_meta.number) ~= page then
+            return nil, "books page number mismatch: expected " .. tostring(page)
+        end
+        local page_books = normalizeBookList(data)
+        for _, book in ipairs(page_books) do table.insert(books, book) end
+    end
+    return books, nil
 end
 
 --- Perform a POST request with a JSON body.
@@ -258,12 +407,73 @@ function GrimmoryApi:getShelves(server_url, token)
     return self:get(url, token)
 end
 
---- Fetch all books.
+--- Discover the Grimmory server version and the native API surfaces that
+-- accompany it. The version controller is absent on BookLore-era servers;
+-- 404/405 is therefore a supported result rather than a failed library load.
+function GrimmoryApi:getVersion(server_url, token)
+    local data, err = self:get(server_url .. "/api/v1/version", token)
+    if not data then
+        local status = httpStatus(err)
+        if status == 404 or status == 405 then
+            return {
+                available = false,
+                current = nil,
+                latest = nil,
+                capabilities = {
+                    version = false,
+                    paginatedBooks = false,
+                    bookFiles = false,
+                    multiFormat = false,
+                    physicalBooks = false,
+                },
+            }, nil
+        end
+        return nil, err
+    end
+
+    local current = data.current or data.version
+    local major = tonumber(tostring(current or ""):match("^v?(%d+)"))
+    local native_v3 = major ~= nil and major >= 3
+    return {
+        available = true,
+        current = current,
+        latest = data.latest,
+        capabilities = {
+            version = true,
+            paginatedBooks = native_v3,
+            bookFiles = native_v3,
+            multiFormat = native_v3,
+            physicalBooks = native_v3,
+        },
+    }, nil
+end
+
+--- Fetch every accessible book without ever treating one page as the full
+-- library. Grimmory v3's native page endpoint is preferred. BookLore-era
+-- servers that do not expose it fall back to the current raw-list endpoint.
+-- A paginated fallback response without totalPages is rejected explicitly.
 function GrimmoryApi:getBooks(server_url, token)
-    local url = server_url .. "/api/v1/books"
-    local data, err = self:get(url, token)
-    if not data then return nil, err end
-    return normalizeBookList(data), nil
+    local page_endpoint = "/api/v1/books/page"
+    local data, err = self:get(pagedUrl(server_url, page_endpoint, 0), token)
+    if data then
+        return collectPagedBooks(self, server_url, token, page_endpoint, data)
+    end
+
+    local status = httpStatus(err)
+    if status ~= 404 and status ~= 405 then return nil, err end
+
+    local raw_endpoint = "/api/v1/books"
+    local raw_url = server_url .. raw_endpoint
+        .. "?withDescription=false&stripForListView=true"
+    local raw, raw_err = self:get(raw_url, token)
+    if not raw then return nil, raw_err end
+    if type(raw) == "table" and type(raw.content) == "table" then
+        -- Some older servers paginate `/books` itself. Continue on that same
+        -- endpoint with explicit page/size rather than unwrapping page one.
+        return collectPagedBooks(self, server_url, token, raw_endpoint, raw)
+    end
+    if type(raw) ~= "table" then return nil, "invalid books response" end
+    return normalizeBookList(raw), nil
 end
 
 --- Fetch a single book with full metadata.
@@ -276,6 +486,25 @@ function GrimmoryApi:getBook(server_url, token, book_id)
     local data, err = self:get(url, token)
     if not data then return nil, err end
     return self.normalizeBook(data), nil
+end
+
+--- List every reader-format file attached to a book. `isBook=true` is
+-- required by Grimmory's overloaded files endpoint and excludes covers and
+-- other supplementary assets.
+function GrimmoryApi:getBookFiles(server_url, token, book_id)
+    local url = server_url .. "/api/v1/books/" .. tostring(book_id)
+        .. "/files?isBook=true"
+    local data, err = self:get(url, token)
+    if not data then return nil, err end
+    if type(data) ~= "table" then return nil, "invalid book files response" end
+    for i, file in ipairs(data) do
+        data[i] = self.normalizeBookFile(file, {
+            bookId = book_id,
+            isBook = true,
+            isPrimary = false,
+        })
+    end
+    return data, nil
 end
 
 --- Fetch recommended ("Similar Books") for a book.
@@ -393,8 +622,15 @@ end
 -- @param expected_size_kb number|nil: expected size from API for truncation check
 -- @return boolean: true on success
 -- @return string|nil: error or warning message
-function GrimmoryApi:downloadBook(server_url, book_id, token, dest_path, expected_size_kb)
-    local url = server_url .. "/api/v1/books/" .. tostring(book_id) .. "/download"
+function GrimmoryApi:downloadBook(server_url, book_id, token, dest_path,
+        expected_size_kb, exact_file_id)
+    local url
+    if exact_file_id ~= nil then
+        url = server_url .. "/api/v1/books/" .. tostring(book_id)
+            .. "/files/" .. tostring(exact_file_id) .. "/download"
+    else
+        url = server_url .. "/api/v1/books/" .. tostring(book_id) .. "/download"
+    end
 
     -- Ensure parent directory exists (safe, no shell)
     local dir = dest_path:match("(.+)/[^/]+$")
@@ -452,6 +688,16 @@ function GrimmoryApi:downloadBook(server_url, book_id, token, dest_path, expecte
         string.format("(%.1f KB)", actual_size / 1024))
 
     return true, nil
+end
+
+--- Download one exact alternative book format using Grimmory's Book Files
+-- endpoint. `file_id` is mandatory so a duplicate name/type cannot select the
+-- wrong binary.
+function GrimmoryApi:downloadBookFile(server_url, book_id, file_id, token,
+        dest_path, expected_size_kb)
+    if file_id == nil then return false, "book file id is required" end
+    return self:downloadBook(server_url, book_id, token, dest_path,
+        expected_size_kb, file_id)
 end
 
 return GrimmoryApi

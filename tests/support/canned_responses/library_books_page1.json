@@ -7,14 +7,44 @@
       "bookId": 1,
       "fileName": "test_book_one.epub",
       "fileSizeKb": 1024,
-      "bookType": "EPUB"
+      "bookType": "EPUB",
+      "extension": "epub",
+      "book": true,
+      "folderBased": false
     },
+    "lastReadTime": "2026-08-03T09:00:00Z",
+    "addedOn": "2026-07-01T08:00:00Z",
     "metadata": {
       "title": "Test Book One",
       "authors": ["Author A"],
       "seriesName": null,
-      "coverUpdatedOn": "2026-08-01T10:00:00Z"
-    }
+      "coverUpdatedOn": "2026-08-01T10:00:00Z",
+      "allMetadataLocked": true
+    },
+    "alternativeFormats": [
+      {
+        "id": 201,
+        "bookId": 1,
+        "fileName": "test_book_one.pdf",
+        "fileSizeKb": 2048,
+        "bookType": "PDF",
+        "extension": "pdf",
+        "book": true,
+        "folderBased": false
+      }
+    ],
+    "supplementaryFiles": [
+      {
+        "id": 301,
+        "bookId": 1,
+        "fileName": "notes.txt",
+        "fileSizeKb": 2,
+        "extension": "txt",
+        "book": false,
+        "folderBased": false
+      }
+    ],
+    "isPhysical": false
   },
   {
     "id": 2,
@@ -24,13 +54,22 @@
       "bookId": 2,
       "fileName": "test_book_two.epub",
       "fileSizeKb": 512,
-      "bookType": "EPUB"
+      "bookType": "EPUB",
+      "extension": "epub",
+      "book": true,
+      "folderBased": false
     },
+    "lastReadTime": "2026-08-02T09:00:00Z",
+    "addedOn": "2026-07-02T08:00:00Z",
     "metadata": {
       "title": "Test Book Two",
       "authors": ["Author B"],
       "seriesName": "A Series",
-      "coverUpdatedOn": "2026-08-02T10:00:00Z"
-    }
+      "coverUpdatedOn": "2026-08-02T10:00:00Z",
+      "allMetadataLocked": false
+    },
+    "alternativeFormats": [],
+    "supplementaryFiles": [],
+    "isPhysical": false
   }
 ]

@@ -180,11 +180,11 @@ def_sort("author", "Author", "essential", "string", function(book)
 end)
 
 def_sort("last_read", "Last Read", "essential", "date", function(book)
-    return book.lastReadAt
+    return book.lastReadTime or book.lastReadAt
 end)
 
 def_sort("added_on", "Added On", "essential", "date", function(book)
-    return book.createdAt
+    return book.addedOn or book.createdAt
 end)
 
 def_sort("personal_rating", "Personal Rating", "essential", "number", function(book)
@@ -250,7 +250,10 @@ end)
 
 -- Conditional (registered, shown only if isDimensionPresent)
 def_sort("locked", "Locked", "advanced", "number", function(book)
-    if book.locked then return 1 else return 0 end
+    local locked = book_meta(book).allMetadataLocked
+    if locked == nil then locked = book.locked end
+    if locked == nil then return nil end
+    if locked then return 1 else return 0 end
 end)
 
 -- ---------------------------------------------------------------------------
@@ -610,9 +613,12 @@ end
 function view.isDimensionPresent(base_set, key)
     local dim = view.DIMENSIONS[key]
     if not dim then
-        -- For sort keys (e.g. "locked"), check the book field directly.
+        -- For sort keys (e.g. metadata.allMetadataLocked), use the sort's
+        -- accessor rather than assuming Grimmory exposes a root field.
+        local sort = view.SORTS[key]
         for _, book in ipairs(base_set) do
             if book[key] ~= nil then return true end
+            if sort and sort.get(book) ~= nil then return true end
         end
         return false
     end

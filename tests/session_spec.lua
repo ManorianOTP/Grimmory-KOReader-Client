@@ -38,6 +38,19 @@ describe("Session", function()
             local r = table.remove(api.refresh_queue, 1) or {}
             return r.access, r.refresh, r.err
         end
+        function api:downloadBookFile(server_url, book_id, file_id, token,
+                dest_path, expected_size_kb)
+            table.insert(api.calls, {
+                method = "downloadBookFile",
+                server_url = server_url,
+                book_id = book_id,
+                file_id = file_id,
+                token = token,
+                dest_path = dest_path,
+                expected_size_kb = expected_size_kb,
+            })
+            return true, nil
+        end
         -- Present on the API but absent from METHOD_ARG_LAYOUT (G2 test).
         function api:unmappedMethod() end
         return api
@@ -109,6 +122,23 @@ describe("Session", function()
                 { method = "getBooks", server_url = SERVER, token = "t1" },
                 ctx.api.calls[1])
         end)
+
+        it("routes an alternative download with exact book and file IDs", function()
+            local ctx = make_ctx(fresh_tokens())
+            local ok, err = ctx.session:call(
+                SERVER, "downloadBookFile", 7, 701, "/tmp/seven.pdf", 64)
+            assert.is_nil(err)
+            assert.is_true(ok)
+            assert.are.same({
+                method = "downloadBookFile",
+                server_url = SERVER,
+                book_id = 7,
+                file_id = 701,
+                token = "t1",
+                dest_path = "/tmp/seven.pdf",
+                expected_size_kb = 64,
+            }, ctx.api.calls[1])
+        end)
     end)
 
     describe("pre-emptive refresh", function()
@@ -163,7 +193,27 @@ describe("Session", function()
             ctx.api.refresh_queue = { { err = "HTTP timeout" } }
             ctx.session:call(SERVER, "getBooks")
             assert.are.equal(0, ctx.expired())
+            assert.is_true(ctx.session:isLoggedIn())
+            assert.are.equal("t1", ctx.settings:readSetting("token"))
+            assert.are.equal("r1", ctx.settings:readSetting("refresh_token"))
         end)
+
+        for _, case in ipairs({
+            { label = "rate limit", err = "HTTP 429: retry later" },
+            { label = "server failure", err = "HTTP 503: unavailable" },
+        }) do
+            it("preserves credentials on a transient refresh " .. case.label, function()
+                local ctx = make_ctx(stale_tokens())
+                ctx.api.refresh_queue = { { err = case.err } }
+                local result, err = ctx.session:call(SERVER, "getBooks")
+                assert.is_nil(result)
+                assert.are.equal(case.err, err)
+                assert.is_true(ctx.session:isLoggedIn())
+                assert.are.equal("t1", ctx.settings:readSetting("token"))
+                assert.are.equal("r1", ctx.settings:readSetting("refresh_token"))
+                assert.are.equal(0, ctx.expired())
+            end)
+        end
     end)
 
     describe("401 handling", function()
@@ -201,13 +251,32 @@ describe("Session", function()
         it("expires the session when the post-401 refresh fails", function()
             local ctx = make_ctx(fresh_tokens())
             ctx.api.books_queue = { { err = "HTTP 401: expired" } }
-            ctx.api.refresh_queue = { { err = "refresh rejected" } }
+            ctx.api.refresh_queue = { { err = "HTTP 401: refresh rejected" } }
             local result, err = ctx.session:call(SERVER, "getBooks")
             assert.is_nil(result)
-            assert.are.equal("refresh rejected", err)
+            assert.are.equal("HTTP 401: refresh rejected", err)
             assert.is_false(ctx.session:isLoggedIn())
             assert.are.equal(1, ctx.expired())
         end)
+
+        for _, case in ipairs({
+            { label = "timeout", err = "HTTP timeout" },
+            { label = "429", err = "HTTP 429: retry later" },
+            { label = "5xx", err = "HTTP 500: server error" },
+        }) do
+            it("keeps credentials when post-401 refresh hits " .. case.label, function()
+                local ctx = make_ctx(fresh_tokens())
+                ctx.api.books_queue = { { err = "HTTP 401: access expired" } }
+                ctx.api.refresh_queue = { { err = case.err } }
+                local result, err = ctx.session:call(SERVER, "getBooks")
+                assert.is_nil(result)
+                assert.are.equal(case.err, err)
+                assert.is_true(ctx.session:isLoggedIn())
+                assert.are.equal("t1", ctx.settings:readSetting("token"))
+                assert.are.equal("r1", ctx.settings:readSetting("refresh_token"))
+                assert.are.equal(0, ctx.expired())
+            end)
+        end
 
         it("expires a legacy install (access token only) on 401 without retrying", function()
             local ctx = make_ctx({ token = "t1", token_time = os.time() })

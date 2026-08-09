@@ -70,11 +70,43 @@ describe("Downloads", function()
             local d = make_downloads()
             local path = d.download_dir .. "/x.epub"
             touch(path)
-            d:register(SERVER, { id = 9 }, path)
+            d:register(SERVER, { id = 9 }, path, {
+                id = 901,
+                fileName = "x.epub",
+                bookType = "EPUB",
+                isPrimary = true,
+            })
             local entry = d.registry:readSetting(SERVER .. "|9")
             assert.are.same(
-                { path = path, server_id = 9, server_url = SERVER },
+                {
+                    path = path,
+                    server_id = 9,
+                    server_url = SERVER,
+                    file_id = 901,
+                    file_name = "x.epub",
+                    book_type = "EPUB",
+                    is_primary = true,
+                },
                 entry)
+        end)
+
+        it("stores alternative formats under exact file IDs", function()
+            local d = make_downloads()
+            local path = d.download_dir .. "/x.pdf"
+            touch(path)
+            local file = {
+                id = 902,
+                fileName = "x.pdf",
+                bookType = "PDF",
+                isPrimary = false,
+            }
+            d:register(SERVER, { id = 9 }, path, file)
+            local entry = d.registry:readSetting(SERVER .. "|9|file:902")
+            assert.are.equal(path, entry.path)
+            assert.are.equal(902, entry.file_id)
+            assert.are.equal("PDF", entry.book_type)
+            assert.is_false(entry.is_primary)
+            assert.are.equal(path, d:localPath(SERVER, { id = 9 }, file))
         end)
 
         it("scopes entries by server so two Grimmory instances cannot collide", function()

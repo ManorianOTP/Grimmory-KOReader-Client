@@ -10,6 +10,7 @@ import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 CANNED_DIR = os.path.join(os.path.dirname(__file__), "canned_responses")
 
@@ -28,6 +29,12 @@ def load_spec(spec_list):
             "status":  entry.get("status", 200),
             "headers": headers,
             "body":    _resolve_body(entry),
+            "expect_query": entry.get("expect_query"),
+            "expect_headers": {
+                str(k).lower(): str(v)
+                for k, v in (entry.get("expect_headers") or {}).items()
+            },
+            "expect_json": entry.get("expect_json"),
             "repeat":  entry.get("repeat_", entry.get("repeat", None)),
             "served":  0,
         })
@@ -58,14 +65,46 @@ class FixtureHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def _match_route(self):
+    def _match_route(self, body):
+        parsed = urlsplit(self.path)
         with self.lock:
             for route in self.routes:
-                if route["method"] == self.command and route["path"] == self.path.split("?")[0]:
+                if route["method"] == self.command and route["path"] == parsed.path:
                     if route["repeat"] is not None and route["served"] >= route["repeat"]:
                         continue
                     route["served"] += 1
+                    failure = self._contract_failure(route, parsed.query, body)
+                    if failure:
+                        return {
+                            "status": 418,
+                            "headers": {"Content-Type": "text/plain"},
+                            "body": failure.encode(),
+                        }
                     return route
+        return None
+
+    def _contract_failure(self, route, query, body):
+        expected_query = route["expect_query"]
+        if expected_query is not None:
+            actual = parse_qs(query, keep_blank_values=True)
+            normalized = {}
+            for key, value in expected_query.items():
+                normalized[str(key)] = [str(v) for v in value] if isinstance(value, list) else [str(value)]
+            if actual != normalized:
+                return f"query mismatch: expected {normalized!r}, got {actual!r}"
+
+        for key, value in route["expect_headers"].items():
+            actual = self.headers.get(key)
+            if actual != value:
+                return f"header mismatch for {key}: expected {value!r}, got {actual!r}"
+
+        if route["expect_json"] is not None:
+            try:
+                actual_json = json.loads(body.decode())
+            except Exception as exc:
+                return f"invalid JSON request body: {exc}"
+            if actual_json != route["expect_json"]:
+                return f"JSON mismatch: expected {route['expect_json']!r}, got {actual_json!r}"
         return None
 
     def _read_body(self):
@@ -87,7 +126,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 "path": self.path.split("?")[0],
                 "body": body,
             })
-        route = self._match_route()
+        route = self._match_route(body)
         if route is None:
             self.send_response(404)
             self.end_headers()

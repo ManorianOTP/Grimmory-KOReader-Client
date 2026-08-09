@@ -15,7 +15,8 @@ local view
 
 -- All books share a minimal structure matching the server payload shape.
 -- Fields used by view.lua: book.metadata.*, book.readStatus, book.fileSizeKb,
--- book.fileName, book.personalRating, book.locked, book.createdAt, book.lastReadAt,
+-- book.fileName, book.personalRating, book.addedOn, book.lastReadTime,
+-- book.metadata.allMetadataLocked,
 -- book.shelves, book.bookType.
 
 local function make_books()
@@ -25,8 +26,8 @@ local function make_books()
             id = 1,
             readStatus = "READ",
             fileSizeKb = 2048,   -- 2 MB
-            createdAt  = "2023-01-10",
-            lastReadAt = "2024-03-01",
+            addedOn = "2023-01-10",
+            lastReadTime = "2024-03-01",
             personalRating = 9,
             metadata = {
                 title        = "The Final Empire",
@@ -47,8 +48,8 @@ local function make_books()
             id = 2,
             readStatus = "READING",
             fileSizeKb = 512,    -- 0.5 MB → <1 MB
-            createdAt  = "2022-06-15",
-            lastReadAt = "2025-01-20",
+            addedOn = "2022-06-15",
+            lastReadTime = "2025-01-20",
             metadata = {
                 title        = "Dune",
                 authors      = { "Frank Herbert" },
@@ -67,7 +68,7 @@ local function make_books()
             id = 3,
             readStatus = "UNREAD",
             fileSizeKb = 768,    -- 0.75 MB → <1 MB
-            createdAt  = "2022-06-16",
+            addedOn = "2022-06-16",
             metadata = {
                 title        = "Dune Messiah",
                 authors      = { "Frank Herbert" },
@@ -85,7 +86,7 @@ local function make_books()
             id = 4,
             readStatus = "READ",
             fileSizeKb = 200,    -- 0.2 MB → <1 MB
-            createdAt  = "2021-11-01",
+            addedOn = "2021-11-01",
             personalRating = 7,
             metadata = {
                 title        = "The Alchemist",
@@ -103,7 +104,7 @@ local function make_books()
             id = 5,
             readStatus = "UNREAD",
             fileSizeKb = 22000,  -- 21.5 MB → 20 MB+
-            createdAt  = "2020-03-05",
+            addedOn = "2020-03-05",
             metadata = {
                 title        = "A Brief History of Time",
                 authors      = { "Stephen Hawking" },
@@ -120,7 +121,7 @@ local function make_books()
             id = 6,
             readStatus = "READING",
             fileSizeKb = 5500,   -- 5.37 MB → 5-20 MB
-            createdAt  = "2023-07-20",
+            addedOn = "2023-07-20",
             metadata = {
                 title        = "A Study in Scarlet",
                 authors      = { "Arthur Conan Doyle" },
@@ -138,7 +139,7 @@ local function make_books()
             id = 7,
             readStatus = "PAUSED",
             fileSizeKb = 1200,   -- 1.17 MB → 1-5 MB
-            createdAt  = "2024-01-01",
+            addedOn = "2024-01-01",
             metadata = {
                 title        = "The Name of the Wind",
                 authors      = { "Patrick Rothfuss" },
@@ -154,8 +155,7 @@ local function make_books()
             id = 8,
             readStatus = "READ",
             fileSizeKb = 800,
-            locked     = true,
-            createdAt  = "2019-05-10",
+            addedOn = "2019-05-10",
             metadata = {
                 title        = "Locked Book",
                 authors      = { "A. Author" },
@@ -164,6 +164,7 @@ local function make_books()
                 categories   = { "Mystery" },
                 publisher    = "Publisher X",
                 language     = "English",
+                allMetadataLocked = true,
             },
         },
         -- 9: book published in 1999 → decade: 1990s
@@ -171,7 +172,7 @@ local function make_books()
             id = 9,
             readStatus = "UNREAD",
             fileSizeKb = 3000,   -- 2.93 MB → 1-5 MB
-            createdAt  = "2018-08-08",
+            addedOn = "2018-08-08",
             metadata = {
                 title        = "Fight Club",
                 authors      = { "Chuck Palahniuk" },
@@ -188,7 +189,7 @@ local function make_books()
             id = 10,
             readStatus = nil,
             fileSizeKb = nil,
-            createdAt  = nil,
+            addedOn = nil,
             metadata   = {},
         },
     }
@@ -309,14 +310,14 @@ describe("view", function()
         it("missing values sink last in asc direction", function()
             local books = make_books()
             local sorted = view.applySort(books, { key = "added_on", dir = "asc" })
-            -- Book 10 has nil createdAt, should be last
+            -- Book 10 has nil addedOn, should be last
             assert.equals(10, sorted[#sorted].id)
         end)
 
         it("missing values sink last in desc direction", function()
             local books = make_books()
             local sorted = view.applySort(books, { key = "added_on", dir = "desc" })
-            -- Book 10 has nil createdAt, should still be last even in desc
+            -- Book 10 has nil addedOn, should still be last even in desc
             assert.equals(10, sorted[#sorted].id)
         end)
 
@@ -702,10 +703,10 @@ describe("view", function()
     -- -----------------------------------------------------------------------
 
     describe("isDimensionPresent", function()
-        it("returns false when no book has the locked field", function()
+        it("returns false when no book has metadata.allMetadataLocked", function()
             local books = {}
             for _, b in ipairs(make_books()) do
-                if not b.locked then
+                if not (b.metadata or {}).allMetadataLocked then
                     books[#books+1] = b
                 end
             end
@@ -713,9 +714,9 @@ describe("view", function()
             assert.falsy(view.isDimensionPresent(books, "locked"))
         end)
 
-        it("returns true when at least one book has locked=true", function()
+        it("returns true when metadata.allMetadataLocked=true", function()
             local books = make_books()
-            -- Book 8 has locked=true
+            -- Book 8 has metadata.allMetadataLocked=true
             assert.truthy(view.isDimensionPresent(books, "locked"))
         end)
 

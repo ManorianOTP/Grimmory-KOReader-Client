@@ -1130,6 +1130,7 @@ function Grimmory:fetchAndShowLibrary(snap)
         { method = "getBooks" },
         { method = "getShelves" },
         { method = "getLibraries" },
+        { method = "getVersion" },
     })
 
     local function fallBackToSnapshot(err, quiet)
@@ -1204,6 +1205,15 @@ function Grimmory:fetchAndShowLibrary(snap)
 
         local libraries = payload.results[3].result
         self.cached_libraries = (type(libraries) == "table") and libraries or {}
+
+        -- Version discovery is deliberately non-blocking for compatibility:
+        -- a BookLore-era server may not have /version, while a transient
+        -- version failure must never hide an otherwise valid library.
+        local version_result = payload.results[4]
+        self.server_info = version_result and version_result.result or {
+            available = false,
+            capabilities = {},
+        }
 
         -- Persist a fresh snapshot for offline use.
         self:saveSnapshot(books, self.cached_shelves, self.cached_libraries)
@@ -2582,16 +2592,16 @@ end
 -- Registry + destination-path logic lives in downloads.lua (the registry is
 -- the contract grimmory_sync reads to map file paths back to book ids);
 -- these thin delegates keep the existing call sites unchanged.
-function Grimmory:buildDestPath(book)
-    return self.downloads:destPath(book)
+function Grimmory:buildDestPath(book, book_file)
+    return self.downloads:destPath(book, book_file)
 end
 
-function Grimmory:getLocalPath(book)
-    return self.downloads:localPath(self.server_url, book)
+function Grimmory:getLocalPath(book, book_file)
+    return self.downloads:localPath(self.server_url, book, book_file)
 end
 
-function Grimmory:registerDownload(book, path)
-    self.downloads:register(self.server_url, book, path)
+function Grimmory:registerDownload(book, path, book_file)
+    self.downloads:register(self.server_url, book, path, book_file)
 end
 
 function Grimmory:refreshDetailView(book)
@@ -2610,9 +2620,71 @@ function Grimmory:refreshDetailView(book)
     UIManager:setDirty(self.detail_widget, "ui")
 end
 
-function Grimmory:downloadBook(book)
+--- Let the reader select an exact Grimmory BookFile when a title has more
+-- than one KOReader-compatible format. Each row is keyed by file ID and can
+-- independently open an existing download or fetch that specific file.
+function Grimmory:showDownloadFormatMenu(book)
+    local files = type(book.downloadFiles) == "table" and book.downloadFiles or {}
+    if #files == 0 then
+        local msg = book.isPhysical and _("This physical book has no KOReader-compatible file.")
+            or _("No KOReader-compatible format is available.")
+        UIManager:show(InfoMessage:new{ text = msg })
+        return
+    end
+
+    self.format_menu_widget = InputContainer:new{
+        dimen = Geom:new{ w = Screen:getWidth(), h = Screen:getHeight() },
+    }
+    local items = {}
+    for _, file in ipairs(files) do
+        local local_path = self:getLocalPath(book, file)
+        local size = file.fileSizeKb and string.format("%.1f MB", file.fileSizeKb / 1024) or ""
+        items[#items + 1] = {
+            text = tostring(file.bookType or file.extension or _("Book"))
+                .. " - " .. tostring(file.fileName or file.id),
+            mandatory = local_path and _("Read")
+                or (self.offline_mode and _("Unavailable offline") or size),
+            select_enabled = local_path ~= nil or not self.offline_mode,
+            book_file = file,
+            local_path = local_path,
+        }
+    end
+
+    local menu = Menu:new{
+        show_parent = self.format_menu_widget,
+        title = _("Choose format"),
+        item_table = items,
+        width = Screen:getWidth(),
+        height = Screen:getHeight(),
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        onMenuChoice = function(_, item)
+            UIManager:close(self.format_menu_widget)
+            if item.local_path then
+                self:openBook(item.local_path)
+            elseif not self.offline_mode then
+                self:downloadBook(book, item.book_file)
+            end
+        end,
+        close_callback = function()
+            UIManager:close(self.format_menu_widget)
+        end,
+    }
+    table.insert(self.format_menu_widget, menu)
+    UIManager:show(self.format_menu_widget)
+end
+
+function Grimmory:downloadBook(book, book_file)
     if not self.session:isLoggedIn() then
         UIManager:show(InfoMessage:new{ text = _("Not logged in.") })
+        return
+    end
+    book_file = book_file or book.primaryFile
+    if not GrimmoryApi.isDownloadEligible(book_file) then
+        local msg = book.isPhysical and _("This physical book has no KOReader-compatible file.")
+            or _("This format cannot be opened by KOReader.")
+        UIManager:show(InfoMessage:new{ text = msg })
         return
     end
     if self._downloading_id then return end -- one transfer at a time
@@ -2620,20 +2692,20 @@ function Grimmory:downloadBook(book)
     -- seconds on Kindle, and a request fired before it completes burns its
     -- whole connect timeout against a down interface.
     if not NetworkMgr:isWifiOn() then
-        NetworkMgr:turnOnWifi(function() self:_startBookDownload(book) end)
+        NetworkMgr:turnOnWifi(function() self:_startBookDownload(book, book_file) end)
         return
     end
-    self:_startBookDownload(book)
+    self:_startBookDownload(book, book_file)
 end
 
 --- Run the download in an async subprocess: child streams to dest..".part",
 -- parent polls the part-file size for live progress and renames into place
 -- on success. Tapping the progress message cancels (kills the child).
-function Grimmory:_startBookDownload(book)
-    local dest = self:buildDestPath(book)
+function Grimmory:_startBookDownload(book, book_file)
+    local dest = self:buildDestPath(book, book_file)
     local tmp = dest .. ".part"
-    local title = (book.metadata or {}).title or book.fileName or _("book")
-    local expected_bytes = (book.fileSizeKb or 0) * 1024
+    local title = book_file.fileName or (book.metadata or {}).title or _("book")
+    local expected_bytes = (book_file.fileSizeKb or 0) * 1024
 
     self._downloading_id = book.id
     self:refreshDetailView(book)
@@ -2667,8 +2739,19 @@ function Grimmory:_startBookDownload(book)
         UIManager:show(progress_box)
     end
 
-    local task = self.session:buildCallTask(
-        self.server_url, "downloadBook", book.id, tmp, book.fileSizeKb)
+    local is_primary = book_file.isPrimary == true
+        or book_file == book.primaryFile
+        or (book.primaryFile and book_file.id ~= nil
+            and book_file.id == book.primaryFile.id)
+    local task
+    if is_primary then
+        task = self.session:buildCallTask(
+            self.server_url, "downloadBook", book.id, tmp, book_file.fileSizeKb)
+    else
+        task = self.session:buildCallTask(
+            self.server_url, "downloadBookFile", book.id, book_file.id,
+            tmp, book_file.fileSizeKb)
+    end
 
     job = self.async:run(task, function(payload, async_err)
         closeProgress()
@@ -2687,7 +2770,7 @@ function Grimmory:_startBookDownload(book)
         if ok then
             os.remove(dest)
             os.rename(tmp, dest)
-            self:registerDownload(book, dest)
+            self:registerDownload(book, dest, book_file)
             self:refreshDetailView(book)
         else
             os.remove(tmp)
@@ -2792,10 +2875,20 @@ function Grimmory:showBookDetail(book)
             method = "getBook",
             args = { book.id },
             apply = function(full)
-                if type(full) == "table" and type(full.metadata) == "table" then
-                    for k, v in pairs(full.metadata) do
-                        if meta[k] == nil then meta[k] = v end
+                if type(full) == "table" then
+                    -- List DTOs are intentionally stripped. Merge the native
+                    -- file collections, physical flag, and other root fields
+                    -- from the detail DTO as well as its metadata; otherwise
+                    -- alternative formats never reach the download chooser.
+                    for k, v in pairs(full) do
+                        if k ~= "metadata" then book[k] = v end
                     end
+                    if type(full.metadata) == "table" then
+                        for k, v in pairs(full.metadata) do
+                            if meta[k] == nil then meta[k] = v end
+                        end
+                    end
+                    GrimmoryApi.normalizeBook(book)
                     -- Mark enriched only on success, so a transient fetch
                     -- failure retries on the next open rather than permanently
                     -- hiding the blurb.
@@ -3220,9 +3313,19 @@ function Grimmory:showBookDetail(book)
         if meta.language and meta.language ~= "" then infoRow(_("Language"), meta.language) end
         local isbn = meta.isbn13 or meta.isbn10
         if isbn and isbn ~= "" then infoRow(_("ISBN"), tostring(isbn)) end
-        if book.bookType then infoRow(_("Format"), tostring(book.bookType)) end
+        if type(book.bookFiles) == "table" and #book.bookFiles > 1 then
+            local formats = {}
+            for _, file in ipairs(book.bookFiles) do
+                formats[#formats + 1] = tostring(file.bookType or file.extension or "?")
+            end
+            infoRow(_("Formats"), table.concat(formats, ", "))
+        elseif book.bookType then
+            infoRow(_("Format"), tostring(book.bookType))
+        end
         if book.fileSizeKb then
-            infoRow(_("Size"), string.format("%.1f MB", book.fileSizeKb / 1024))
+            local size_label = type(book.bookFiles) == "table" and #book.bookFiles > 1
+                and _("Primary size") or _("Size")
+            infoRow(size_label, string.format("%.1f MB", book.fileSizeKb / 1024))
         end
         if type(book.shelves) == "table" and #book.shelves > 0 then
             local sn = {}
@@ -3401,10 +3504,29 @@ function Grimmory:showBookDetail(book)
         end)
     end
 
-    local local_path = self:getLocalPath(book)
+    local files = type(book.downloadFiles) == "table" and book.downloadFiles or {}
+    local selected_file = #files == 1 and files[1] or book.primaryFile
+    local local_path = selected_file and self:getLocalPath(book, selected_file) or nil
+    local any_local_format = local_path ~= nil
+    if #files > 1 and not any_local_format then
+        for _, file in ipairs(files) do
+            if self:getLocalPath(book, file) then
+                any_local_format = true
+                break
+            end
+        end
+    end
     local is_downloading = (self._downloading_id == book.id)
     local action_btn
-    if local_path then
+    if #files > 1 and not is_downloading
+            and (not self.offline_mode or any_local_format) then
+        action_btn = Button:new{
+            text = T(_("Choose format (%1)"), tostring(#files)),
+            radius = Size.radius.button,
+            padding = Size.padding.button,
+            callback = function() self:showDownloadFormatMenu(book) end,
+        }
+    elseif local_path then
         action_btn = Button:new{
             text = _("Read"),
             radius = Size.radius.button,
@@ -3425,10 +3547,18 @@ function Grimmory:showBookDetail(book)
             padding = Size.padding.button,
             enabled = false,
         }
+    elseif #files == 0 then
+        action_btn = Button:new{
+            text = book.isPhysical and _("Physical book") or _("Unsupported format"),
+            radius = Size.radius.button,
+            padding = Size.padding.button,
+            enabled = false,
+        }
     else
         local dl_label
-        if book.fileSizeKb then
-            dl_label = T(_("Download (%1 MB)"), string.format("%.1f", book.fileSizeKb / 1024))
+        if selected_file and selected_file.fileSizeKb then
+            dl_label = T(_("Download (%1 MB)"),
+                string.format("%.1f", selected_file.fileSizeKb / 1024))
         else
             dl_label = _("Download")
         end
@@ -3436,7 +3566,7 @@ function Grimmory:showBookDetail(book)
             text = dl_label,
             radius = Size.radius.button,
             padding = Size.padding.button,
-            callback = function() self:downloadBook(book) end,
+            callback = function() self:downloadBook(book, selected_file) end,
         }
     end
 
