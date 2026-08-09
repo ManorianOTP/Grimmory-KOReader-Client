@@ -411,7 +411,7 @@ function GrimmoryApi:getShelves(server_url, token)
 end
 
 --- Discover the Grimmory server version and the native API surfaces that
--- accompany it. The version controller is absent on BookLore-era servers;
+-- accompany it. The version controller is absent on older servers;
 -- 404/405 is therefore a supported result rather than a failed library load.
 function GrimmoryApi:getVersion(server_url, token)
     local data, err = self:get(server_url .. "/api/v1/version", token)
@@ -452,8 +452,8 @@ function GrimmoryApi:getVersion(server_url, token)
 end
 
 --- Fetch every accessible book without ever treating one page as the full
--- library. Grimmory v3's native page endpoint is preferred. BookLore-era
--- servers that do not expose it fall back to the current raw-list endpoint.
+-- library. Grimmory v3's native page endpoint is preferred. Older servers
+-- that do not expose it fall back to the current raw-list endpoint.
 -- A paginated fallback response without totalPages is rejected explicitly.
 function GrimmoryApi:getBooks(server_url, token)
     local page_endpoint = "/api/v1/books/page"

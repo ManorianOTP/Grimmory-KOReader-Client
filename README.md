@@ -12,13 +12,16 @@ back to the server automatically.
 ## Features
 
 - **Library browser** — covers, 19 sort options, 14 filter dimensions with live
-  facet counts, and full-text search over title/author/series.
-- **Downloads** — stream a book to the device with a live progress bar; opened
-  books are matched back to their Grimmory record for sync.
+  facet counts, and full-text search over title/author/series. Every page of a
+  paginated Grimmory library is loaded before the local sorts and filters run.
+- **Native book files** — choose the exact KOReader-compatible primary or
+  alternative format to download. Physical-only, audiobook, and unsupported
+  records stay visible but are not offered as readable Kindle downloads.
 - **Reading-progress sync** — your position pushes to Grimmory as you read and
-  pulls when you open a book, with a conflict prompt when the server is ahead.
-  EPUB uses exact CFI positions, PDF/CBX use exact pages, and other supported
-  ebook formats sync percentage without mislabelling KOReader positions as CFI.
+  pulls when you open a book, using the same selected-file progress fields as
+  Grimmory's web reader. A conflict prompt appears when the server is ahead.
+  EPUB uses our exact CFI converter, PDF/CBX use exact pages, and FB2/MOBI/AZW3
+  sync percentage without mislabelling KOReader positions as EPUB CFI.
 - **Works offline** — the last library view is cached, so the app still opens
   and your progress is queued and pushed when you're back online.
 - **Multiple accounts** — switch between saved logins without retyping a
@@ -36,7 +39,9 @@ You need all four of these before installing:
 1. **A jailbroken Kindle running KOReader.** Developed and used on a Kindle
    Paperwhite; other KOReader-capable Kindles should work but are untested.
    See [KindleModding](https://kindlemodding.org/) for jailbreak + KOReader.
-2. **A running Grimmory server** you can sign into. See the
+2. **A running Grimmory server** you can sign into. This client is contract-
+   tested against Grimmory v3.3.1; older releases may not provide the App
+   progress, pagination, and selected-file APIs used here. See the
    [Grimmory project](https://github.com/grimmory-tools/grimmory).
 3. **Network access from the Kindle to that server** — either both on the same
    Wi-Fi/LAN, or over Tailscale (which the app can set up for you).
@@ -51,8 +56,13 @@ You need all four of these before installing:
    (e.g. `192.168.1.50:6060` — `http://` is added for you) and your Grimmory
    username and password.
 3. **Browse** — **Menu ▸ Grimmory ▸ Browse Library**. Tap a book to see details
-   and **Download** it. Open the downloaded book to read; your progress syncs
-   automatically.
+   and download its primary file, or choose a format when the book has several.
+   Open the downloaded book to read; your progress syncs automatically.
+
+This client intentionally makes its direct App-API sync the sole writer for
+Kindle-to-web-reader progress. Do not also enable Grimmory's native KOReader /
+KOSync web-reader bridge for the same books: two writers can race and produce
+conflicting prompts or positions.
 
 Not on the same network as your server? Set up Tailscale first:
 **Menu ▸ Grimmory ▸ Tailscale ▸ Install → Connect** and scan the QR code with

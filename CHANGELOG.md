@@ -13,9 +13,20 @@ First Grimmory-native release.
   caches, queues, update staging, release artifacts, documentation, and user
   agents to Grimmory conventions.
 - Targeted and verified the client against Grimmory v3.3.1.
-- Added normalization for Grimmory's current `primaryFile` book payload so
-  filenames, formats, sizes, covers, downloads, sorting, and filtering work in
-  KOReader.
+- Added canonical Grimmory Book/BookFile normalization, complete paginated
+  library traversal, corrected date/lock sorting, version discovery, and exact
+  primary/alternative file selection and downloads.
+- Physical-only, audiobook, and unsupported records remain visible but cannot
+  be downloaded as readable Kindle books; supplementary files are excluded
+  from the format chooser.
+- Moved progress to Grimmory's App progress API and selected-file identity so
+  Kindle and web reader share the same field. EPUB retains the exact custom
+  XPointer/CFI converter; PDF/CBX use exact pages; FB2/MOBI/AZW3 use percentage.
+- Made queued progress account-, server-, book-, and file-aware, added safe
+  background token rotation, and preserved credentials on transient failures.
+- Hardened the two-plugin updater with exact manifest membership, fail-closed
+  checksums, safe archive roots, retained backups, rollback, installed-version
+  verification, reproducible release validation, and CI gates.
 - Adopted the official Grimmory icon and upstream project links.
 - This is intentionally a clean install with no migration of older client
   settings or plugin data.
@@ -29,28 +40,28 @@ cannot be updated in place to v2; use the clean-install transition in
 
 ### booklore.koplugin
 
-- Log in to a Grimmory server (URL plus username/password) with multi-account
+- Log in to a BookLore server (URL plus username/password) with multi-account
   support and silent access-token refresh.
 - Browse, search, sort (19 options), and filter (14 dimensions with live facet
   counts) your library; covers are cached and versioned.
-- Rich book-detail pages mirroring the Grimmory web UI (blurb, genres, rating,
+- Rich book-detail pages mirroring the BookLore web UI (blurb, genres, rating,
   series) and tuned for E Ink.
 - Download books with a live, cancellable progress bar; opened books are matched
-  back to their Grimmory record for progress sync.
+  back to their BookLore record for progress sync.
 - Works offline: the last library view is cached and actions are queued, then
   flushed when you are back online.
 - Settings menu: account status and switcher, download-folder editor, sign out,
   and a clean uninstall (optionally keeping saved settings for an easy reinstall).
 - Tailscale onboarding (install, connect, status, update) to reach a server that
   is not on your local network.
-- In-app self-updater — **Grimmory ▸ Check for updates** downloads, verifies
+- In-app self-updater — **BookLore ▸ Check for updates** downloads, verifies
   (sha256), and swaps both plugins from a GitHub release, with crash-safe staging
   and boot-time reconciliation.
 
 ### booklore_sync.koplugin
 
-- Bidirectional reading-progress sync with Grimmory via the kosync protocol,
-  translating between KOReader XPointer and Grimmory CFI positions.
+- Bidirectional reading-progress sync with BookLore via the legacy progress API,
+  translating between KOReader XPointer and BookLore CFI positions.
 - Push is gated on the initial pull so opening a book never overwrites the
   server; a prompt appears when the server is ahead of the device.
 - Offline progress queue that flushes once connectivity returns.

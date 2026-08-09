@@ -180,7 +180,7 @@ local function buildProgressPayload(file_id, file_type, percentage, position_dat
     elseif file_type == "PDF" or file_type == "CBX" then
         local page = tonumber(position_data)
         if not page or page ~= page or page == math.huge or page == -math.huge
-                or page < 0 or page ~= math.floor(page) then
+                or page < 1 or page ~= math.floor(page) then
             return nil
         end
         exact_position = tostring(page)
@@ -196,8 +196,8 @@ local function buildProgressPayload(file_id, file_type, percentage, position_dat
     elseif file_type == "EPUB" then
         return { epubProgress = { cfi = exact_position, percentage = percentage } }
     elseif EBOOK_TYPES[file_type] then
-        -- KOReader does not expose an EPUB CFI for FB2/MOBI/AZW3. Grimmory
-        -- can still safely update their percentage without erasing a position.
+        -- KOReader does not expose an EPUB CFI for FB2/MOBI/AZW3. These formats
+        -- intentionally degrade to percentage-only web-reader resume.
         return { epubProgress = { percentage = percentage } }
     elseif file_type == "PDF" then
         return { pdfProgress = { page = tonumber(exact_position), percentage = percentage } }

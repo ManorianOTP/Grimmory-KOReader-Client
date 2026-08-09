@@ -368,6 +368,7 @@ describe("Grimmory App progress wire contract", function()
             { file_id = 503, file_type = "EPUB", position = "not-a-cfi" },
             { file_id = 601, file_type = "PDF", position = "page-17" },
             { file_id = 602, file_type = "PDF", position = "1.5" },
+            { file_id = 603, file_type = "PDF", position = "0" },
             { file_id = 701, file_type = "CBX" },
             { file_id = 702, file_type = "CBX", position = "-1" },
         }) do

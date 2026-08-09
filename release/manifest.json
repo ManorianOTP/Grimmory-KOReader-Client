@@ -1,7 +1,7 @@
 {
   "version": "2.0.0",
   "plugins": [
-    { "dir": "grimmory_sync.koplugin", "url": "https://github.com/ManorianOTP/Grimmory-KOReader-Client/releases/download/v2.0.0/grimmory_sync.koplugin-2.0.0.tar.gz", "sha256": "4477cf826eb7efd6913382499b3c4fe8b9db5448e7a94c63eab2f702b19a52fc", "size": 21169 },
-    { "dir": "grimmory.koplugin", "url": "https://github.com/ManorianOTP/Grimmory-KOReader-Client/releases/download/v2.0.0/grimmory.koplugin-2.0.0.tar.gz", "sha256": "3919c15ee17284ff158a35cf0324172b66ed0c1c0999dd96f9a630e061bd24e6", "size": 68064 }
+    { "dir": "grimmory_sync.koplugin", "url": "https://github.com/ManorianOTP/Grimmory-KOReader-Client/releases/download/v2.0.0/grimmory_sync.koplugin-2.0.0.tar.gz", "sha256": "73a2881dcad4cd84e3b1a7e5d19d23da949aa20324746b4d1db55f935c6bc4be", "size": 24896 },
+    { "dir": "grimmory.koplugin", "url": "https://github.com/ManorianOTP/Grimmory-KOReader-Client/releases/download/v2.0.0/grimmory.koplugin-2.0.0.tar.gz", "sha256": "792c2dfe27af6085c6bdf9a6663bd9db527201a6d88716fd22c473d6a5a8ef64", "size": 73273 }
   ]
 }

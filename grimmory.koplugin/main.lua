@@ -1207,7 +1207,7 @@ function Grimmory:fetchAndShowLibrary(snap)
         self.cached_libraries = (type(libraries) == "table") and libraries or {}
 
         -- Version discovery is deliberately non-blocking for compatibility:
-        -- a BookLore-era server may not have /version, while a transient
+        -- an older server may not have /version, while a transient
         -- version failure must never hide an otherwise valid library.
         local version_result = payload.results[4]
         self.server_info = version_result and version_result.result or {

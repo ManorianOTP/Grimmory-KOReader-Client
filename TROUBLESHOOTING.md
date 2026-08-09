@@ -29,7 +29,8 @@ in again. Your server URL and username are still pre-filled.
   server. Check Wi-Fi, and that the server (and Tailscale, if used) is up.
 - Tap **Browse Library** again to retry online; you'll be offered to turn Wi-Fi
   on if it's off.
-- Downloads are disabled while offline (the button reads "Unavailable offline").
+- New downloads are disabled while offline. Already-downloaded alternative
+  formats remain available through **Choose format**.
 
 ## Tailscale won't connect
 
@@ -53,6 +54,13 @@ in again. Your server URL and username are still pre-filled.
 - Push is paused until the first pull succeeds (so it never overwrites the
   server on open). If pull keeps failing, that's a connectivity/sign-in issue —
   see the login notes above.
+- The client writes the same selected-file progress used by Grimmory's web
+  reader: exact CFI for EPUB, exact page for PDF/CBX, and percentage for
+  FB2/MOBI/AZW3. A failed exact-position capture stays queued rather than
+  clearing a valid web-reader position.
+- Do not run Grimmory's native KOReader/KOSync-to-web bridge for the same books
+  at the same time. This plugin's direct sync is authoritative; enabling both
+  creates two independent writers.
 
 ## "Check for updates" problems
 
