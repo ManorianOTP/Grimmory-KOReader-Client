@@ -21,6 +21,528 @@ local function make_fake_ui(file_path, book_id, server_url)
     })
 end
 
+describe("Grimmory App progress wire contract", function()
+    local contract_settings
+
+    before_each(function()
+        spec_helper.setup()
+        contract_settings = fake_settings.create({
+            server_url = "http://127.0.0.1",
+            token = "wire-token",
+            token_time = os.time(),
+            username = "alice",
+        })
+        require("datastorage")._set_dir(contract_settings.dir)
+        GrimmorySync = require("grimmory_sync")
+    end)
+
+    after_each(function()
+        if fixture then fixture.stop(); fixture = nil end
+        contract_settings.cleanup()
+        spec_helper.teardown()
+    end)
+
+    local function make_contract_sync(file, has_pages, percent, page)
+        local sync = GrimmorySync:new()
+        sync.ui = make_fake_ui(file, 99, nil)
+        sync.ui.document.info.has_pages = has_pages
+        sync.ui._percent = percent or 0.42
+        if page then
+            sync.ui.paging.getLastProgress = function() return page end
+        end
+        sync.server_url = fixture.base_url()
+        sync.token = "wire-token"
+        sync.username = "alice"
+        sync.enabled = true
+        sync.book_id = 99
+        sync.pulled = true
+        sync.awaiting_decision = false
+        sync.has_pages = has_pages
+        sync.queue = require("queue").new{}
+        local settings = require("luasettings"):open(contract_settings.dir .. "/grimmory.lua")
+        settings:saveSetting("server_url", fixture.base_url())
+        settings:saveSetting("username", "alice")
+        settings:saveSetting("active_account", {
+            server_url = fixture.base_url(), username = "alice",
+        })
+        settings:saveSetting("accounts", {{
+            server_url = fixture.base_url(), username = "alice",
+            token = "wire-token", token_time = os.time(),
+        }})
+        settings:flush()
+        return sync
+    end
+
+    it("reads canonical file identity and keeps the pre-v2 path fallback", function()
+        local registry = require("luasettings"):open(
+            contract_settings.dir .. "/grimmory_downloads.lua")
+        registry:saveSetting("canonical", {
+            path = "/books/selected.cbz",
+            server_id = 99,
+            server_url = "http://grimmory.example",
+            file_id = 701,
+            book_type = "CBX",
+        })
+        registry:saveSetting("pre-v2", {
+            path = "/books/older.pdf",
+            server_id = 100,
+            server_url = "http://grimmory.example",
+        })
+        registry:flush()
+
+        local sync = GrimmorySync:new()
+        local book_id, server_url, file_id, file_type =
+            sync:lookupBookId("/books/selected.cbz")
+        assert.equals(99, book_id)
+        assert.equals("http://grimmory.example", server_url)
+        assert.equals(701, file_id)
+        assert.equals("CBX", file_type)
+
+        local old_book_id, _, old_file_id, old_file_type =
+            sync:lookupBookId("/books/older.pdf")
+        assert.equals(100, old_book_id)
+        assert.is_nil(old_file_id)
+        assert.equals("PDF", old_file_type,
+            "pre-v2 entries infer type only from their exact registered path")
+    end)
+
+    it("does not present another server account's token while pulling", function()
+        fixture = spec_helper.start_http_fixture({})
+        local sync = make_contract_sync("/books/test.epub", false, 0.10)
+        sync.file_type = "EPUB"
+        sync.pulled = false
+        local settings = require("luasettings"):open(
+            contract_settings.dir .. "/grimmory.lua")
+        settings:saveSetting("active_account", {
+            server_url = "http://other-grimmory.example",
+            username = "alice",
+        })
+        settings:saveSetting("server_url", "http://other-grimmory.example")
+        settings:flush()
+
+        sync:pullProgress()
+
+        assert.is_false(sync.pulled)
+        assert.is_true(require("logger").has("warn", "active account does not own"),
+            "the server-scoping guard must run before any HTTP request")
+    end)
+
+    it("PUTs exact selected-file EPUB CFI progress with Bearer auth", function()
+        local cfi_value = "epubcfi(/6/4[chapter]!/4/2/1:7)"
+        fixture = spec_helper.start_http_fixture({{
+            method = "PUT",
+            path = "/api/v1/app/books/99/progress",
+            status = 200,
+            headers = {},
+            body = "",
+            expect_headers = { Authorization = "Bearer wire-token" },
+            expect_json = {
+                fileProgress = {
+                    bookFileId = 501,
+                    positionData = cfi_value,
+                    progressPercent = 42,
+                },
+            },
+        }})
+        local sync = make_contract_sync("/books/test.epub", false, 0.42)
+        sync.file_id, sync.file_type = 501, "EPUB"
+        sync.queue:enqueue(99, fixture.base_url(), 42, cfi_value,
+            "alice", 501, "EPUB")
+
+        sync:_drainAll()
+
+        assert.equals(0, sync.queue:size(),
+            "a contract-valid 200 removes the exact queued entry")
+    end)
+
+    it("reads the cross-populated web EPUB field and routes it through our converter", function()
+        local cfi_value = "epubcfi(/6/4[chapter]!/4/2/1:7)"
+        local expected_xpointer = "/body/DocFragment[1]/body/p[1]/text()[1].7"
+        fixture = spec_helper.start_http_fixture({{
+            method = "GET",
+            path = "/api/v1/app/books/99/progress",
+            status = 200,
+            headers = { ["Content-Type"] = "application/json" },
+            body = '{"readProgress":55,"epubProgress":{"cfi":"' .. cfi_value
+                .. '","percentage":55}}',
+            expect_headers = { Authorization = "Bearer wire-token" },
+        }})
+        local sync = make_contract_sync("/books/test.epub", false, 0.10)
+        sync.file_id, sync.file_type = 501, "EPUB"
+        local converter_input
+        sync.cfi = {
+            cfiToXPointer = function(value)
+                converter_input = value
+                return expected_xpointer
+            end,
+        }
+
+        sync:pullProgress()
+        local box = require("ui/widget/multiconfirmbox")._last
+        assert.not_nil(box, "the newer web-reader position must trigger conflict handling")
+        box.choice1_callback()
+
+        assert.equals(cfi_value, converter_input,
+            "the App API's epubProgress.cfi enters our protected converter unchanged")
+        assert.equals("GotoXPointer", sync.ui._events[#sync.ui._events].name)
+        assert.equals(expected_xpointer, sync.ui._events[#sync.ui._events].args[1])
+    end)
+
+    for _, case in ipairs({
+        { name = "PDF", file_type = "PDF", file_id = 601, page = 17 },
+        { name = "CBX", file_type = "CBX", file_id = 701, page = 23 },
+    }) do
+        it("PUTs exact selected-file " .. case.name .. " page progress", function()
+            fixture = spec_helper.start_http_fixture({{
+                method = "PUT",
+                path = "/api/v1/app/books/99/progress",
+                status = 200,
+                headers = {},
+                body = "",
+                expect_headers = { Authorization = "Bearer wire-token" },
+                expect_json = {
+                    fileProgress = {
+                        bookFileId = case.file_id,
+                        positionData = tostring(case.page),
+                        progressPercent = 42,
+                    },
+                },
+            }})
+            local ext = case.file_type == "PDF" and "pdf" or "cbz"
+            local sync = make_contract_sync("/books/test." .. ext, true, 0.42, case.page)
+            sync.file_id, sync.file_type = case.file_id, case.file_type
+            sync.queue:enqueue(99, fixture.base_url(), 42, tostring(case.page),
+                "alice", case.file_id, case.file_type)
+            sync:_drainAll()
+            assert.equals(0, sync.queue:size())
+        end)
+    end
+
+    it("keeps and drains two formats of one book to their exact file identities", function()
+        local cfi_value = "epubcfi(/6/4[chapter]!/4/2/1:7)"
+        fixture = spec_helper.start_http_fixture({
+            {
+                method = "PUT",
+                path = "/api/v1/app/books/99/progress",
+                status = 200,
+                headers = {},
+                body = "",
+                repeat_ = 1,
+                expect_headers = { Authorization = "Bearer wire-token" },
+                expect_json = {
+                    fileProgress = {
+                        bookFileId = 501,
+                        positionData = cfi_value,
+                        progressPercent = 42,
+                    },
+                },
+            },
+            {
+                method = "PUT",
+                path = "/api/v1/app/books/99/progress",
+                status = 200,
+                headers = {},
+                body = "",
+                repeat_ = 1,
+                expect_headers = { Authorization = "Bearer wire-token" },
+                expect_json = {
+                    fileProgress = {
+                        bookFileId = 601,
+                        positionData = "17",
+                        progressPercent = 55,
+                    },
+                },
+            },
+        })
+        local sync = make_contract_sync("/books/test.epub", false, 0.42)
+        sync.file_id, sync.file_type = 501, "EPUB"
+        local server = fixture.base_url()
+        sync.queue:enqueue(99, server, 42, cfi_value, "alice", 501, "EPUB")
+        sync.queue:enqueue(99, server, 55, "17", "alice", 601, "PDF")
+
+        assert.equals(2, sync.queue:size(),
+            "same account/server/book retains one durable slot per selected file")
+        assert.equals(cfi_value,
+            sync.queue:peek(99, "alice", server, 501, "EPUB").position_data)
+        assert.equals("17",
+            sync.queue:peek(99, "alice", server, 601, "PDF").position_data)
+        local gated = sync.queue:currentBookDrainable(
+            99, "alice", server, 501, "EPUB")
+        local independently_drainable = sync.queue:othersDrainable(
+            99, "alice", server, 501, "EPUB")
+        assert.equals(1, #gated)
+        assert.equals(501, gated[1].entry.file_id,
+            "pull-before-push gates only the exact open file")
+        assert.equals(1, #independently_drainable)
+        assert.equals(601, independently_drainable[1].entry.file_id,
+            "another format of the same book remains independently drainable")
+
+        sync:_drainAll()
+
+        assert.equals(0, sync.queue:size(),
+            "both exact per-file 200 responses acknowledge their own slots")
+    end)
+
+    it("keeps identical account/book/file identities separate by server", function()
+        local queue = require("queue").new{}
+        queue:enqueue(99, "http://grimmory-a.example", 20, "cfi-a",
+            "alice", 501, "EPUB")
+        queue:enqueue(99, "http://grimmory-b.example", 80, "cfi-b",
+            "alice", 501, "EPUB")
+
+        assert.equals(2, queue:size())
+        assert.equals("cfi-a", queue:peek(99, "alice",
+            "http://grimmory-a.example", 501, "EPUB").position_data)
+        assert.equals("cfi-b", queue:peek(99, "alice",
+            "http://grimmory-b.example", 501, "EPUB").position_data)
+    end)
+
+    for _, case in ipairs({
+        { name = "PDF", file_type = "PDF", field = "pdfProgress", page = 17 },
+        { name = "CBX", file_type = "CBX", field = "cbxProgress", page = 23 },
+    }) do
+        it("pulls exact " .. case.name .. " web-reader page progress", function()
+            fixture = spec_helper.start_http_fixture({{
+                method = "GET",
+                path = "/api/v1/app/books/99/progress",
+                status = 200,
+                headers = { ["Content-Type"] = "application/json" },
+                body = '{"' .. case.field .. '":{"page":' .. tostring(case.page)
+                    .. ',"percentage":55}}',
+                expect_headers = { Authorization = "Bearer wire-token" },
+            }})
+            local ext = case.file_type == "PDF" and "pdf" or "cbz"
+            local sync = make_contract_sync("/books/test." .. ext, true, 0.10, 2)
+            sync.file_type = case.file_type
+
+            sync:pullProgress()
+            local box = require("ui/widget/multiconfirmbox")._last
+            assert.not_nil(box)
+            box.choice1_callback()
+
+            assert.equals("GotoPage", sync.ui._events[#sync.ui._events].name)
+            assert.equals(case.page, sync.ui._events[#sync.ui._events].args[1])
+        end)
+    end
+
+    it("does not discard queued progress on a 204 response", function()
+        fixture = spec_helper.start_http_fixture({{
+            method = "PUT",
+            path = "/api/v1/app/books/99/progress",
+            status = 204,
+            headers = {},
+            body = "",
+            expect_headers = { Authorization = "Bearer wire-token" },
+            expect_json = {
+                fileProgress = {
+                    bookFileId = 601,
+                    positionData = "17",
+                    progressPercent = 42,
+                },
+            },
+        }})
+        local sync = make_contract_sync("/books/test.pdf", true, 0.42, 17)
+        sync.file_id, sync.file_type = 601, "PDF"
+        sync.queue:enqueue(99, fixture.base_url(), 42, "17", "alice", 601, "PDF")
+
+        sync:_drainAll()
+
+        assert.equals(1, sync.queue:size(),
+            "only the App endpoint's documented 200 acknowledges selected-file progress")
+    end)
+
+    it("builds type-correct primary-file fallbacks for existing Grimmory entries", function()
+        assert.same({ epubProgress = { cfi = "cfi", percentage = 10 } },
+            GrimmorySync._buildProgressPayload(nil, "EPUB", 10, "cfi"))
+        assert.same({ pdfProgress = { page = 7, percentage = 20 } },
+            GrimmorySync._buildProgressPayload(nil, "PDF", 20, "7"))
+        assert.same({ cbxProgress = { page = 9, percentage = 30 } },
+            GrimmorySync._buildProgressPayload(nil, "CBX", 30, "9"))
+    end)
+
+    local function set_credentials(token, refresh_token, token_time)
+        local settings = require("luasettings"):open(contract_settings.dir .. "/grimmory.lua")
+        settings:saveSetting("token", token)
+        settings:saveSetting("refresh_token", refresh_token)
+        settings:saveSetting("token_time", token_time)
+        local accounts = settings:readSetting("accounts") or {}
+        for _, account in ipairs(accounts) do
+            if account.server_url == fixture.base_url() and account.username == "alice" then
+                account.token = token
+                account.refresh_token = refresh_token
+                account.token_time = token_time
+            end
+        end
+        settings:saveSetting("accounts", accounts)
+        settings:flush()
+        return settings
+    end
+
+    local function persisted_credential(key)
+        return require("luasettings"):open(
+            contract_settings.dir .. "/grimmory.lua"):readSetting(key)
+    end
+
+    it("does not overwrite a newly active account from an old async callback", function()
+        local settings = require("luasettings"):open(
+            contract_settings.dir .. "/grimmory.lua")
+        settings:saveSetting("token", "bob-live")
+        settings:saveSetting("refresh_token", "bob-refresh")
+        settings:saveSetting("token_time", 222)
+        settings:saveSetting("active_account", {
+            server_url = "http://server-b.example", username = "bob",
+        })
+        settings:saveSetting("accounts", {
+            {
+                server_url = "http://server-a.example", username = "alice",
+                token = "alice-old", refresh_token = "alice-old-refresh", token_time = 111,
+            },
+            {
+                server_url = "http://server-b.example", username = "bob",
+                token = "bob-live", refresh_token = "bob-refresh", token_time = 222,
+            },
+        })
+        settings:flush()
+        local sync = GrimmorySync:new()
+        sync.token = "bob-live"
+
+        -- Simulate Alice's refresh child returning after Bob became active.
+        sync:_applyCredentials({
+            rotated = true,
+            token = "alice-rotated",
+            refresh_token = "alice-rotated-refresh",
+            token_time = 333,
+        }, "http://server-a.example", "alice")
+
+        local persisted = require("luasettings"):open(
+            contract_settings.dir .. "/grimmory.lua")
+        assert.equals("bob-live", persisted:readSetting("token"))
+        assert.equals("bob-refresh", persisted:readSetting("refresh_token"))
+        assert.equals("bob-live", sync.token)
+        local accounts = persisted:readSetting("accounts")
+        assert.equals("alice-rotated", accounts[1].token,
+            "the completed child still updates its own saved account")
+        assert.equals("alice-rotated-refresh", accounts[1].refresh_token)
+        assert.equals("bob-live", accounts[2].token,
+            "the newly active account remains untouched")
+    end)
+
+    it("refreshes an expired access token in the background before pull", function()
+        fixture = spec_helper.start_http_fixture({
+            {
+                method = "POST",
+                path = "/api/v1/auth/refresh",
+                status = 200,
+                headers = { ["Content-Type"] = "application/json" },
+                body = '{"accessToken":"fresh-token","refreshToken":"rotated-refresh"}',
+                expect_json = { refreshToken = "refresh-1" },
+            },
+            {
+                method = "GET",
+                path = "/api/v1/app/books/99/progress",
+                status = 200,
+                headers = { ["Content-Type"] = "application/json" },
+                body = '{"epubProgress":null}',
+                expect_headers = { Authorization = "Bearer fresh-token" },
+            },
+        })
+        local sync = make_contract_sync("/books/test.epub", false, 0.10)
+        sync.file_type = "EPUB"
+        local settings = set_credentials("expired-token", "refresh-1", 0)
+
+        sync:pullProgress()
+
+        assert.is_true(sync.pulled)
+        assert.equals("fresh-token", persisted_credential("token"))
+        assert.equals("rotated-refresh", persisted_credential("refresh_token"))
+    end)
+
+    it("reactively refreshes once after an access-token 401", function()
+        fixture = spec_helper.start_http_fixture({
+            {
+                method = "GET",
+                path = "/api/v1/app/books/99/progress",
+                status = 401,
+                headers = {},
+                body = "expired",
+                repeat_ = 1,
+                expect_headers = { Authorization = "Bearer old-token" },
+            },
+            {
+                method = "POST",
+                path = "/api/v1/auth/refresh",
+                status = 200,
+                headers = { ["Content-Type"] = "application/json" },
+                body = '{"accessToken":"fresh-token","refreshToken":"rotated-refresh"}',
+                expect_json = { refreshToken = "refresh-1" },
+            },
+            {
+                method = "GET",
+                path = "/api/v1/app/books/99/progress",
+                status = 200,
+                headers = { ["Content-Type"] = "application/json" },
+                body = '{"epubProgress":null}',
+                expect_headers = { Authorization = "Bearer fresh-token" },
+            },
+        })
+        local sync = make_contract_sync("/books/test.epub", false, 0.10)
+        sync.file_type = "EPUB"
+        local settings = set_credentials("old-token", "refresh-1", os.time())
+
+        sync:pullProgress()
+
+        assert.is_true(sync.pulled)
+        assert.equals("fresh-token", persisted_credential("token"))
+        assert.equals("rotated-refresh", persisted_credential("refresh_token"))
+    end)
+
+    it("preserves credentials and queued progress on transient refresh failure", function()
+        fixture = spec_helper.start_http_fixture({{
+            method = "POST",
+            path = "/api/v1/auth/refresh",
+            status = 503,
+            headers = {},
+            body = "unavailable",
+            expect_json = { refreshToken = "refresh-1" },
+        }})
+        local sync = make_contract_sync("/books/test.epub", false, 0.10)
+        sync.file_type = "EPUB"
+        sync.pulled = false
+        sync.queue:enqueue(99, fixture.base_url(), 42, "cfi", "alice", 501, "EPUB")
+        local settings = set_credentials("expired-token", "refresh-1", 0)
+
+        sync:pullProgress()
+
+        assert.is_false(sync.pulled)
+        assert.equals(1, sync.queue:size())
+        assert.equals("expired-token", persisted_credential("token"))
+        assert.equals("refresh-1", persisted_credential("refresh_token"))
+    end)
+
+    it("clears credentials only when Grimmory definitively rejects refresh", function()
+        fixture = spec_helper.start_http_fixture({{
+            method = "POST",
+            path = "/api/v1/auth/refresh",
+            status = 401,
+            headers = {},
+            body = "revoked",
+            expect_json = { refreshToken = "refresh-1" },
+        }})
+        local sync = make_contract_sync("/books/test.epub", false, 0.10)
+        sync.file_type = "EPUB"
+        sync.pulled = false
+        sync.queue:enqueue(99, fixture.base_url(), 42, "cfi", "alice", 501, "EPUB")
+        local settings = set_credentials("expired-token", "refresh-1", 0)
+
+        sync:pullProgress()
+
+        assert.is_false(sync.pulled)
+        assert.equals(1, sync.queue:size(), "revocation must not discard captured progress")
+        assert.is_nil(persisted_credential("token"))
+        assert.is_nil(persisted_credential("refresh_token"))
+    end)
+end)
+
 describe("GrimmorySync state machine", function()
     before_each(function()
         spec_helper.setup()
@@ -54,7 +576,7 @@ describe("GrimmorySync state machine", function()
             fixture = spec_helper.start_http_fixture({
                 {
                     method = "GET",
-                    path = "/api/v1/books/99",
+                    path = "/api/v1/app/books/99/progress",
                     status = 200,
                     headers = { ["Content-Type"] = "application/json" },
                     body = '{"id":99,"epubProgress":null}',
@@ -84,15 +606,15 @@ describe("GrimmorySync state machine", function()
             fixture = spec_helper.start_http_fixture({
                 {
                     method = "GET",
-                    path = "/api/v1/books/99",
+                    path = "/api/v1/app/books/99/progress",
                     status = 200,
                     headers = { ["Content-Type"] = "application/json" },
                     body = '{"id":99,"epubProgress":null}',
                 },
                 {
-                    method = "POST",
-                    path = "/api/v1/books/progress",
-                    status = 204,
+                    method = "PUT",
+                    path = "/api/v1/app/books/99/progress",
+                    status = 200,
                     headers = {},
                     body = "",
                 },
@@ -120,9 +642,9 @@ describe("GrimmorySync state machine", function()
         it("schedules a push after pull, and multiple calls debounce to one push", function()
             fixture = spec_helper.start_http_fixture({
                 {
-                    method = "POST",
-                    path = "/api/v1/books/progress",
-                    status = 204,
+                    method = "PUT",
+                    path = "/api/v1/app/books/99/progress",
+                    status = 200,
                     headers = {},
                     body = "",
                 },
@@ -164,16 +686,16 @@ describe("GrimmorySync state machine", function()
             fixture = spec_helper.start_http_fixture({
                 {
                     method = "GET",
-                    path = "/api/v1/books/99",
+                    path = "/api/v1/app/books/99/progress",
                     status = 200,
                     headers = { ["Content-Type"] = "application/json" },
                     body = '{"id":99,"epubProgress":{"percentage":80.0,"cfi":null}}',
                     repeat_ = 1,
                 },
                 {
-                    method = "POST",
-                    path = "/api/v1/books/progress",
-                    status = 204,
+                    method = "PUT",
+                    path = "/api/v1/app/books/99/progress",
+                    status = 200,
                     headers = {},
                     body = "",
                     repeat_ = 1,
@@ -236,7 +758,7 @@ describe("GrimmorySync state machine", function()
             fixture = spec_helper.start_http_fixture({
                 {
                     method = "GET",
-                    path = "/api/v1/books/99",
+                    path = "/api/v1/app/books/99/progress",
                     status = 503,
                     headers = {},
                     body = "Service Unavailable",
@@ -267,9 +789,9 @@ describe("GrimmorySync state machine", function()
         it("onCloseDocument does NOT push when pulled=false", function()
             fixture = spec_helper.start_http_fixture({
                 {
-                    method = "POST",
-                    path = "/api/v1/books/progress",
-                    status = 204,
+                    method = "PUT",
+                    path = "/api/v1/app/books/99/progress",
+                    status = 200,
                     headers = {},
                     body = "",
                 },
@@ -379,16 +901,16 @@ describe("GrimmorySync offline queue", function()
         fixture = spec_helper.start_http_fixture({
             {
                 method = "GET",
-                path = "/api/v1/books/99",
+                path = "/api/v1/app/books/99/progress",
                 status = 200,
                 headers = { ["Content-Type"] = "application/json" },
                 body = '{"id":99,"epubProgress":null}',
                 repeat_ = 1,
             },
             {
-                method = "POST",
-                path = "/api/v1/books/progress",
-                status = 204,
+                method = "PUT",
+                path = "/api/v1/app/books/99/progress",
+                status = 200,
                 headers = {},
                 body = "",
                 repeat_ = 1,
@@ -429,7 +951,7 @@ describe("GrimmorySync offline queue", function()
         fixture = spec_helper.start_http_fixture({
             {
                 method = "GET",
-                path = "/api/v1/books/99",
+                path = "/api/v1/app/books/99/progress",
                 status = 503,
                 headers = {},
                 body = "Service Unavailable",
@@ -523,7 +1045,7 @@ describe("GrimmorySync token-independent capture & per-account drain", function(
         assert.is_false(sync.pulled,
             "no-token pull must leave the gate closed (nothing was pulled)")
         local logger = require("logger")
-        assert.is_true(logger.has("warn", "no token, skipping pull"),
+        assert.is_true(logger.has("warn", "no credentials, skipping pull"),
             "the no-token guard must fire before any network code")
         assert.is_false(logger.has("dbg", "pushed progress"))
         assert.equals(1, sync.queue:size(),
@@ -532,7 +1054,7 @@ describe("GrimmorySync token-independent capture & per-account drain", function(
 
     it("drain pushes only entries owned by the logged-in account", function()
         fixture = spec_helper.start_http_fixture({
-            { method = "POST", path = "/api/v1/books/progress", status = 204, headers = {}, body = "", repeat_ = 5 },
+            { method = "PUT", path = "/api/v1/app/books/88/progress", status = 200, headers = {}, body = "", repeat_ = 5 },
         })
         local settings = require("luasettings"):open(settings_dir3.dir .. "/grimmory.lua")
         settings:saveSetting("username", "alice")
@@ -635,7 +1157,7 @@ describe("GrimmorySync token-independent capture & per-account drain", function(
 
     it("a legacy bare-key entry for the current book stays gated until pull", function()
         fixture = spec_helper.start_http_fixture({
-            { method = "POST", path = "/api/v1/books/progress", status = 204, headers = {}, body = "", repeat_ = 2 },
+            { method = "PUT", path = "/api/v1/app/books/99/progress", status = 200, headers = {}, body = "", repeat_ = 2 },
         })
         local settings = require("luasettings"):open(settings_dir3.dir .. "/grimmory.lua")
         settings:saveSetting("username", "alice")
@@ -671,7 +1193,7 @@ describe("GrimmorySync token-independent capture & per-account drain", function(
 
     it("a legacy (no-username) entry drains under the current account", function()
         fixture = spec_helper.start_http_fixture({
-            { method = "POST", path = "/api/v1/books/progress", status = 204, headers = {}, body = "", repeat_ = 2 },
+            { method = "PUT", path = "/api/v1/app/books/55/progress", status = 200, headers = {}, body = "", repeat_ = 2 },
         })
         local settings = require("luasettings"):open(settings_dir3.dir .. "/grimmory.lua")
         settings:saveSetting("username", "alice")

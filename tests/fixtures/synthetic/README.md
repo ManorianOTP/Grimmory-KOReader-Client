@@ -13,6 +13,7 @@ pitfall. These are the regression gate for cfi.lua. (ref: DL-003)
 | `text_node/` | Reverse sync (CFI -> XPointer) must emit `/text()[1]` before the char offset |
 | `utf16_surrogate/` | epub.js CFI char offsets count UTF-16 code units; 4-byte UTF-8 chars span 2 units |
 | `mixed_siblings/` | Mixed text+element siblings: only element siblings count toward CFI step index |
+| `self_closing_anchor/` | Empty page-landmark anchors remain element siblings during CFI/XPointer translation |
 | `multi_docfragment/` | Multi-chapter EPUB where spine index > 1 requires correct SYNTHETIC element count |
 
 ## Adding a fixture

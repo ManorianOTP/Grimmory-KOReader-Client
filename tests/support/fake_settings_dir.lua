@@ -43,7 +43,11 @@ function fake_settings.create(opts)
     write_json(dir .. "/grimmory.lua", {
         server_url = opts.server_url or "",
         token = opts.token or "",
+        refresh_token = opts.refresh_token,
         token_time = opts.token_time or 0,
+        username = opts.username,
+        active_account = opts.active_account,
+        accounts = opts.accounts,
     })
 
     write_json(dir .. "/grimmory_downloads.lua", opts.downloads or {})

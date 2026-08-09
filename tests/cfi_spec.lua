@@ -119,6 +119,20 @@ describe("cfi.lua", function()
         end)
     end)
 
+    describe("self_closing_anchor fixture - empty landmarks remain element siblings", function()
+        it("round-trips a paragraph after a self-closing anchor", function()
+            init_book("self_closing_anchor")
+            -- Derived minimal structure from the supplied EPUB: page landmarks may
+            -- be serialized as empty anchors between ordinary content elements.
+            local xp = "/body/DocFragment[1]/body/p[2]/text()[1].5"
+            local cfi_str, err = cfi.xpointerToCFI(xp)
+            assert.is_nil(err, tostring(err))
+            local xp2, err2 = cfi.cfiToXPointer(cfi_str)
+            assert.is_nil(err2, tostring(err2))
+            assert.equals(xp, xp2)
+        end)
+    end)
+
     describe("multi_docfragment fixture - DocFragment SYNTHETIC stripping", function()
         it("DocFragment[2] resolves to second spine entry chapter2.xhtml", function()
             init_book("multi_docfragment")

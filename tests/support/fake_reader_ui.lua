@@ -45,14 +45,22 @@ function fake_reader_ui.new(opts)
 
     ui.paging = {
         getLastPercent = function(self) return ui._percent end,
+        getLastProgress = function(self) return opts.page or math.max(1, math.floor(ui._percent * ui._pages)) end,
     }
 
     ui.rolling = {
         getLastPercent = function(self) return ui._percent end,
     }
 
-    -- handleEvent no-op: plugin handlers are invoked as direct method calls.
-    function ui:handleEvent(event) end
+    ui._events = {}
+    function ui:handleEvent(event)
+        table.insert(self._events, event)
+        if event.name == "GotoPage" then
+            self._page = event.args[1]
+        elseif event.name == "GotoXPointer" then
+            self._xpointer = event.args[1]
+        end
+    end
 
     return ui
 end

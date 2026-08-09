@@ -36,6 +36,8 @@ def load_spec(spec_list):
             },
             "expect_json": entry.get("expect_json"),
             "repeat":  entry.get("repeat_", entry.get("repeat", None)),
+            "expect_headers": entry.get("expect_headers"),
+            "expect_json": entry.get("expect_json"),
             "served":  0,
         })
     return routes
@@ -132,6 +134,25 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"No matching route")
             return
+        expected_headers = route.get("expect_headers")
+        if expected_headers:
+            for name, expected in expected_headers.items():
+                if self.headers.get(name) != expected:
+                    self.send_response(422)
+                    self.end_headers()
+                    self.wfile.write(("Header mismatch for " + name).encode())
+                    return
+        expected_json = route.get("expect_json")
+        if expected_json is not None:
+            try:
+                actual_json = json.loads(body.decode())
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                actual_json = None
+            if actual_json != expected_json:
+                self.send_response(422)
+                self.end_headers()
+                self.wfile.write(b"JSON body mismatch")
+                return
         self.send_response(route["status"])
         body = route["body"]
         headers_lower = {k.lower() for k in route["headers"]}

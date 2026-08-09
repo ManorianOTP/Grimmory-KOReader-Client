@@ -17,6 +17,8 @@ back to the server automatically.
   books are matched back to their Grimmory record for sync.
 - **Reading-progress sync** — your position pushes to Grimmory as you read and
   pulls when you open a book, with a conflict prompt when the server is ahead.
+  EPUB uses exact CFI positions, PDF/CBX use exact pages, and other supported
+  ebook formats sync percentage without mislabelling KOReader positions as CFI.
 - **Works offline** — the last library view is cached, so the app still opens
   and your progress is queued and pushed when you're back online.
 - **Multiple accounts** — switch between saved logins without retyping a
