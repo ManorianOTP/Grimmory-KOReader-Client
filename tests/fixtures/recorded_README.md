@@ -4,7 +4,7 @@
 
 ## How to populate
 
-1. Open a BookLore book on the Kindle and capture an XPointer and corresponding CFI from the device logs (`/mnt/us/koreader/crash.log`).
+1. Open a Grimmory book on the Kindle and capture an XPointer and corresponding CFI from the device logs (`/mnt/us/koreader/crash.log`).
 2. SCP the EPUB file to your dev machine and unzip it into `tests/fixtures/recorded/<book-id>/`.
 3. Create `tests/fixtures/recorded/<book-id>/samples.json`:
 

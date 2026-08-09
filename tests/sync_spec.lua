@@ -1,5 +1,5 @@
 --[[
-  Sync state machine spec for booklore_sync.koplugin/main.lua.
+  Sync state machine spec for grimmory_sync.koplugin/main.lua.
 
   Uses stub UIManager + virtual clock to exercise debounce and push-after-pull
   gate deterministically without real I/O or sleep.
@@ -7,7 +7,7 @@
 local spec_helper  = require("spec_helper")
 local fake_settings = require("fake_settings_dir")
 
-local BookLoreSync
+local GrimmorySync
 local ui
 local fixture
 local settings_dir
@@ -21,7 +21,7 @@ local function make_fake_ui(file_path, book_id, server_url)
     })
 end
 
-describe("BookLoreSync state machine", function()
+describe("GrimmorySync state machine", function()
     before_each(function()
         spec_helper.setup()
 
@@ -39,7 +39,7 @@ describe("BookLoreSync state machine", function()
         local datastorage = require("datastorage")
         datastorage._set_dir(settings_dir.dir)
 
-        BookLoreSync = require("booklore_sync")
+        GrimmorySync = require("grimmory_sync")
         ui = make_fake_ui("/books/test.epub", 99, nil)
     end)
 
@@ -62,11 +62,11 @@ describe("BookLoreSync state machine", function()
                 },
             })
             -- Override server_url to point at fixture
-            local settings = require("luasettings"):open(settings_dir.dir .. "/booklore.lua")
+            local settings = require("luasettings"):open(settings_dir.dir .. "/grimmory.lua")
             settings:saveSetting("server_url", fixture.base_url())
             settings:flush()
 
-            local sync = BookLoreSync:new()
+            local sync = GrimmorySync:new()
             sync.ui = ui
             sync:init()
             sync:onReaderReady()
@@ -97,7 +97,7 @@ describe("BookLoreSync state machine", function()
                     body = "",
                 },
             })
-            local sync = BookLoreSync:new()
+            local sync = GrimmorySync:new()
             sync.ui = ui
             sync.server_url = fixture.base_url()
             sync.token = "test-token"
@@ -127,7 +127,7 @@ describe("BookLoreSync state machine", function()
                     body = "",
                 },
             })
-            local sync = BookLoreSync:new()
+            local sync = GrimmorySync:new()
             sync.ui = ui
             sync.server_url = fixture.base_url()
             sync.token = "test-token"
@@ -180,7 +180,7 @@ describe("BookLoreSync state machine", function()
                 },
             })
 
-            local sync = BookLoreSync:new()
+            local sync = GrimmorySync:new()
             sync.ui = ui
             sync.server_url = fixture.base_url()
             sync.token = "test-token"
@@ -243,7 +243,7 @@ describe("BookLoreSync state machine", function()
                     repeat_ = 1,
                 },
             })
-            local sync = BookLoreSync:new()
+            local sync = GrimmorySync:new()
             sync.ui = ui
             sync.server_url = fixture.base_url()
             sync.token = "test-token"
@@ -274,7 +274,7 @@ describe("BookLoreSync state machine", function()
                     body = "",
                 },
             })
-            local sync = BookLoreSync:new()
+            local sync = GrimmorySync:new()
             sync.ui = ui
             sync.server_url = fixture.base_url()
             sync.token = "test-token"
@@ -295,7 +295,7 @@ describe("BookLoreSync state machine", function()
     end)
 end)
 
-describe("BookLoreSync offline queue", function()
+describe("GrimmorySync offline queue", function()
     local settings_dir2
     local fake_reader_ui = require("fake_reader_ui")
 
@@ -311,7 +311,7 @@ describe("BookLoreSync offline queue", function()
         })
         local datastorage = require("datastorage")
         datastorage._set_dir(settings_dir2.dir)
-        BookLoreSync = require("booklore_sync")
+        GrimmorySync = require("grimmory_sync")
         ui = fake_reader_ui.new({ file = "/books/test.epub", book_id = 99 })
     end)
 
@@ -327,7 +327,7 @@ describe("BookLoreSync offline queue", function()
         local nm = require("ui/network/manager")
         nm._set_wifi(false)
 
-        local sync = BookLoreSync:new()
+        local sync = GrimmorySync:new()
         sync.ui = ui
         sync.server_url = "http://127.0.0.1"
         sync.token = "test-token"
@@ -349,7 +349,7 @@ describe("BookLoreSync offline queue", function()
     end)
 
     it("three onPageUpdate calls collapse to one queue entry (latest-wins)", function()
-        local sync = BookLoreSync:new()
+        local sync = GrimmorySync:new()
         sync.ui = ui
         sync.server_url = "http://127.0.0.1"
         sync.token = "test-token"
@@ -395,11 +395,11 @@ describe("BookLoreSync offline queue", function()
             },
         })
 
-        local settings = require("luasettings"):open(settings_dir2.dir .. "/booklore.lua")
+        local settings = require("luasettings"):open(settings_dir2.dir .. "/grimmory.lua")
         settings:saveSetting("server_url", fixture.base_url())
         settings:flush()
 
-        local sync = BookLoreSync:new()
+        local sync = GrimmorySync:new()
         sync.ui = ui
         sync.server_url = fixture.base_url()
         sync.token = "test-token"
@@ -437,7 +437,7 @@ describe("BookLoreSync offline queue", function()
             },
         })
 
-        local sync = BookLoreSync:new()
+        local sync = GrimmorySync:new()
         sync.ui = ui
         sync.server_url = fixture.base_url()
         sync.token = "test-token"
@@ -461,7 +461,7 @@ describe("BookLoreSync offline queue", function()
     end)
 end)
 
-describe("BookLoreSync token-independent capture & per-account drain", function()
+describe("GrimmorySync token-independent capture & per-account drain", function()
     local settings_dir3
     local fake_reader_ui = require("fake_reader_ui")
 
@@ -478,7 +478,7 @@ describe("BookLoreSync token-independent capture & per-account drain", function(
         })
         local datastorage = require("datastorage")
         datastorage._set_dir(settings_dir3.dir)
-        BookLoreSync = require("booklore_sync")
+        GrimmorySync = require("grimmory_sync")
         ui = fake_reader_ui.new({ file = "/books/test.epub", book_id = 99 })
     end)
 
@@ -491,7 +491,7 @@ describe("BookLoreSync token-independent capture & per-account drain", function(
     end)
 
     it("init keeps capture enabled when the token is absent/expired", function()
-        local sync = BookLoreSync:new()
+        local sync = GrimmorySync:new()
         sync.ui = ui
         sync:init()
         assert.is_true(sync.enabled,
@@ -505,7 +505,7 @@ describe("BookLoreSync token-independent capture & per-account drain", function(
         -- the guard's log line: pullProgress returns at the no-token guard, so
         -- the request code below it is unreachable. (A silent connection-refused
         -- would NOT fail the assertions, so the log assertion is load-bearing.)
-        local sync = BookLoreSync:new()
+        local sync = GrimmorySync:new()
         sync.ui = ui
         sync.server_url = "http://127.0.0.1"
         sync.token = nil
@@ -534,14 +534,14 @@ describe("BookLoreSync token-independent capture & per-account drain", function(
         fixture = spec_helper.start_http_fixture({
             { method = "POST", path = "/api/v1/books/progress", status = 204, headers = {}, body = "", repeat_ = 5 },
         })
-        local settings = require("luasettings"):open(settings_dir3.dir .. "/booklore.lua")
+        local settings = require("luasettings"):open(settings_dir3.dir .. "/grimmory.lua")
         settings:saveSetting("username", "alice")
         settings:saveSetting("token", "alice-token")
         settings:flush()
 
         local nm = require("ui/network/manager"); nm._set_wifi(true)
 
-        local sync = BookLoreSync:new()
+        local sync = GrimmorySync:new()
         sync.ui = ui
         sync.server_url = fixture.base_url()
         sync.token = "alice-token"
@@ -637,14 +637,14 @@ describe("BookLoreSync token-independent capture & per-account drain", function(
         fixture = spec_helper.start_http_fixture({
             { method = "POST", path = "/api/v1/books/progress", status = 204, headers = {}, body = "", repeat_ = 2 },
         })
-        local settings = require("luasettings"):open(settings_dir3.dir .. "/booklore.lua")
+        local settings = require("luasettings"):open(settings_dir3.dir .. "/grimmory.lua")
         settings:saveSetting("username", "alice")
         settings:saveSetting("token", "fresh-token")
         settings:flush()
 
         local nm = require("ui/network/manager"); nm._set_wifi(true)
 
-        local sync = BookLoreSync:new()
+        local sync = GrimmorySync:new()
         sync.ui = ui
         sync.server_url = fixture.base_url()
         sync.token = "fresh-token"
@@ -673,14 +673,14 @@ describe("BookLoreSync token-independent capture & per-account drain", function(
         fixture = spec_helper.start_http_fixture({
             { method = "POST", path = "/api/v1/books/progress", status = 204, headers = {}, body = "", repeat_ = 2 },
         })
-        local settings = require("luasettings"):open(settings_dir3.dir .. "/booklore.lua")
+        local settings = require("luasettings"):open(settings_dir3.dir .. "/grimmory.lua")
         settings:saveSetting("username", "alice")
         settings:saveSetting("token", "fresh-token")
         settings:flush()
 
         local nm = require("ui/network/manager"); nm._set_wifi(true)
 
-        local sync = BookLoreSync:new()
+        local sync = GrimmorySync:new()
         sync.ui = ui
         sync.server_url = fixture.base_url()
         sync.token = "fresh-token"

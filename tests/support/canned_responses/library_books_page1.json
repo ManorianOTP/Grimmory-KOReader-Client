@@ -1,26 +1,36 @@
-{
-  "content": [
-    {
-      "id": 1,
-      "metadata": {
-        "title": "Test Book One",
-        "authors": ["Author A"],
-        "seriesName": null
-      },
-      "fileSizeKb": 1024
+[
+  {
+    "id": 1,
+    "title": "Test Book One",
+    "primaryFile": {
+      "id": 101,
+      "bookId": 1,
+      "fileName": "test_book_one.epub",
+      "fileSizeKb": 1024,
+      "bookType": "EPUB"
     },
-    {
-      "id": 2,
-      "metadata": {
-        "title": "Test Book Two",
-        "authors": ["Author B"],
-        "seriesName": "A Series"
-      },
-      "fileSizeKb": 512
+    "metadata": {
+      "title": "Test Book One",
+      "authors": ["Author A"],
+      "seriesName": null,
+      "coverUpdatedOn": "2026-08-01T10:00:00Z"
     }
-  ],
-  "totalPages": 1,
-  "number": 0,
-  "totalElements": 2,
-  "_captured_against": "BookLore v0.1.0"
-}
+  },
+  {
+    "id": 2,
+    "title": "Test Book Two",
+    "primaryFile": {
+      "id": 102,
+      "bookId": 2,
+      "fileName": "test_book_two.epub",
+      "fileSizeKb": 512,
+      "bookType": "EPUB"
+    },
+    "metadata": {
+      "title": "Test Book Two",
+      "authors": ["Author B"],
+      "seriesName": "A Series",
+      "coverUpdatedOn": "2026-08-02T10:00:00Z"
+    }
+  }
+]

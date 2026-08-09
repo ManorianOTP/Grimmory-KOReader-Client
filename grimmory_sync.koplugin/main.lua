@@ -37,7 +37,7 @@ end
 local function httpPushProgress(server_url, book_id, percentage, cfi, token)
     if not book_id or not server_url then return false end
     if not token or token == "" then
-        logger.warn("BookLoreSync: push: no token")
+        logger.warn("GrimmorySync: push: no token")
         return false
     end
     local body = json.encode({
@@ -66,14 +66,14 @@ local function httpPushProgress(server_url, book_id, percentage, cfi, token)
         return c
     end)
     if not ok_req then
-        logger.warn("BookLoreSync: push network error:", tostring(code))
+        logger.warn("GrimmorySync: push network error:", tostring(code))
         return false
     end
     if code == 204 or code == 200 then
-        logger.dbg("BookLoreSync: pushed progress", percentage, "%", cfi and ("cfi=" .. cfi) or "no-cfi")
+        logger.dbg("GrimmorySync: pushed progress", percentage, "%", cfi and ("cfi=" .. cfi) or "no-cfi")
         return true
     end
-    logger.warn("BookLoreSync: push failed, HTTP", code)
+    logger.warn("GrimmorySync: push failed, HTTP", code)
     return false
 end
 
@@ -97,22 +97,22 @@ local function httpPullProgress(server_url, book_id, token)
     return { code = code, body = table.concat(sink) }
 end
 
-local BookLoreSync = WidgetContainer:extend{
-    name = "booklore_sync",
+local GrimmorySync = WidgetContainer:extend{
+    name = "grimmory_sync",
     is_doc_only = true,
 }
 
 -- Lazily create the async gateway. Specs construct sync objects without
 -- init(), so this must work on a bare instance; on device init() is always
 -- called first. One shared instance keeps pull/drain/push strictly ordered.
-function BookLoreSync:_getAsync()
+function GrimmorySync:_getAsync()
     if not self._async then self._async = Async.new{} end
     return self._async
 end
 
-function BookLoreSync:lookupBookId(file_path)
+function GrimmorySync:lookupBookId(file_path)
     local registry = LuaSettings:open(
-        DataStorage:getSettingsDir() .. "/booklore_downloads.lua"
+        DataStorage:getSettingsDir() .. "/grimmory_downloads.lua"
     )
     local data = registry.data or {}
     for dummy, entry in pairs(data) do
@@ -123,9 +123,9 @@ function BookLoreSync:lookupBookId(file_path)
     return nil, nil
 end
 
-function BookLoreSync:init()
+function GrimmorySync:init()
     local settings = LuaSettings:open(
-        DataStorage:getSettingsDir() .. "/booklore.lua"
+        DataStorage:getSettingsDir() .. "/grimmory.lua"
     )
     self.server_url = settings:readSetting("server_url")
 
@@ -153,7 +153,7 @@ end
 -- ─── Status menu (read-only view into the otherwise-silent sync engine) ──
 
 -- Short one-line status for the menu item label.
-function BookLoreSync:_statusLine()
+function GrimmorySync:_statusLine()
     if not self.enabled then return _("Sync: off (server not configured)") end
     if not self.book_id then return _("Sync: off for this book") end
     local queued = self.queue and self.queue:size() or 0
@@ -163,14 +163,14 @@ function BookLoreSync:_statusLine()
 end
 
 -- Verbose status for the InfoMessage shown when the user taps the status line.
-function BookLoreSync:_statusDetail()
+function GrimmorySync:_statusDetail()
     if not self.enabled then
-        return _("Reading-progress sync is off: no BookLore server is configured.\n\n"
-            .. "Open the BookLore app and log in first.")
+        return _("Reading-progress sync is off: no Grimmory server is configured.\n\n"
+            .. "Open the Grimmory app and log in first.")
     end
     if not self.book_id then
         return _("This book is not synced.\n\n"
-            .. "Only books downloaded through the BookLore app sync their progress.")
+            .. "Only books downloaded through the Grimmory app sync their progress.")
     end
     local queued = self.queue and self.queue:size() or 0
     local lines = {
@@ -180,14 +180,14 @@ function BookLoreSync:_statusDetail()
         T(_("Queued changes: %1"), queued),
     }
     if not self.token or self.token == "" then
-        lines[#lines + 1] = _("No sign-in token — open the BookLore app to log in.")
+        lines[#lines + 1] = _("No sign-in token — open the Grimmory app to log in.")
     end
     return table.concat(lines, "\n")
 end
 
 -- Manual drain. Page turns already enqueue + flush periodically; this is for
 -- users who want to push immediately before closing or switching devices.
-function BookLoreSync:syncNow()
+function GrimmorySync:syncNow()
     if not self.enabled or not self.book_id then
         UIManager:show(InfoMessage:new{ text = _("Nothing to sync for this book.") })
         return
@@ -204,9 +204,9 @@ function BookLoreSync:syncNow()
     })
 end
 
-function BookLoreSync:addToMainMenu(menu_items)
-    menu_items.booklore_sync = {
-        text = _("BookLore Sync"),
+function GrimmorySync:addToMainMenu(menu_items)
+    menu_items.grimmory_sync = {
+        text = _("Grimmory Sync"),
         sorting_hint = "tools",
         sub_item_table = {
             {
@@ -228,13 +228,13 @@ function BookLoreSync:addToMainMenu(menu_items)
     }
 end
 
-function BookLoreSync:onReaderReady()
+function GrimmorySync:onReaderReady()
     if not self.enabled then return end
 
     local file_path = self.ui.document.file
     local book_id, server_url = self:lookupBookId(file_path)
     if not book_id then
-        logger.dbg("BookLoreSync: not a BookLore book, skipping sync")
+        logger.dbg("GrimmorySync: not a Grimmory book, skipping sync")
         self.enabled = false
         return
     end
@@ -260,17 +260,17 @@ function BookLoreSync:onReaderReady()
             if ok_init then
                 self.cfi = cfi_mod
             else
-                logger.warn("BookLoreSync: CFI init failed:", tostring(init_err))
+                logger.warn("GrimmorySync: CFI init failed:", tostring(init_err))
             end
         else
-            logger.warn("BookLoreSync: cfi module require failed:", tostring(cfi_mod))
+            logger.warn("GrimmorySync: cfi module require failed:", tostring(cfi_mod))
         end
     end
 
     UIManager:scheduleIn(1, function()
         local ok, err = pcall(self.pullProgress, self)
         if not ok then
-            logger.warn("BookLoreSync: pullProgress crashed:", tostring(err))
+            logger.warn("GrimmorySync: pullProgress crashed:", tostring(err))
             -- pullProgress now only enqueues the GET task synchronously (the
             -- request and decision run later on the async callback), so a crash
             -- here means the network layer was never reached. Server state is
@@ -285,7 +285,7 @@ function BookLoreSync:onReaderReady()
     UIManager:scheduleIn(30, self._flush_fn)
 end
 
-function BookLoreSync:onCloseDocument()
+function GrimmorySync:onCloseDocument()
     if not self.enabled or not self.book_id then return end
     if self._flush_fn then UIManager:unschedule(self._flush_fn); self._flush_fn = nil end
     if self.pulled and not self.awaiting_decision and self.queue then
@@ -310,7 +310,7 @@ function BookLoreSync:onCloseDocument()
     end
 end
 
-function BookLoreSync:onPageUpdate()
+function GrimmorySync:onPageUpdate()
     if not self.enabled or not self.book_id then return end
     if self.awaiting_decision then return end
     if not self.queue then return end
@@ -325,7 +325,7 @@ function BookLoreSync:onPageUpdate()
                 cfi_str = cfi_result
             else
                 local msg = ok_cfi and tostring(cfi_err) or tostring(cfi_result)
-                logger.warn("BookLoreSync: CFI generation failed:", msg)
+                logger.warn("GrimmorySync: CFI generation failed:", msg)
             end
         end
     end
@@ -333,11 +333,11 @@ function BookLoreSync:onPageUpdate()
         self.queue:enqueue(self.book_id, self.server_url, pct_100, cfi_str, self.username)
     end)
     if not ok_q then
-        logger.warn("BookLoreSync: queue enqueue failed:", tostring(err_q))
+        logger.warn("GrimmorySync: queue enqueue failed:", tostring(err_q))
     end
 end
 
-function BookLoreSync:getPercentage()
+function GrimmorySync:getPercentage()
     if self.has_pages then
         return Math.roundPercent(self.ui.paging:getLastPercent())
     else
@@ -345,7 +345,7 @@ function BookLoreSync:getPercentage()
     end
 end
 
-function BookLoreSync:_periodicFlush()
+function GrimmorySync:_periodicFlush()
     if not self.enabled then return end
     if not NetworkMgr:isWifiOn() then
         if self._flush_fn then
@@ -359,7 +359,7 @@ function BookLoreSync:_periodicFlush()
     end
 end
 
-function BookLoreSync:_drainAll()
+function GrimmorySync:_drainAll()
     if not self.queue then return end
     if self.queue:size() == 0 then return end
     if not NetworkMgr:isWifiOn() then return end
@@ -368,7 +368,7 @@ function BookLoreSync:_drainAll()
     -- switched accounts): queued progress only pushes under the account that
     -- made it, and we pass the token to the child rather than have it re-read.
     local settings = LuaSettings:open(
-        DataStorage:getSettingsDir() .. "/booklore.lua"
+        DataStorage:getSettingsDir() .. "/grimmory.lua"
     )
     local current_username = settings:readSetting("username")
     local token = settings:readSetting("token")
@@ -421,7 +421,7 @@ function BookLoreSync:_drainAll()
     end)
 end
 
-function BookLoreSync:pushProgress()
+function GrimmorySync:pushProgress()
     if self.push_in_progress then return end
     self.push_in_progress = true
 
@@ -435,19 +435,19 @@ function BookLoreSync:pushProgress()
         if self.cfi and not self.has_pages then
             local xp = self.ui.document:getXPointer()
             if xp then
-                logger.dbg("BookLoreSync: XPointer:", xp)
+                logger.dbg("GrimmorySync: XPointer:", xp)
                 local ok_cfi, cfi_result, cfi_err = pcall(self.cfi.xpointerToCFI, xp)
                 if ok_cfi and cfi_result then
                     cfi_str = cfi_result
                 else
                     local msg = ok_cfi and tostring(cfi_err) or tostring(cfi_result)
-                    logger.warn("BookLoreSync: CFI generation failed:", msg)
+                    logger.warn("GrimmorySync: CFI generation failed:", msg)
                 end
             end
         end
 
         local settings = LuaSettings:open(
-            DataStorage:getSettingsDir() .. "/booklore.lua"
+            DataStorage:getSettingsDir() .. "/grimmory.lua"
         )
         local token = settings:readSetting("token")
         local server_url, book_id = self.server_url, self.book_id
@@ -459,11 +459,11 @@ function BookLoreSync:pushProgress()
     self.push_in_progress = false
 
     if not ok then
-        logger.warn("BookLoreSync: pushProgress error:", tostring(err))
+        logger.warn("GrimmorySync: pushProgress error:", tostring(err))
     end
 end
 
-function BookLoreSync:pullProgress()
+function GrimmorySync:pullProgress()
     if self.awaiting_decision then return end
     -- No token => skip the pull entirely. This is a clean early return, NOT a
     -- thrown error, so the pcall wrapper in onReaderReady leaves self.pulled
@@ -472,7 +472,7 @@ function BookLoreSync:pullProgress()
     -- crash-handler into spuriously opening the gate. Do NOT convert this to
     -- error() -- the onReaderReady pcall would then set self.pulled=true.
     if not self.token or self.token == "" then
-        logger.warn("BookLoreSync: no token, skipping pull; push gate stays closed")
+        logger.warn("GrimmorySync: no token, skipping pull; push gate stays closed")
         return
     end
     -- The GET runs in the async child; the parent decides on the callback.
@@ -484,19 +484,19 @@ function BookLoreSync:pullProgress()
     end, function(res)
         if type(res) ~= "table" or res.code ~= 200 then
             local code = type(res) == "table" and res.code or nil
-            logger.warn("BookLoreSync: pull failed, HTTP", code, "-- push gate remains closed")
+            logger.warn("GrimmorySync: pull failed, HTTP", code, "-- push gate remains closed")
             return
         end
 
         local ok, book = pcall(json.decode, res.body)
         if not ok or not book then
-            logger.warn("BookLoreSync: pull JSON decode failed -- push gate remains closed")
+            logger.warn("GrimmorySync: pull JSON decode failed -- push gate remains closed")
             return
         end
 
         local remote = book.epubProgress
         if not remote or type(remote.percentage) ~= "number" then
-            logger.dbg("BookLoreSync: no remote epubProgress, pull done")
+            logger.dbg("GrimmorySync: no remote epubProgress, pull done")
             self.pulled = true
             UIManager:scheduleIn(0.1, function() pcall(self._drainAll, self) end)
             return
@@ -504,11 +504,11 @@ function BookLoreSync:pullProgress()
 
         local local_pct = self:getPercentage()
         local local_pct_100 = math.floor(local_pct * 10000) / 100
-        logger.dbg("BookLoreSync: pull remote=", remote.percentage, "% local=", local_pct_100, "% cfi=", tostring(remote.cfi))
+        logger.dbg("GrimmorySync: pull remote=", remote.percentage, "% local=", local_pct_100, "% cfi=", tostring(remote.cfi))
 
         if remote.percentage > local_pct_100 + 0.5 then
             local delta = math.floor((remote.percentage - local_pct_100) * 10) / 10
-            logger.warn("BookLoreSync: server is ahead by", delta, "%, showing conflict prompt")
+            logger.warn("GrimmorySync: server is ahead by", delta, "%, showing conflict prompt")
             self.awaiting_decision = true
             self:showConflictPrompt(remote, local_pct_100, delta)
             return
@@ -519,7 +519,7 @@ function BookLoreSync:pullProgress()
     end)
 end
 
-function BookLoreSync:showConflictPrompt(remote, local_pct_100, delta)
+function GrimmorySync:showConflictPrompt(remote, local_pct_100, delta)
     local self_ref = self
     UIManager:show(MultiConfirmBox:new{
         text = string.format(
@@ -534,10 +534,10 @@ function BookLoreSync:showConflictPrompt(remote, local_pct_100, delta)
                 end)
                 if ok_xp and xp then
                     self_ref.ui:handleEvent(Event:new("GotoXPointer", xp))
-                    logger.dbg("BookLoreSync: jumped ahead via CFI", remote.cfi, "->", xp)
+                    logger.dbg("GrimmorySync: jumped ahead via CFI", remote.cfi, "->", xp)
                     navigated = true
                 else
-                    logger.warn("BookLoreSync: CFI-to-XPointer failed:", tostring(xp))
+                    logger.warn("GrimmorySync: CFI-to-XPointer failed:", tostring(xp))
                 end
             end
             if not navigated then
@@ -549,7 +549,7 @@ function BookLoreSync:showConflictPrompt(remote, local_pct_100, delta)
                 else
                     self_ref.ui:handleEvent(Event:new("GotoPercent", target))
                 end
-                logger.dbg("BookLoreSync: jumped to server position", remote.percentage, "%")
+                logger.dbg("GrimmorySync: jumped to server position", remote.percentage, "%")
             end
             self_ref.awaiting_decision = false
             self_ref.pulled = true
@@ -564,4 +564,4 @@ function BookLoreSync:showConflictPrompt(remote, local_pct_100, delta)
     })
 end
 
-return BookLoreSync
+return GrimmorySync

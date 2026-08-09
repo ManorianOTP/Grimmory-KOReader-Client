@@ -2,7 +2,7 @@
   Canonical LuaSettings stub.
 
   The .data field is a public raw table on each instance so plugin code
-  that reads registry.data directly (booklore_sync/main.lua:25) sees the
+  that reads registry.data directly (grimmory_sync/main.lua:25) sees the
   decoded JSON rather than nil.
 ]]
 local json = require("dkjson")

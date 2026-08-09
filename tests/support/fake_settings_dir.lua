@@ -1,9 +1,9 @@
 --[[
   Helper that constructs a tmp settings directory pre-populated with
-  booklore.lua (auth settings) and booklore_downloads.lua (download registry).
+  grimmory.lua (auth settings) and grimmory_downloads.lua (download registry).
 
   Lets sync_spec.lua resolve the active book id without loading
-  booklore.koplugin/main.lua.
+  grimmory.koplugin/main.lua.
 ]]
 local fake_settings = {}
 
@@ -12,7 +12,7 @@ local lfs  = require("lfs")
 
 local function tmpdir()
     local base = os.getenv("TMPDIR") or "/tmp"
-    local name = base .. "/booklore_test_" .. tostring(os.time()) .. "_" .. tostring(math.random(99999))
+    local name = base .. "/grimmory_test_" .. tostring(os.time()) .. "_" .. tostring(math.random(99999))
     lfs.mkdir(name)
     return name
 end
@@ -40,13 +40,13 @@ function fake_settings.create(opts)
     opts = opts or {}
     local dir = tmpdir()
 
-    write_json(dir .. "/booklore.lua", {
+    write_json(dir .. "/grimmory.lua", {
         server_url = opts.server_url or "",
         token = opts.token or "",
         token_time = opts.token_time or 0,
     })
 
-    write_json(dir .. "/booklore_downloads.lua", opts.downloads or {})
+    write_json(dir .. "/grimmory_downloads.lua", opts.downloads or {})
 
     local handle = { dir = dir }
 

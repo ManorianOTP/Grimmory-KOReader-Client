@@ -5,22 +5,22 @@ symptom below doesn't match.
 
 ## "Login failed"
 
-- **Wrong address or port.** The URL is your BookLore server, e.g.
+- **Wrong address or port.** The URL is your Grimmory server, e.g.
   `192.168.1.50:6060`. You can leave off `http://` (it's added for you). Don't
   include a path. If your server uses HTTPS, type the full `https://…` URL.
 - **Server not reachable from the Kindle.** Confirm the Kindle and the server
   are on the same network — or that Tailscale is connected
-  (**BookLore ▸ Tailscale ▸ Status**). From a phone on the same network, try
+  (**Grimmory ▸ Tailscale ▸ Status**). From a phone on the same network, try
   opening the same URL in a browser to confirm the server is up.
 - **Wrong username/password.** The message shows the server's response; a `401`
   means the credentials were rejected.
 - **Blank URL.** If you tap Login with the server field empty, you'll be asked
   to enter the server URL — it won't send a doomed request.
 
-## "BookLore sign-in expired. Log in again."
+## "Grimmory sign-in expired. Log in again."
 
 Your saved session was rejected by the server (the token expired and couldn't be
-renewed). Open **BookLore ▸ Login** (or **Settings ▸** the account line) and sign
+renewed). Open **Grimmory ▸ Login** (or **Settings ▸** the account line) and sign
 in again. Your server URL and username are still pre-filled.
 
 ## The library says it's offline / shows an old copy
@@ -37,17 +37,17 @@ in again. Your server URL and username are still pre-filled.
   retried once; if it still fails, retry **Tailscale ▸ Install**.
 - **Stuck needing auth.** **Tailscale ▸ Connect** shows a QR code / URL — open it
   on your phone or computer and approve the device in your tailnet.
-- **Connected but server still unreachable.** Make sure the BookLore server is
+- **Connected but server still unreachable.** Make sure the Grimmory server is
   also in your tailnet, and use its Tailscale IP / MagicDNS name as the server
   URL.
 - **Check state** any time with **Tailscale ▸ Status**.
 
 ## Reading progress isn't syncing
 
-- Sync only runs for **books downloaded through the BookLore app** — sideloaded
+- Sync only runs for **books downloaded through the Grimmory app** — sideloaded
   files aren't matched to a server record. Download the book via
   **Browse Library** instead of copying it on manually.
-- Open **BookLore Sync** in the reader menu (while a book is open) to see the
+- Open **Grimmory Sync** in the reader menu (while a book is open) to see the
   status: whether the server position was pulled, how many changes are queued,
   and the server it's using. Tap **Sync now** to push immediately.
 - Push is paused until the first pull succeeds (so it never overwrites the
@@ -76,6 +76,6 @@ in again. Your server URL and username are still pre-filled.
 
 ## Starting fresh
 
-**Settings ▸ Uninstall BookLore** removes both plugins. Choose **Keep settings**
+**Settings ▸ Uninstall Grimmory** removes both plugins. Choose **Keep settings**
 to keep your server URL and accounts for a quick reinstall, or **Erase
 everything** for a clean wipe. Restart KOReader afterward.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Cut a release of the BookLore plugin pair.
+# Cut a release of the Grimmory plugin pair.
 #
 #   1. Runs the test suite (the release gate).
 #   2. Sets the given version in both plugins' _meta.lua.
@@ -25,12 +25,12 @@ fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-REPO="ManorianOTP/BookLore-KOReader-Client"
+REPO="ManorianOTP/Grimmory-KOReader-Client"
 BASE_URL="https://github.com/${REPO}/releases/download/v${VERSION}"
 
 # Swap/uninstall order is sync-first elsewhere; for packaging the order is
 # irrelevant, but keep it stable for a reproducible manifest.
-PLUGINS=(booklore_sync.koplugin booklore.koplugin)
+PLUGINS=(grimmory_sync.koplugin grimmory.koplugin)
 
 echo "==> Running tests (release gate)"
 scripts/test.sh
@@ -68,7 +68,7 @@ cat <<EOF
 
 Next steps:
   1. Review and commit the version bump + release/manifest.json on main:
-       git add booklore.koplugin/_meta.lua booklore_sync.koplugin/_meta.lua release/manifest.json
+       git add grimmory.koplugin/_meta.lua grimmory_sync.koplugin/_meta.lua release/manifest.json
        git commit -m "Release v${VERSION}"
        git push origin main
   2. Publish the artifacts so the manifest URLs resolve:

@@ -1,10 +1,16 @@
 {
   "id": 42,
-  "fileName": "progress_test.epub",
+  "primaryFile": {
+    "id": 142,
+    "bookId": 42,
+    "fileName": "progress_test.epub",
+    "fileSizeKb": 256,
+    "bookType": "EPUB"
+  },
   "epubProgress": {
     "cfi": "epubcfi(/6/2[chapter1]!/4/2/6:21)",
     "percentage": 34.5,
     "lastReadAt": "2026-04-26T20:00:00Z"
   },
-  "_captured_against": "BookLore v0.1.0"
+  "_captured_against": "Grimmory v3.3.1"
 }

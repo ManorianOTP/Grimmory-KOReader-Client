@@ -2,5 +2,5 @@
   "status": 401,
   "error": "Unauthorized",
   "message": "Bad credentials",
-  "_captured_against": "BookLore v0.1.0"
+  "_captured_against": "Grimmory v3.3.1"
 }

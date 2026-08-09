@@ -1,5 +1,5 @@
 --[[
-    In-app self-updater for the BookLore plugin pair.
+    In-app self-updater for the Grimmory plugin pair.
 
     Lets a non-technical Kindle owner update both plugins from inside KOReader
     over WiFi/Tailscale, no scp. Source of truth is a small JSON manifest on a
@@ -29,7 +29,7 @@
     KOReader start — so we never write in place. Each new tree is extracted to a
     staging dir, then atomically renamed to a validated `<dir>.new` sibling, then
     a per-plugin rename dance commits it: `mv live live.old; mv live.new live;
-    rm -rf live.old`. booklore_sync is committed first and booklore (the running
+    rm -rf live.old`. grimmory_sync is committed first and grimmory (the running
     plugin) last. reconcile(), run at boot, finishes any interrupted swap: a
     `<dir>.new` only ever exists after a fully downloaded+validated tree was
     promoted, so installing it is always safe.
@@ -40,14 +40,14 @@ local logger = require("logger")
 local Updater = {}
 Updater.__index = Updater
 
--- The updater lives in booklore.koplugin and must be committed LAST so the
+-- The updater lives in grimmory.koplugin and must be committed LAST so the
 -- running plugin's own directory is the final thing touched. Order here is the
 -- swap/uninstall order: sync first, self last.
-local DEFAULT_MANAGED_DIRS = { "booklore_sync.koplugin", "booklore.koplugin" }
+local DEFAULT_MANAGED_DIRS = { "grimmory_sync.koplugin", "grimmory.koplugin" }
 
 local DEFAULTS = {
     plugins_root = "/mnt/us/koreader/plugins",
-    manifest_url = "https://raw.githubusercontent.com/ManorianOTP/BookLore-KOReader-Client/main/release/manifest.json",
+    manifest_url = "https://raw.githubusercontent.com/ManorianOTP/Grimmory-KOReader-Client/main/release/manifest.json",
     -- A plugin .tar.gz is tens of KB; < 256 bytes is an HTML error page.
     min_artifact_bytes = 256,
 }
@@ -80,7 +80,7 @@ function Updater.new(opts)
     -- stay on one filesystem (atomic). Derive from plugins_root unless given,
     -- so a non-default deploy path still stages correctly. Dot-prefixed +
     -- non-.koplugin so KOReader's plugin scanner ignores it.
-    self.staging_dir = opts.staging_dir or (self.plugins_root .. "/.booklore_update")
+    self.staging_dir = opts.staging_dir or (self.plugins_root .. "/.grimmory_update")
     self.exec = opts.exec or defaultExec
     self.request = opts.request
     self.hash_file = opts.hash_file or function(path)
@@ -152,15 +152,15 @@ local function readFile(path)
     return data
 end
 
---- Installed version of one plugin dir (e.g. "booklore.koplugin"), or nil.
+--- Installed version of one plugin dir (e.g. "grimmory.koplugin"), or nil.
 function Updater:getInstalledVersion(dir)
     return Updater.parseMetaVersion(
         readFile(self.plugins_root .. "/" .. dir .. "/_meta.lua"))
 end
 
---- Canonical installed version: booklore.koplugin's (both ship in lockstep).
+--- Canonical installed version: grimmory.koplugin's (both ship in lockstep).
 function Updater:installedVersion()
-    return self:getInstalledVersion("booklore.koplugin")
+    return self:getInstalledVersion("grimmory.koplugin")
 end
 
 -- ─── HTTP ────────────────────────────────────────────────────────────
@@ -178,7 +178,7 @@ function Updater:fetchManifest()
     local result, code = self:_request{
         url = self.manifest_url,
         sink = ltn12.sink.table(body),
-        headers = { ["User-Agent"] = "KOReader-BookLore/1.0" },
+        headers = { ["User-Agent"] = "KOReader-Grimmory/1.0" },
     }
     if not result or code ~= 200 then
         return nil, "couldn't reach the update server (HTTP " .. tostring(code) .. ")"
@@ -251,7 +251,7 @@ function Updater:stageUpdate(manifest)
         local dl_ok, dl_code = self:_request{
             url = p.url,
             sink = ltn12.sink.file(f),  -- closes f
-            headers = { ["User-Agent"] = "KOReader-BookLore/1.0" },
+            headers = { ["User-Agent"] = "KOReader-Grimmory/1.0" },
         }
         if not dl_ok or dl_code ~= 200 then
             return fail("download failed for " .. p.dir .. " (HTTP " .. tostring(dl_code) .. ")")
@@ -338,7 +338,7 @@ function Updater:performUpdate(manifest)
     if not ok then return nil, err end
     local cok, cerr = self:commitStaged()
     if not cok then return nil, cerr end
-    logger.info("BookLore: updated to", manifest.version)
+    logger.info("Grimmory: updated to", manifest.version)
     return true, manifest.version
 end
 
@@ -354,10 +354,10 @@ function Updater:reconcile()
         if dirExists(self, new_path) then
             if dirExists(self, live) then self.exec("rm -rf " .. shq(live)) end
             self.exec("mv " .. shq(new_path) .. " " .. shq(live))
-            logger.info("BookLore: reconciled interrupted update for", dir)
+            logger.info("Grimmory: reconciled interrupted update for", dir)
         elseif not dirExists(self, live) and dirExists(self, old_path) then
             self.exec("mv " .. shq(old_path) .. " " .. shq(live))
-            logger.warn("BookLore: rolled back interrupted update for", dir)
+            logger.warn("Grimmory: rolled back interrupted update for", dir)
         end
         if dirExists(self, old_path) then self.exec("rm -rf " .. shq(old_path)) end
     end

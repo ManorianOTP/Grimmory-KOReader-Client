@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Tiny HTTP fixture server for BookLore KOReader Client tests.
+Tiny HTTP fixture server for Grimmory KOReader Client tests.
 Takes a JSON routing spec via argv[1], binds 127.0.0.1:0,
 prints PID on stdout line 1, port on line 2, then serves requests.
 The Lua side reads PID + port and kills the process on stop().

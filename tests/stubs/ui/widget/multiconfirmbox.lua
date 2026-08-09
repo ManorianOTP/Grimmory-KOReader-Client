@@ -1,5 +1,5 @@
 -- Stub MultiConfirmBox widget.
--- booklore_sync/main.lua requires this at file scope.
+-- grimmory_sync/main.lua requires this at file scope.
 -- Stub constructor captures the options table and stores the instance so that
 -- tests can retrieve the callbacks and invoke them directly.
 local MultiConfirmBox = {}

@@ -1,10 +1,10 @@
 --[[
     Download registry + destination paths.
 
-    The registry file (booklore_downloads.lua in the settings dir) is the
-    only runtime contract between the two plugins: booklore_sync reads it
-    directly (lookupBookId in booklore_sync.koplugin/main.lua) to map the
-    currently open file path back to a BookLore book_id. The key format
+    The registry file (grimmory_downloads.lua in the settings dir) is the
+    only runtime contract between the two plugins: grimmory_sync reads it
+    directly (lookupBookId in grimmory_sync.koplugin/main.lua) to map the
+    currently open file path back to a Grimmory book_id. The key format
     (server_url .. "|" .. book_id) and the entry shape
     { path, server_id, server_url } must not change without updating that
     reader.
@@ -28,12 +28,12 @@ end
 --- @param opts table:
 --   download_dir  string: destination directory for downloaded books
 --   registry      LuaSettings|nil: override for specs; defaults to the
---                 shared on-disk registry booklore_sync also reads
+--                 shared on-disk registry grimmory_sync also reads
 function Downloads.new(opts)
     local self = setmetatable({}, Downloads)
     self.download_dir = opts.download_dir
     self.registry = opts.registry or LuaSettings:open(
-        DataStorage:getSettingsDir() .. "/booklore_downloads.lua"
+        DataStorage:getSettingsDir() .. "/grimmory_downloads.lua"
     )
     return self
 end
@@ -65,7 +65,7 @@ function Downloads:localPath(server_url, book)
     return nil
 end
 
---- Record a completed download so localPath (and booklore_sync) can find it.
+--- Record a completed download so localPath (and grimmory_sync) can find it.
 function Downloads:register(server_url, book, path)
     local key = Downloads.registryKey(server_url, book.id)
     self.registry:saveSetting(key, {

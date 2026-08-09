@@ -1,7 +1,7 @@
 {
-  "version": "1.0.0",
+  "version": "2.0.0",
   "plugins": [
-    { "dir": "booklore_sync.koplugin", "url": "https://github.com/ManorianOTP/BookLore-KOReader-Client/releases/download/v1.0.0/booklore_sync.koplugin-1.0.0.tar.gz", "sha256": "3e8a7c2f36b1bc54c88872835691cbb7da61205e4fafac529470617e113cede1", "size": 21159 },
-    { "dir": "booklore.koplugin", "url": "https://github.com/ManorianOTP/BookLore-KOReader-Client/releases/download/v1.0.0/booklore.koplugin-1.0.0.tar.gz", "sha256": "a16132b45828f81c292ead038bf24be79d187b1494d0c07a4e8e2e4918580583", "size": 66117 }
+    { "dir": "grimmory_sync.koplugin", "url": "https://github.com/ManorianOTP/Grimmory-KOReader-Client/releases/download/v2.0.0/grimmory_sync.koplugin-2.0.0.tar.gz", "sha256": "4477cf826eb7efd6913382499b3c4fe8b9db5448e7a94c63eab2f702b19a52fc", "size": 21169 },
+    { "dir": "grimmory.koplugin", "url": "https://github.com/ManorianOTP/Grimmory-KOReader-Client/releases/download/v2.0.0/grimmory.koplugin-2.0.0.tar.gz", "sha256": "3919c15ee17284ff158a35cf0324172b66ed0c1c0999dd96f9a630e061bd24e6", "size": 68064 }
   ]
 }

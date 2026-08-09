@@ -1,10 +1,14 @@
 --[[
+    NOTE: kept in sync with grimmory.koplugin/async.lua. The two plugins share
+    nothing at runtime (separate package paths on device), so the gateway is
+    duplicated rather than shared. Change both copies together.
+
     Serialized async task gateway: runs blocking work (network, shell) in a
     forked subprocess so the UI loop never waits on a socket. The parent
     polls for completion on UIManager ticks; the child writes its serialized
     result to a pipe and exits.
 
-    Why a queue: BookLore rotates refresh tokens, so two concurrent tasks
+    Why a queue: Grimmory rotates refresh tokens, so two concurrent tasks
     that both hit the 401-refresh path would invalidate each other's tokens.
     Tasks run strictly one at a time, FIFO, which makes the whole
     refresh/retry state machine race-free without cross-process locking.
@@ -143,7 +147,7 @@ function Async:_finish(job, result, err)
     end
     local ok, cb_err = pcall(job.on_done, result, err)
     if not ok then
-        logger.warn("BookLore async: on_done callback crashed:", tostring(cb_err))
+        logger.warn("Grimmory async: on_done callback crashed:", tostring(cb_err))
     end
     self:_startNext()
 end
@@ -156,7 +160,7 @@ function Async:_startNext()
     local executor = self.executor or self:_defaultExecutor()
     local ok, exec_err = pcall(executor, self, job)
     if not ok then
-        logger.warn("BookLore async: executor crashed:", tostring(exec_err))
+        logger.warn("Grimmory async: executor crashed:", tostring(exec_err))
         self:_finish(job, nil, "executor crashed: " .. tostring(exec_err))
     end
 end
@@ -204,7 +208,7 @@ function Async.subprocessExecutor(self, job)
     local encode, decode = getCodec()
 
     local function fallbackInline(reason)
-        logger.warn("BookLore async: subprocess path failed (" .. tostring(reason)
+        logger.warn("Grimmory async: subprocess path failed (" .. tostring(reason)
             .. "); running task inline")
         Async.inlineExecutor(self, job)
     end

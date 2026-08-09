@@ -1,5 +1,5 @@
 --[[
-  Pure view engine for the BookLore library browser.
+  Pure view engine for the Grimmory library browser.
 
   No require of any ui/*, no gettext, no globals.
   Labels are raw English; main.lua wraps them in _().

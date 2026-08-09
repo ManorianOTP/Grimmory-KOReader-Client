@@ -1,5 +1,5 @@
 --[[
-  Tailscale lifecycle spec for booklore.koplugin/tailscale.lua.
+  Tailscale lifecycle spec for grimmory.koplugin/tailscale.lua.
 
   The install pipeline runs for real: each test builds a genuine .tgz with
   the system tar, serves it (plus the release JSON) from the local Python

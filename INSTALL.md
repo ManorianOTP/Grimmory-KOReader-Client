@@ -1,13 +1,13 @@
-# Installing BookLore KOReader Client
+# Installing Grimmory KOReader Client
 
 You install both plugins once. After that, updates happen in-app
-(**Menu ▸ BookLore ▸ Check for updates**) — you won't need to copy files again.
+(**Menu ▸ Grimmory ▸ Check for updates**) — you won't need to copy files again.
 
 Both plugins must end up here on the device:
 
 ```
-koreader/plugins/booklore.koplugin/
-koreader/plugins/booklore_sync.koplugin/
+koreader/plugins/grimmory.koplugin/
+koreader/plugins/grimmory_sync.koplugin/
 ```
 
 On a Kindle that's `/mnt/us/koreader/plugins/`.
@@ -23,11 +23,11 @@ Pick whichever method suits you. **Method A needs no command line.**
 2. On the Kindle, **exit KOReader back to the normal Kindle home screen** — the
    USB drive only appears when KOReader isn't holding it.
 3. Connect the Kindle to your computer with a USB cable. It mounts as a drive.
-4. Copy the two folders `booklore.koplugin` and `booklore_sync.koplugin` into
+4. Copy the two folders `grimmory.koplugin` and `grimmory_sync.koplugin` into
    the `koreader/plugins/` folder on that drive.
 5. Eject the drive, unplug, and start KOReader.
 6. Enable them if needed: **Menu ▸ ⚙ (Settings) ▸ Plugin management**, make sure
-   both BookLore plugins are checked, then restart KOReader.
+   both Grimmory plugins are checked, then restart KOReader.
 
 That's it — go to [the README quick start](README.md#quick-start) to log in.
 
@@ -36,8 +36,8 @@ That's it — go to [the README quick start](README.md#quick-start) to log in.
 ## Method B — via the community AppStore plugin (on-device)
 
 If you already use [`appstore.koplugin`](https://github.com/omer-faruq/appstore.koplugin),
-it can discover and install BookLore on-device (this repo is tagged with the
-`koreader-plugin` GitHub topic). Open **Tools ▸ App Store**, find BookLore,
+it can discover and install Grimmory on-device (this repo is tagged with the
+`koreader-plugin` GitHub topic). Open **Tools ▸ App Store**, find Grimmory,
 and install. The AppStore can also keep it updated.
 
 ---
@@ -58,8 +58,8 @@ KUAL extension) you can push the plugins over Wi-Fi.
    which runs, in effect:
 
    ```bash
-   scp -r booklore.koplugin      root@<kindle-ip>:/mnt/us/koreader/plugins/
-   scp -r booklore_sync.koplugin root@<kindle-ip>:/mnt/us/koreader/plugins/
+   scp -r grimmory.koplugin      root@<kindle-ip>:/mnt/us/koreader/plugins/
+   scp -r grimmory_sync.koplugin root@<kindle-ip>:/mnt/us/koreader/plugins/
    ```
 3. Restart KOReader on the device.
 
@@ -69,14 +69,14 @@ KUAL extension) you can push the plugins over Wi-Fi.
 
 ## Setting up Tailscale (only if your server isn't on the same network)
 
-If the Kindle and your BookLore server are **not** on the same Wi-Fi/LAN, use
+If the Kindle and your Grimmory server are **not** on the same Wi-Fi/LAN, use
 Tailscale to put them on the same private network:
 
-1. Make a free [Tailscale](https://tailscale.com/) account and add your BookLore
+1. Make a free [Tailscale](https://tailscale.com/) account and add your Grimmory
    server to your tailnet.
-2. On the Kindle: **Menu ▸ BookLore ▸ Tailscale ▸ Install** (needs Wi-Fi;
+2. On the Kindle: **Menu ▸ Grimmory ▸ Tailscale ▸ Install** (needs Wi-Fi;
    downloads ~30 MB).
-3. **Menu ▸ BookLore ▸ Tailscale ▸ Connect**, then scan the QR code with your
+3. **Menu ▸ Grimmory ▸ Tailscale ▸ Connect**, then scan the QR code with your
    phone to authorize the device.
 4. Use your server's Tailscale IP (or MagicDNS name) as the server URL when you
    log in.

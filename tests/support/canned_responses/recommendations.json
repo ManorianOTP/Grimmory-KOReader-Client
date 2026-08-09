@@ -2,22 +2,34 @@
   {
     "book": {
       "id": 2,
+      "primaryFile": {
+        "id": 102,
+        "bookId": 2,
+        "fileName": "similar_book_two.epub",
+        "fileSizeKb": 512,
+        "bookType": "EPUB"
+      },
       "metadata": {
         "title": "Similar Book Two",
         "authors": ["Author B"]
-      },
-      "fileSizeKb": 512
+      }
     },
     "similarityScore": 0.91
   },
   {
     "book": {
       "id": 3,
+      "primaryFile": {
+        "id": 103,
+        "bookId": 3,
+        "fileName": "similar_book_three.epub",
+        "fileSizeKb": 700,
+        "bookType": "EPUB"
+      },
       "metadata": {
         "title": "Similar Book Three",
         "authors": ["Author C"]
-      },
-      "fileSizeKb": 700
+      }
     },
     "similarityScore": 0.84
   }

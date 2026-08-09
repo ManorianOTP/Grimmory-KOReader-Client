@@ -66,7 +66,7 @@ end
 
 -- Drain all pending callbacks regardless of deadline.
 -- Bounded at 1000 iterations to defuse self-rescheduling tasks like
--- BookLoreSync:_periodicFlush() that would otherwise loop forever during
+-- GrimmorySync:_periodicFlush() that would otherwise loop forever during
 -- spec_helper.teardown (cleanup never advances the clock).
 function UIManager._drain_all()
     local iter = 0

@@ -9,9 +9,9 @@
     one reader's undrained offline progress is never overwritten by another's.
 
     Persistence: LuaSettings file at DataStorage:getSettingsDir() ..
-    "/booklore_sync_queue.lua" (DL-001). Survives reader crash / reboot.
+    "/grimmory_sync_queue.lua" (DL-001). Survives reader crash / reboot.
 
-    Key: username .. "\n" .. book_id ("\n" cannot occur in a BookLore
+    Key: username .. "\n" .. book_id ("\n" cannot occur in a Grimmory
     username; nil username keys under ""). Schema per entry:
     { book_id, server_url, percentage, cfi, username, enqueued_at }.
     username tags the account that produced the progress; a drain only pushes
@@ -36,13 +36,13 @@ Queue.__index = Queue
 
 function Queue.new(opts)
     opts = opts or {}
-    local path = opts.path or (DataStorage:getSettingsDir() .. "/booklore_sync_queue.lua")
+    local path = opts.path or (DataStorage:getSettingsDir() .. "/grimmory_sync_queue.lua")
     local store = LuaSettings:open(path)
     if not store.data then store.data = {} end
     return setmetatable({ _store = store }, Queue)
 end
 
--- One slot per (account, book). "\n" is unambiguous because BookLore rejects
+-- One slot per (account, book). "\n" is unambiguous because Grimmory rejects
 -- newlines in usernames; a nil username keys under "".
 local function entryKey(username, book_id)
     return (username or "") .. "\n" .. tostring(book_id)

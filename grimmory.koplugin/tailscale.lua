@@ -171,7 +171,7 @@ function Tailscale:fetchLatestRelease()
         url = manifest_url,
         sink = ltn12.sink.table(resp_body),
         headers = {
-            ["User-Agent"] = "KOReader-BookLore/1.0",
+            ["User-Agent"] = "KOReader-Grimmory/1.0",
         },
     }
     if not result or resp_code ~= 200 then
@@ -214,7 +214,7 @@ function Tailscale:install(notify)
     local version, tarball, rel_err = self:fetchLatestRelease()
     if not version then return nil, rel_err end
 
-    logger.info("BookLore: installing Tailscale", version, "(", tarball, ")")
+    logger.info("Grimmory: installing Tailscale", version, "(", tarball, ")")
     notify("Downloading Tailscale " .. version .. "…")
 
     -- Download URL + temp path come straight from the manifest's filename.
@@ -229,7 +229,7 @@ function Tailscale:install(notify)
     self.exec("rm -rf " .. self.tmp_root)
     self.exec("mkdir -p " .. self.tmp_root)
 
-    logger.info("BookLore: downloading", url)
+    logger.info("Grimmory: downloading", url)
 
     -- Retry once on a transient failure: a dropped connection partway through
     -- the ~30 MB download used to leave a partial tarball and fail permanently.
@@ -243,11 +243,11 @@ function Tailscale:install(notify)
             url = url,
             sink = ltn12.sink.file(f),  -- closes f automatically
             headers = {
-                ["User-Agent"] = "KOReader-BookLore/1.0",
+                ["User-Agent"] = "KOReader-Grimmory/1.0",
             },
         }
         if dl_result and dl_code == 200 then break end
-        logger.warn("BookLore: Tailscale download attempt", attempt,
+        logger.warn("Grimmory: Tailscale download attempt", attempt,
             "failed (HTTP", tostring(dl_code), ")")
         self.exec("rm -f " .. tmp_tgz)  -- clear the partial before retrying
     end
@@ -263,7 +263,7 @@ function Tailscale:install(notify)
             .. " KB) - likely a server error.")
     end
 
-    logger.info("BookLore: downloaded", string.format("%.1f MB", file_size / 1048576))
+    logger.info("Grimmory: downloaded", string.format("%.1f MB", file_size / 1048576))
     notify("Installing Tailscale " .. version .. "…")
 
     -- Extract tarball
@@ -304,7 +304,7 @@ function Tailscale:install(notify)
     if not self:isInstalled() then
         return nil, "Installation failed - binary not found after copy."
     end
-    logger.info("BookLore: Tailscale", version, "installed successfully")
+    logger.info("Grimmory: Tailscale", version, "installed successfully")
     return version
 end
 
@@ -383,7 +383,7 @@ end
 -- which autostart deliberately avoids — the user connects manually once).
 function Tailscale:autostart()
     if not self:isInstalled() then
-        logger.dbg("BookLore: Tailscale autostart skipped - not installed")
+        logger.dbg("Grimmory: Tailscale autostart skipped - not installed")
         return
     end
     if self:isDaemonRunning() then
@@ -392,7 +392,7 @@ function Tailscale:autostart()
     end
     self:startDaemon(function(ok, err)
         if not ok then
-            logger.warn("BookLore: Tailscale autostart daemon start failed:", err)
+            logger.warn("Grimmory: Tailscale autostart daemon start failed:", err)
             return
         end
         self:_autostartUp()
@@ -401,7 +401,7 @@ end
 
 function Tailscale:_autostartUp()
     if not self.wifi_is_on() then
-        logger.dbg("BookLore: Tailscale autostart - WiFi off, daemon started, skipping up")
+        logger.dbg("Grimmory: Tailscale autostart - WiFi off, daemon started, skipping up")
         return
     end
     -- `tailscale up` blocks up to 30s; run it through run_blocking so on
@@ -413,11 +413,11 @@ function Tailscale:_autostartUp()
     end, function(res)
         if type(res) ~= "table" then return end
         if res.ok then
-            logger.info("BookLore: Tailscale autostart connected")
+            logger.info("Grimmory: Tailscale autostart connected")
         elseif res.auth_url then
-            logger.warn("BookLore: Tailscale autostart needs authentication; use Connect")
+            logger.warn("Grimmory: Tailscale autostart needs authentication; use Connect")
         else
-            logger.warn("BookLore: Tailscale autostart up failed:", res.output)
+            logger.warn("Grimmory: Tailscale autostart up failed:", res.output)
         end
     end)
 end

@@ -1,6 +1,6 @@
 --[[
   Offline library snapshot persistence spec for
-  booklore.koplugin/library_cache.lua.
+  grimmory.koplugin/library_cache.lua.
 
   Verifies the snapshot round-trips on disk and that load() enforces the
   account match (username + server_url) so one account never sees another's

@@ -1,6 +1,6 @@
 --[[
-    BookLore API client module.
-    Handles authentication and REST API requests to a BookLore server.
+    Grimmory API client module.
+    Handles authentication and REST API requests to a Grimmory server.
 ]]--
 
 local http = require("socket.http")
@@ -10,7 +10,7 @@ local logger = require("logger")
 local lfs = require("libs/libkoreader-lfs")
 local socket = require("socket")
 
-local BookLoreApi = {}
+local GrimmoryApi = {}
 
 -- Per-socket-operation bound (connect, each read). Without this every
 -- request inherits luasocket's 60s default, and an unreachable host (an
@@ -53,7 +53,7 @@ end
 -- is unit-testable and safe to call on the UI thread.
 -- @param s string|nil: raw user input
 -- @return string: normalized URL, or "" if blank
-function BookLoreApi.normalizeServerUrl(s)
+function GrimmoryApi.normalizeServerUrl(s)
     s = tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")
     if s == "" then return "" end
     if not s:match("^%w[%w%+%.%-]*://") then
@@ -62,13 +62,46 @@ function BookLoreApi.normalizeServerUrl(s)
     return (s:gsub("/+$", ""))
 end
 
+--- Normalize Grimmory's current Book DTO into the flat convenience fields
+-- consumed by the KOReader UI. Since Grimmory v3, file-specific properties
+-- live under primaryFile while cover versioning lives under metadata.
+-- Mutating the decoded table keeps cached snapshots and recommendation books
+-- on the same shape as top-level library results.
+function GrimmoryApi.normalizeBook(book)
+    if type(book) ~= "table" then return book end
+
+    local primary = type(book.primaryFile) == "table" and book.primaryFile or {}
+    local metadata = type(book.metadata) == "table" and book.metadata or {}
+
+    if book.fileName == nil then book.fileName = primary.fileName end
+    if book.fileSizeKb == nil then book.fileSizeKb = primary.fileSizeKb end
+    if book.bookType == nil then book.bookType = primary.bookType end
+    if book.coverUpdatedOn == nil then
+        book.coverUpdatedOn = metadata.coverUpdatedOn
+    end
+    if book.title == nil then
+        book.title = metadata.title or primary.fileName
+    end
+
+    return book
+end
+
+local function normalizeBookList(data)
+    if type(data) ~= "table" then return data end
+    local books = type(data.content) == "table" and data.content or data
+    for i, book in ipairs(books) do
+        books[i] = GrimmoryApi.normalizeBook(book)
+    end
+    return data
+end
+
 --- Perform a POST request with a JSON body.
 -- @param url string: full URL
 -- @param body table: request body (will be JSON-encoded)
 -- @param token string|nil: optional JWT for Authorization header
 -- @return table|nil: decoded JSON response, or nil on error
 -- @return string|nil: error message, or nil on success
-function BookLoreApi:post(url, body, token)
+function GrimmoryApi:post(url, body, token)
     local request_body = json.encode(body)
     local response_body = {}
 
@@ -91,8 +124,8 @@ function BookLoreApi:post(url, body, token)
     }
 
     local raw = table.concat(response_body)
-    logger.dbg("BookLore POST", redactToken(url), "→", code)
-    logger.dbg("BookLore response body:", raw)
+    logger.dbg("Grimmory POST", redactToken(url), "→", code)
+    logger.dbg("Grimmory response body:", raw)
 
     if code ~= 200 then
         return nil, "HTTP " .. tostring(code) .. ": " .. raw
@@ -111,7 +144,7 @@ end
 -- @param token string|nil: optional JWT for Authorization header
 -- @return table|nil: decoded JSON response, or nil on error
 -- @return string|nil: error message, or nil on success
-function BookLoreApi:get(url, token)
+function GrimmoryApi:get(url, token)
     local response_body = {}
 
     local headers = {}
@@ -129,8 +162,8 @@ function BookLoreApi:get(url, token)
     }
 
     local raw = table.concat(response_body)
-    logger.dbg("BookLore GET", redactToken(url), "→", code)
-    logger.dbg("BookLore response body:", raw)
+    logger.dbg("Grimmory GET", redactToken(url), "→", code)
+    logger.dbg("Grimmory response body:", raw)
 
     if code ~= 200 then
         return nil, "HTTP " .. tostring(code) .. ": " .. raw
@@ -144,14 +177,14 @@ function BookLoreApi:get(url, token)
     return decoded, nil
 end
 
---- Authenticate with BookLore and obtain access + refresh tokens. (ref: DL-007)
+--- Authenticate with Grimmory and obtain access + refresh tokens. (ref: DL-007)
 -- @param server_url string: base URL, e.g. "http://192.168.1.144:6060"
 -- @param username string
 -- @param password string
 -- @return string|nil: access token, or nil on error
 -- @return string|nil: refresh token, or nil on error
 -- @return string|nil: error message, or nil on success
-function BookLoreApi:login(server_url, username, password)
+function GrimmoryApi:login(server_url, username, password)
     local url = server_url .. "/api/v1/auth/login"
     local data, err = self:post(url, {
         username = username,
@@ -186,7 +219,7 @@ end
 --- Exchange a refresh token for a new access+refresh pair. (ref: DL-005, DL-007)
 -- Endpoint shape is an M-confidence assumption: POST /api/v1/auth/refresh
 -- with JSON body {refreshToken}; response mirrors login (rotating refresh).
-function BookLoreApi:refreshToken(server_url, refresh_token)
+function GrimmoryApi:refreshToken(server_url, refresh_token)
     local url = server_url .. "/api/v1/auth/refresh"
     local data, err = self:post(url, {
         refreshToken = refresh_token,
@@ -214,40 +247,51 @@ function BookLoreApi:refreshToken(server_url, refresh_token)
 end
 
 --- Fetch the list of libraries. (ref: DL-001)
-function BookLoreApi:getLibraries(server_url, token)
+function GrimmoryApi:getLibraries(server_url, token)
     local url = server_url .. "/api/v1/libraries"
     return self:get(url, token)
 end
 
 --- Fetch all shelves. (ref: DL-001)
-function BookLoreApi:getShelves(server_url, token)
+function GrimmoryApi:getShelves(server_url, token)
     local url = server_url .. "/api/v1/shelves"
     return self:get(url, token)
 end
 
 --- Fetch all books.
-function BookLoreApi:getBooks(server_url, token)
+function GrimmoryApi:getBooks(server_url, token)
     local url = server_url .. "/api/v1/books"
-    return self:get(url, token)
+    local data, err = self:get(url, token)
+    if not data then return nil, err end
+    return normalizeBookList(data), nil
 end
 
 --- Fetch a single book with full metadata.
 -- The list endpoint (getBooks) omits description unless withDescription=true,
 -- so the detail page fetches the individual record to get the blurb (and any
 -- other heavy fields the list view drops). Arg order matches "token-second".
-function BookLoreApi:getBook(server_url, token, book_id)
+function GrimmoryApi:getBook(server_url, token, book_id)
     local url = server_url .. "/api/v1/books/" .. tostring(book_id)
         .. "?withDescription=true"
-    return self:get(url, token)
+    local data, err = self:get(url, token)
+    if not data then return nil, err end
+    return self.normalizeBook(data), nil
 end
 
 --- Fetch recommended ("Similar Books") for a book.
 -- Returns a list of { book = <Book>, similarityScore = <number> }.
 -- Arg order matches "token-second".
-function BookLoreApi:getRecommendations(server_url, token, book_id)
+function GrimmoryApi:getRecommendations(server_url, token, book_id)
     local url = server_url .. "/api/v1/books/" .. tostring(book_id)
         .. "/recommendations"
-    return self:get(url, token)
+    local data, err = self:get(url, token)
+    if not data then return nil, err end
+    for _, recommendation in ipairs(data) do
+        if type(recommendation) == "table" then
+            recommendation.book = self.normalizeBook(recommendation.book)
+        end
+    end
+    return data, nil
 end
 
 --- Probe the cover cache for an already-downloaded cover. No network, no auth.
@@ -256,7 +300,7 @@ end
 -- here, so the scheme lives in exactly one place.
 -- Returns the cached path or nil, plus the basename a cover for these
 -- arguments is stored under (used by downloadCover after a fetch).
-function BookLoreApi:findCachedCover(book_id, cover_updated_on, cache_dir)
+function GrimmoryApi:findCachedCover(book_id, cover_updated_on, cache_dir)
     local stamp = tostring(cover_updated_on or "0"):gsub("[^%w]", "")
     local basename = "cover_" .. tostring(book_id) .. "_" .. stamp
     for _, ext in ipairs({ "jpg", "png", "gif", "webp" }) do
@@ -270,9 +314,9 @@ end
 
 --- Download a book's cover thumbnail to a file.
 -- Media endpoints use ?token= query param, NOT the Authorization header.
--- Note: BookLore may return Content-Type: application/json despite
+-- Note: Grimmory may return Content-Type: application/json despite
 -- serving image data — this is a known server bug. Treat as binary.
-function BookLoreApi:downloadCover(server_url, book_id, cover_updated_on, token, cache_dir)
+function GrimmoryApi:downloadCover(server_url, book_id, cover_updated_on, token, cache_dir)
     local cached, basename = self:findCachedCover(book_id, cover_updated_on, cache_dir)
     if cached then return cached, nil end
 
@@ -349,7 +393,7 @@ end
 -- @param expected_size_kb number|nil: expected size from API for truncation check
 -- @return boolean: true on success
 -- @return string|nil: error or warning message
-function BookLoreApi:downloadBook(server_url, book_id, token, dest_path, expected_size_kb)
+function GrimmoryApi:downloadBook(server_url, book_id, token, dest_path, expected_size_kb)
     local url = server_url .. "/api/v1/books/" .. tostring(book_id) .. "/download"
 
     -- Ensure parent directory exists (safe, no shell)
@@ -363,7 +407,7 @@ function BookLoreApi:downloadBook(server_url, book_id, token, dest_path, expecte
         return false, "Cannot open for writing: " .. tostring(open_err)
     end
 
-    logger.dbg("BookLore: downloading book", book_id, "to", dest_path)
+    logger.dbg("Grimmory: downloading book", book_id, "to", dest_path)
 
     local _, code = http.request{
         url = url,
@@ -398,16 +442,16 @@ function BookLoreApi:downloadBook(server_url, book_id, token, dest_path, expecte
     if expected_size_kb and expected_size_kb > 0 then
         local expected_bytes = expected_size_kb * 1024
         if actual_size < expected_bytes * 0.90 then
-            logger.warn("BookLore: download may be truncated.",
+            logger.warn("Grimmory: download may be truncated.",
                 "Expected ~" .. tostring(expected_size_kb) .. "KB,",
                 "got " .. tostring(math.floor(actual_size / 1024)) .. "KB")
         end
     end
 
-    logger.info("BookLore: downloaded book", book_id, "→", dest_path,
+    logger.info("Grimmory: downloaded book", book_id, "→", dest_path,
         string.format("(%.1f KB)", actual_size / 1024))
 
     return true, nil
 end
 
-return BookLoreApi
+return GrimmoryApi

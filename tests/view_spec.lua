@@ -1,5 +1,5 @@
 --[[
-  Pure engine spec for booklore.koplugin/view.lua.
+  Pure engine spec for grimmory.koplugin/view.lua.
 
   No HTTP fixture needed — view.lua is pure Lua with no I/O.
   A small inline table of ~10 varied books covers all test cases.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bootstrap-and-run script for BookLore KOReader Client off-device tests.
+# Bootstrap-and-run script for Grimmory KOReader Client off-device tests.
 # Run this before SCP'ing changes to the Kindle.
 set -euo pipefail
 

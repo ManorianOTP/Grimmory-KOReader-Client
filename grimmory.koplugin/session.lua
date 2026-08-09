@@ -2,7 +2,7 @@
     Token lifecycle + refresh-aware API dispatch.
 
     Owns the access/refresh token pair persisted in the plugin settings and
-    the single dispatcher (call) every authenticated BookLoreApi request goes
+    the single dispatcher (call) every authenticated GrimmoryApi request goes
     through. Standalone module — no KOReader widget dependencies — so the
     401-retry / silent-renewal / token-clearing state machine is
     unit-testable off device. The only UI side effect (the "Session expired"
@@ -48,7 +48,7 @@ local METHOD_ARG_LAYOUT = {
 
 --- @param opts table:
 --   settings    LuaSettings instance holding token / refresh_token / token_time
---   api         BookLoreApi (or a test double with the same surface)
+--   api         GrimmoryApi (or a test double with the same surface)
 --   on_expired  function|nil: invoked when the server confirms the session
 --               is unrecoverable and the user must log in again
 --   now         function|nil: clock override for specs (defaults to os.time)
@@ -97,7 +97,7 @@ function Session:clearTokens()
 end
 
 -- ─── Multi-account store ─────────────────────────────────────────────
--- A device can hold several BookLore logins (e.g. a shared household
+-- A device can hold several Grimmory logins (e.g. a shared household
 -- Kindle). The active account is the flat token/refresh_token/token_time
 -- triple above; every known account (including the active one) is also
 -- mirrored into the `accounts` list so the user can switch back without
@@ -302,7 +302,7 @@ function Session:call(server_url, method_name, ...)
 
     -- G2: unmapped-api-method
     if METHOD_ARG_LAYOUT[method_name] == nil then
-        logger.warn("BookLore Session:call unmapped method", method_name,
+        logger.warn("Grimmory Session:call unmapped method", method_name,
             "-- add entry to METHOD_ARG_LAYOUT")
         return nil, "unmapped-api-method:" .. tostring(method_name)
     end

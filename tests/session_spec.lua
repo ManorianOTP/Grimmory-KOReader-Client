@@ -1,5 +1,5 @@
 --[[
-  Token lifecycle spec for booklore.koplugin/session.lua.
+  Token lifecycle spec for grimmory.koplugin/session.lua.
 
   Drives the dispatcher against a scripted API double (no HTTP: the wire
   contract is api_spec.lua's job) and asserts the state machine the device
@@ -45,7 +45,7 @@ describe("Session", function()
 
     -- ctx: { session, api, settings, expired() }
     local function make_ctx(tokens)
-        local settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/booklore.lua")
+        local settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/grimmory.lua")
         if tokens then
             settings:saveSetting("token", tokens.token)
             settings:saveSetting("refresh_token", tokens.refresh_token)

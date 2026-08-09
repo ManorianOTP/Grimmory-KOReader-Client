@@ -2,5 +2,5 @@
   "accessToken": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0dXNlciJ9.stub",
   "refreshToken": "refresh-stub-token-abc123",
   "accessTokenExpiresAt": "2026-04-27T12:00:00Z",
-  "_captured_against": "BookLore v0.1.0"
+  "_captured_against": "Grimmory v3.3.1"
 }

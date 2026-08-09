@@ -1,9 +1,9 @@
 --[[
-  Download registry spec for booklore.koplugin/downloads.lua.
+  Download registry spec for grimmory.koplugin/downloads.lua.
 
   The registry file is the only runtime contract between the two plugins:
-  booklore_sync's lookupBookId reads it to map an open file path back to a
-  BookLore book_id. These specs pin the key format and entry shape, the
+  grimmory_sync's lookupBookId reads it to map an open file path back to a
+  Grimmory book_id. These specs pin the key format and entry shape, the
   per-server scoping, and the stale-entry pruning that keeps the detail
   page's Download button honest after a file is deleted on device.
 ]]
@@ -66,7 +66,7 @@ describe("Downloads", function()
             assert.are.equal(path, d2:localPath(SERVER, { id = 7 }))
         end)
 
-        it("writes the key format and entry shape booklore_sync reads", function()
+        it("writes the key format and entry shape grimmory_sync reads", function()
             local d = make_downloads()
             local path = d.download_dir .. "/x.epub"
             touch(path)
@@ -77,7 +77,7 @@ describe("Downloads", function()
                 entry)
         end)
 
-        it("scopes entries by server so two BookLore instances cannot collide", function()
+        it("scopes entries by server so two Grimmory instances cannot collide", function()
             local d = make_downloads()
             local path = d.download_dir .. "/x.epub"
             touch(path)

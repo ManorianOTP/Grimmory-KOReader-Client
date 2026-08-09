@@ -1,18 +1,18 @@
 --[[
-  API client spec for booklore.koplugin/api.lua.
+  API client spec for grimmory.koplugin/api.lua.
 
   Each scenario starts a local http_fixture and tears it down after_each
   so port assignment and request log are isolated between tests.
 ]]
 local spec_helper = require("spec_helper")
 
-local BookLoreApi
+local GrimmoryApi
 local fixture
 
-describe("BookLoreApi", function()
+describe("GrimmoryApi", function()
     before_each(function()
         spec_helper.setup()
-        BookLoreApi = require("api")
+        GrimmoryApi = require("api")
     end)
 
     after_each(function()
@@ -26,20 +26,20 @@ describe("BookLoreApi", function()
     describe("normalizeServerUrl", function()
         it("prepends http:// when no scheme is given", function()
             assert.are.equal("http://192.168.1.50:6060",
-                BookLoreApi.normalizeServerUrl("192.168.1.50:6060"))
+                GrimmoryApi.normalizeServerUrl("192.168.1.50:6060"))
         end)
         it("preserves an explicit https scheme", function()
             assert.are.equal("https://books.example.com",
-                BookLoreApi.normalizeServerUrl("https://books.example.com"))
+                GrimmoryApi.normalizeServerUrl("https://books.example.com"))
         end)
         it("trims whitespace and drops a trailing slash", function()
             assert.are.equal("http://host:6060",
-                BookLoreApi.normalizeServerUrl("  http://host:6060/  "))
+                GrimmoryApi.normalizeServerUrl("  http://host:6060/  "))
         end)
         it("returns empty string for blank or nil input", function()
-            assert.are.equal("", BookLoreApi.normalizeServerUrl(""))
-            assert.are.equal("", BookLoreApi.normalizeServerUrl("   "))
-            assert.are.equal("", BookLoreApi.normalizeServerUrl(nil))
+            assert.are.equal("", GrimmoryApi.normalizeServerUrl(""))
+            assert.are.equal("", GrimmoryApi.normalizeServerUrl("   "))
+            assert.are.equal("", GrimmoryApi.normalizeServerUrl(nil))
         end)
     end)
 
@@ -55,7 +55,7 @@ describe("BookLoreApi", function()
                     repeat_ = 1,
                 },
             })
-            local token, refresh, err = BookLoreApi:login(fixture.base_url(), "user", "pass")
+            local token, refresh, err = GrimmoryApi:login(fixture.base_url(), "user", "pass")
             assert.is_nil(err, tostring(err))
             assert.is_string(token)
             assert.is_string(refresh)
@@ -73,7 +73,7 @@ describe("BookLoreApi", function()
                     repeat_ = 1,
                 },
             })
-            local token, refresh, err = BookLoreApi:login(fixture.base_url(), "user", "wrong")
+            local token, refresh, err = GrimmoryApi:login(fixture.base_url(), "user", "wrong")
             assert.is_nil(token)
             assert.is_string(err)
             assert.truthy(err:match("401"), "error should mention 401, got: " .. tostring(err))
@@ -92,15 +92,15 @@ describe("BookLoreApi", function()
                     repeat_ = 1,
                 },
             })
-            local token, refresh, err = BookLoreApi:refreshToken(fixture.base_url(), "old-refresh-token")
+            local token, refresh, err = GrimmoryApi:refreshToken(fixture.base_url(), "old-refresh-token")
             assert.is_nil(err, tostring(err))
             assert.is_string(token)
             assert.is_string(refresh)
         end)
     end)
 
-    describe("getBooks (paginated)", function()
-        it("parses content array and pagination metadata", function()
+    describe("getBooks (Grimmory v3 list)", function()
+        it("normalizes primaryFile fields used by the KOReader UI", function()
             fixture = spec_helper.start_http_fixture({
                 {
                     method = "GET",
@@ -110,12 +110,14 @@ describe("BookLoreApi", function()
                     body_file = "library_books_page1.json",
                 },
             })
-            local data, err = BookLoreApi:getBooks(fixture.base_url(), "test-token")
+            local data, err = GrimmoryApi:getBooks(fixture.base_url(), "test-token")
             assert.is_nil(err, tostring(err))
             assert.is_table(data)
-            assert.is_table(data.content)
-            assert.is_number(data.totalPages)
-            assert.is_number(data.number)
+            assert.equals(2, #data)
+            assert.equals("test_book_one.epub", data[1].fileName)
+            assert.equals(1024, data[1].fileSizeKb)
+            assert.equals("EPUB", data[1].bookType)
+            assert.equals("2026-08-01T10:00:00Z", data[1].coverUpdatedOn)
         end)
     end)
 
@@ -131,11 +133,15 @@ describe("BookLoreApi", function()
                 },
             })
             -- Arg order is (server_url, token, book_id) to match "token-second".
-            local data, err = BookLoreApi:getBook(fixture.base_url(), "test-token", 1)
+            local data, err = GrimmoryApi:getBook(fixture.base_url(), "test-token", 1)
             assert.is_nil(err, tostring(err))
             assert.is_table(data)
             assert.equals(1, data.id)
             assert.is_table(data.metadata)
+            assert.equals("test_book_one.epub", data.fileName)
+            assert.equals(1024, data.fileSizeKb)
+            assert.equals("EPUB", data.bookType)
+            assert.equals("2026-08-01T10:00:00Z", data.coverUpdatedOn)
         end)
     end)
 
@@ -150,11 +156,13 @@ describe("BookLoreApi", function()
                     body_file = "recommendations.json",
                 },
             })
-            local data, err = BookLoreApi:getRecommendations(fixture.base_url(), "test-token", 1)
+            local data, err = GrimmoryApi:getRecommendations(fixture.base_url(), "test-token", 1)
             assert.is_nil(err, tostring(err))
             assert.is_table(data)
             assert.is_table(data[1])
             assert.is_table(data[1].book)
+            assert.equals("similar_book_two.epub", data[1].book.fileName)
+            assert.equals(512, data[1].book.fileSizeKb)
         end)
     end)
 
@@ -169,7 +177,7 @@ describe("BookLoreApi", function()
                     body_file = "progress_get.json",
                 },
             })
-            local data, err = BookLoreApi:get(fixture.base_url() .. "/api/v1/books/42", "test-token")
+            local data, err = GrimmoryApi:get(fixture.base_url() .. "/api/v1/books/42", "test-token")
             assert.is_nil(err, tostring(err))
             assert.is_table(data)
             local prog = data.epubProgress
@@ -190,7 +198,7 @@ describe("BookLoreApi", function()
                     body_file = "book_metadata.json",
                 },
             })
-            local data, err = BookLoreApi:get(fixture.base_url() .. "/api/v1/books/1", "test-token")
+            local data, err = GrimmoryApi:get(fixture.base_url() .. "/api/v1/books/1", "test-token")
             assert.is_nil(err, tostring(err))
             assert.is_table(data)
             assert.is_number(data.id)
@@ -214,9 +222,9 @@ describe("BookLoreApi", function()
             })
 
             local tmpdir = os.getenv("TMPDIR") or "/tmp"
-            local dest = tmpdir .. "/booklore_dl_" .. tostring(os.time()) ..
+            local dest = tmpdir .. "/grimmory_dl_" .. tostring(os.time()) ..
                          "_" .. tostring(math.random(99999)) .. ".epub"
-            local ok, err = BookLoreApi:downloadBook(fixture.base_url(), 7, "test-token", dest, nil)
+            local ok, err = GrimmoryApi:downloadBook(fixture.base_url(), 7, "test-token", dest, nil)
             assert.is_truthy(ok, tostring(err))
 
             -- Verify on-disk file matches the canned binary blob.
@@ -240,7 +248,7 @@ describe("BookLoreApi", function()
 
         before_each(function()
             local base = os.getenv("TMPDIR") or "/tmp"
-            cache_dir = base .. "/booklore_covers_" .. tostring(os.time()) ..
+            cache_dir = base .. "/grimmory_covers_" .. tostring(os.time()) ..
                         "_" .. tostring(math.random(99999))
             lfs.mkdir(cache_dir)
         end)
@@ -255,7 +263,7 @@ describe("BookLoreApi", function()
         end)
 
         it("returns nil when no cover is cached", function()
-            assert.is_nil((BookLoreApi:findCachedCover(7, "2024-01-01", cache_dir)))
+            assert.is_nil((GrimmoryApi:findCachedCover(7, "2024-01-01", cache_dir)))
         end)
 
         it("agrees with downloadCover on the filename scheme", function()
@@ -273,11 +281,11 @@ describe("BookLoreApi", function()
                     repeat_ = 1,
                 },
             })
-            local dl_path, err = BookLoreApi:downloadCover(
+            local dl_path, err = GrimmoryApi:downloadCover(
                 fixture.base_url(), 7, "2024-01-01T00:00:00Z", "test-token", cache_dir)
             assert.is_truthy(dl_path, tostring(err))
 
-            local cached = BookLoreApi:findCachedCover(7, "2024-01-01T00:00:00Z", cache_dir)
+            local cached = GrimmoryApi:findCachedCover(7, "2024-01-01T00:00:00Z", cache_dir)
             assert.equals(dl_path, cached,
                 "offline probe must resolve the exact file downloadCover wrote")
         end)
@@ -286,7 +294,7 @@ describe("BookLoreApi", function()
             local f = assert(io.open(cache_dir .. "/cover_7_old.jpg", "wb"))
             f:write("\xFF\xD8")
             f:close()
-            assert.is_nil((BookLoreApi:findCachedCover(7, "new", cache_dir)))
+            assert.is_nil((GrimmoryApi:findCachedCover(7, "new", cache_dir)))
         end)
     end)
 
@@ -303,7 +311,7 @@ describe("BookLoreApi", function()
                     repeat_ = 1,
                 },
             })
-            local data, err = BookLoreApi:get(fixture.url("/redirect/start"), "test-token")
+            local data, err = GrimmoryApi:get(fixture.url("/redirect/start"), "test-token")
             assert.is_nil(data)
             assert.is_string(err)
             assert.truthy(err:match("302"), "error should mention 302, got: " .. tostring(err))

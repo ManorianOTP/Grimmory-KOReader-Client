@@ -148,7 +148,7 @@ function cfi.initBook(file_path, reader)
     _spine   = spine
     _opf_dir = opf_dir
 
-    logger.dbg("BookLoreSync CFI: spine parsed, items =", #spine)
+    logger.dbg("GrimmorySync CFI: spine parsed, items =", #spine)
     return true, nil
 end
 

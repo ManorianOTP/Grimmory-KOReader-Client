@@ -9,5 +9,5 @@
     { "hop": 2, "from": "/redirect/middle", "status": 302, "Location": "final" },
     { "hop": 3, "from": "final",             "status": 200, "body": "{}" }
   ],
-  "_captured_against": "BookLore v0.1.0"
+  "_captured_against": "Grimmory v3.3.1"
 }

@@ -35,8 +35,8 @@ local lfs = require("libs/libkoreader-lfs")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
-local BookLoreApi = require("api")
-local BookLoreView = require("view")
+local GrimmoryApi = require("api")
+local GrimmoryView = require("view")
 local LibraryCache = require("library_cache")
 local Downloads = require("downloads")
 local Session = require("session")
@@ -49,8 +49,8 @@ local Updater = require("updater")
 -- plugin is deployed on device.
 local PLUGIN_DIR = debug.getinfo(1, "S").source:sub(2):match("(.*[/\\])") or "./"
 
-local BookLore = WidgetContainer:extend{
-    name = "booklore",
+local Grimmory = WidgetContainer:extend{
+    name = "grimmory",
     is_doc_only = false,
 }
 
@@ -67,9 +67,9 @@ local updater_reconcile_attempted = false
 
 -- ─── Initialisation ──────────────────────────────────────────────────
 
-function BookLore:init()
+function Grimmory:init()
     self.settings = LuaSettings:open(
-        DataStorage:getSettingsDir() .. "/booklore.lua"
+        DataStorage:getSettingsDir() .. "/grimmory.lua"
     )
     -- No hardcoded default: a stranger's first login must show an empty field
     -- (with an example hint) rather than someone else's server address.
@@ -80,7 +80,7 @@ function BookLore:init()
     -- session.lua; the only UI side effect is the expiry notice injected here.
     self.session = Session.new{
         settings = self.settings,
-        api = BookLoreApi,
+        api = GrimmoryApi,
         on_expired = function()
             -- Fires when the server reachably rejected our stored login (an
             -- expired/invalid token that couldn't be refreshed). Distinct from
@@ -91,7 +91,7 @@ function BookLore:init()
             -- shown later sits above an InfoMessage shown now).
             UIManager:scheduleIn(0.1, function()
                 UIManager:show(InfoMessage:new{
-                    text = _("BookLore sign-in expired. Log in again to sync the latest."),
+                    text = _("Grimmory sign-in expired. Log in again to sync the latest."),
                 })
             end)
         end,
@@ -99,7 +99,7 @@ function BookLore:init()
 
     self.download_dir = self.settings:readSetting(
         "download_dir",
-        DataStorage:getFullDataDir() .. "/booklore/downloads"
+        DataStorage:getFullDataDir() .. "/grimmory/downloads"
     )
     self.downloads = Downloads.new{ download_dir = self.download_dir }
 
@@ -132,7 +132,7 @@ function BookLore:init()
     self.offline_mode = false
 
     -- In-app updater. plugins_root is the parent of this plugin's own dir
-    -- (PLUGIN_DIR ends with .../plugins/booklore.koplugin/), so it is correct
+    -- (PLUGIN_DIR ends with .../plugins/grimmory.koplugin/), so it is correct
     -- wherever the pair is deployed.
     local plugins_root = PLUGIN_DIR:gsub("[/\\]+$", ""):gsub("[/\\][^/\\]+$", "")
     self.updater = Updater.new{ plugins_root = plugins_root }
@@ -164,9 +164,9 @@ function BookLore:init()
     self.ui.menu:registerToMainMenu(self)
 end
 
-function BookLore:addToMainMenu(menu_items)
-    menu_items.booklore = {
-        text = _("BookLore"),
+function Grimmory:addToMainMenu(menu_items)
+    menu_items.grimmory = {
+        text = _("Grimmory"),
         sorting_hint = "tools",
         sub_item_table = {
             {
@@ -204,7 +204,7 @@ function BookLore:addToMainMenu(menu_items)
                         callback = function() self:confirmSignOut() end,
                     },
                     {
-                        text = _("Uninstall BookLore"),
+                        text = _("Uninstall Grimmory"),
                         callback = function() self:confirmUninstall() end,
                     },
                 },
@@ -257,7 +257,7 @@ end
 
 --- Install Tailscale from static ARM binaries (UI shell around
 -- Tailscale:install()).
-function BookLore:tailscaleInstall()
+function Grimmory:tailscaleInstall()
     -- Callback form so the download doesn't start mid-association.
     if not NetworkMgr:isWifiOn() then
         NetworkMgr:turnOnWifi(function() self:_startTailscaleInstall() end)
@@ -266,7 +266,7 @@ function BookLore:tailscaleInstall()
     self:_startTailscaleInstall()
 end
 
-function BookLore:_startTailscaleInstall()
+function Grimmory:_startTailscaleInstall()
     -- The whole install pipeline (fetch version, download ~30 MB, extract,
     -- copy, chmod) runs in a subprocess; it used to block the UI for minutes.
     -- A tap-to-cancel message stands in for live stage updates (the async
@@ -302,7 +302,7 @@ end
 --- Prompt to install Tailscale if not present.
 -- If already installed, calls the provided callback immediately.
 -- @param then_do function: called after installation succeeds or if already installed
-function BookLore:ensureTailscaleInstalled(then_do)
+function Grimmory:ensureTailscaleInstalled(then_do)
     if self.tailscale:isInstalled() then
         if then_do then then_do() end
         return
@@ -320,7 +320,7 @@ function BookLore:ensureTailscaleInstalled(then_do)
     })
 end
 
-function BookLore:showTailscaleStatus()
+function Grimmory:showTailscaleStatus()
     if not self.tailscale:isInstalled() then
         self:ensureTailscaleInstalled()
         return
@@ -374,7 +374,7 @@ function BookLore:showTailscaleStatus()
     end)
 end
 
-function BookLore:tailscaleConnect()
+function Grimmory:tailscaleConnect()
     if not self.tailscale:isInstalled() then
         self:ensureTailscaleInstalled()
         return
@@ -428,7 +428,7 @@ end
 
 --- Internal: run `tailscale up` (up to 30s) in a subprocess and handle the
 -- auth URL flow on completion.
-function BookLore:_tailscaleUp()
+function Grimmory:_tailscaleUp()
     local job
     local busy = InfoMessage:new{
         text = _("Connecting to Tailscale…\n\n"
@@ -484,7 +484,7 @@ function BookLore:_tailscaleUp()
     end)
 end
 
-function BookLore:tailscaleDisconnect()
+function Grimmory:tailscaleDisconnect()
     if not self.tailscale:isInstalled() then
         UIManager:show(InfoMessage:new{
             text = _("Tailscale is not installed."),
@@ -519,7 +519,7 @@ end
 -- here, so this is manual: check the published version against the installed
 -- one and, if newer, re-run the install pipeline (which overwrites the
 -- binaries). If not installed yet, fall through to the install prompt.
-function BookLore:tailscaleUpdate()
+function Grimmory:tailscaleUpdate()
     if not self.tailscale:isInstalled() then
         self:ensureTailscaleInstalled()
         return
@@ -560,7 +560,7 @@ function BookLore:tailscaleUpdate()
     end)
 end
 
-function BookLore:_startTailscaleUpdate()
+function Grimmory:_startTailscaleUpdate()
     local job
     local busy = InfoMessage:new{
         text = _("Updating Tailscale…\n\nDownloading the latest release (~30 MB).\n\nTap to cancel."),
@@ -593,7 +593,7 @@ end
 
 -- ─── Login ───────────────────────────────────────────────────────────
 
-function BookLore:showLoginDialog()
+function Grimmory:showLoginDialog()
     -- "Set as default" controls whether this login overwrites the saved
     -- server URL + username (the dialog pre-fill). Reset ON every time the
     -- dialog opens; turn it off for a one-off login to another server/account
@@ -604,7 +604,7 @@ function BookLore:showLoginDialog()
     end
 
     self.login_dialog = MultiInputDialog:new{
-        title = _("BookLore Login"),
+        title = _("Grimmory Login"),
         fields = {
             { text = self.server_url, hint = _("Server URL (e.g. 192.168.1.50:6060)") },
             { text = self.username, hint = _("Username") },
@@ -650,13 +650,13 @@ function BookLore:showLoginDialog()
     self.login_dialog:onShowKeyboard()
 end
 
-function BookLore:doLogin(server_url, username, password, remember)
+function Grimmory:doLogin(server_url, username, password, remember)
     -- Normalize before anything else (adds http://, drops trailing slash) and
     -- reject a blank URL with an actionable message instead of a doomed POST.
-    server_url = BookLoreApi.normalizeServerUrl(server_url)
+    server_url = GrimmoryApi.normalizeServerUrl(server_url)
     if server_url == "" then
         UIManager:show(InfoMessage:new{
-            text = _("Please enter your BookLore server URL (e.g. 192.168.1.50:6060)."),
+            text = _("Please enter your Grimmory server URL (e.g. 192.168.1.50:6060)."),
         })
         return
     end
@@ -672,14 +672,14 @@ function BookLore:doLogin(server_url, username, password, remember)
     self:_startLogin(server_url, username, password, remember)
 end
 
-function BookLore:_startLogin(server_url, username, password, remember)
+function Grimmory:_startLogin(server_url, username, password, remember)
     local busy = InfoMessage:new{ text = _("Logging in…") }
     UIManager:show(busy)
 
     -- Login is tokenless by definition, so it bypasses the session
     -- dispatcher and just bridges the (token, refresh_token, err) triple.
     self.async:run(function()
-        local token, refresh_token, err = BookLoreApi:login(
+        local token, refresh_token, err = GrimmoryApi:login(
             server_url, username, password)
         return { token = token, refresh_token = refresh_token, err = err }
     end, function(payload, async_err)
@@ -722,7 +722,7 @@ end
 --- Switcher over the saved accounts. Resumable accounts (a refresh token is
 -- stored) switch without a password; an expired one re-opens the login dialog
 -- prefilled. Mirrors the sort/filter Menu-in-InputContainer pattern.
-function BookLore:showAccountSwitcher()
+function Grimmory:showAccountSwitcher()
     local accounts = self.session:listAccounts()
     if #accounts == 0 then
         UIManager:show(InfoMessage:new{
@@ -794,7 +794,7 @@ function BookLore:showAccountSwitcher()
 end
 
 --- Edit the download directory. Re-creates the Downloads helper on save.
-function BookLore:showDownloadFolderDialog()
+function Grimmory:showDownloadFolderDialog()
     local dialog
     dialog = InputDialog:new{
         title = _("Download folder"),
@@ -828,7 +828,7 @@ end
 
 --- Sign out the active account (clears its tokens, drops it from the switcher)
 -- and revert to the saved default pre-fill so the user need not retype it.
-function BookLore:confirmSignOut()
+function Grimmory:confirmSignOut()
     if not self.session:isLoggedIn() then
         UIManager:show(InfoMessage:new{ text = _("You're not signed in.") })
         return
@@ -847,9 +847,9 @@ function BookLore:confirmSignOut()
 end
 
 --- Settings/registry/cache paths removed on a full uninstall. Scans the
--- settings dir for booklore* files (settings, downloads registry, sync queue,
+-- settings dir for grimmory* files (settings, downloads registry, sync queue,
 -- per-account library caches) and adds the cover cache + downloads dir.
-function BookLore:_purgePaths()
+function Grimmory:_purgePaths()
     local paths = {}
     local settings_dir = DataStorage:getSettingsDir()
     -- Wrap the whole iteration in pcall and use the direct lfs.dir idiom so the
@@ -857,12 +857,12 @@ function BookLore:_purgePaths()
     -- iterator could let it be GC'd mid-scan).
     pcall(function()
         for entry in lfs.dir(settings_dir) do
-            if type(entry) == "string" and entry:match("^booklore") then
+            if type(entry) == "string" and entry:match("^grimmory") then
                 paths[#paths+1] = settings_dir .. "/" .. entry
             end
         end
     end)
-    paths[#paths+1] = DataStorage:getDataDir() .. "/cache/booklore"
+    paths[#paths+1] = DataStorage:getDataDir() .. "/cache/grimmory"
     paths[#paths+1] = self.download_dir
     -- Tailscale was installed by this app, so a full erase removes it (binaries,
     -- state, logs) and its install tmp dir too. A keep-settings uninstall leaves
@@ -878,9 +878,9 @@ end
 
 --- Uninstall both plugins. MultiConfirmBox lets the user keep settings (for an
 -- easy reinstall) or erase everything. The actual rm runs off the UI thread.
-function BookLore:confirmUninstall()
+function Grimmory:confirmUninstall()
     UIManager:show(MultiConfirmBox:new{
-        text = _("Uninstall both BookLore plugins?\n\n"
+        text = _("Uninstall both Grimmory plugins?\n\n"
             .. "Keep your saved settings (server URL, accounts, downloads) for an "
             .. "easy reinstall, or erase everything (settings, downloaded books, "
             .. "and the Tailscale install)?"),
@@ -891,7 +891,7 @@ function BookLore:confirmUninstall()
     })
 end
 
-function BookLore:_doUninstall(purge)
+function Grimmory:_doUninstall(purge)
     local extra = purge and self:_purgePaths() or nil
     local busy = InfoMessage:new{ text = _("Uninstalling…") }
     UIManager:show(busy)
@@ -906,7 +906,7 @@ function BookLore:_doUninstall(purge)
     end, function()
         UIManager:close(busy)
         UIManager:show(InfoMessage:new{
-            text = _("BookLore uninstalled. Restart KOReader (or your Kindle) "
+            text = _("Grimmory uninstalled. Restart KOReader (or your Kindle) "
                 .. "to finish removing it."),
             width = Screen:getWidth() * 0.9,
         })
@@ -914,7 +914,7 @@ function BookLore:_doUninstall(purge)
 end
 
 --- Check the release manifest for a newer version and offer to install it.
-function BookLore:checkForUpdates()
+function Grimmory:checkForUpdates()
     if not NetworkMgr:isWifiOn() then
         NetworkMgr:turnOnWifi(function() self:checkForUpdates() end)
         return
@@ -953,7 +953,7 @@ function BookLore:checkForUpdates()
     end)
 end
 
-function BookLore:_performUpdate(manifest)
+function Grimmory:_performUpdate(manifest)
     local job
     local busy = InfoMessage:new{
         text = _("Downloading and installing update…\n\nTap to cancel."),
@@ -996,18 +996,18 @@ end
 -- read/write + account-match logic lives in the standalone library_cache
 -- module so it is unit-testable without the UI deps.
 
-function BookLore:saveSnapshot(books, shelves, libraries)
+function Grimmory:saveSnapshot(books, shelves, libraries)
     LibraryCache.save(self.username, self.server_url, books, shelves, libraries)
 end
 
-function BookLore:loadSnapshot()
+function Grimmory:loadSnapshot()
     return LibraryCache.load(self.username, self.server_url)
 end
 
 -- Bucket books into shelves / unshelved. Shared by the online and offline
 -- render paths so the dashboard groupings are identical either way. Numeric
 -- loops keep `_` bound to gettext (never shadow it near _("…") strings).
-function BookLore:indexShelves(books)
+function Grimmory:indexShelves(books)
     self.shelf_books = {}
     self.unshelved_books = {}
     for i = 1, #books do
@@ -1029,7 +1029,7 @@ function BookLore:indexShelves(books)
 end
 
 -- Short human-readable age for the offline banner, e.g. "3 hr ago".
-function BookLore:formatRelativeTime(ts)
+function Grimmory:formatRelativeTime(ts)
     if type(ts) ~= "number" then return _("a while ago") end
     local diff = os.time() - ts
     if diff < 0 then diff = 0 end   -- clock skew / future ts => "just now"
@@ -1047,19 +1047,19 @@ function BookLore:formatRelativeTime(ts)
 end
 
 -- Render the dashboard from a cached snapshot, read-only (no network).
-function BookLore:renderOfflineLibrary(snap)
+function Grimmory:renderOfflineLibrary(snap)
     self.offline_mode = true
     self._snapshot_fetched_at = snap.fetched_at
     self.cached_books = snap.books
     self.cached_shelves = (type(snap.shelves) == "table") and snap.shelves or {}
     self.cached_libraries = (type(snap.libraries) == "table") and snap.libraries or {}
     self:indexShelves(snap.books)
-    self.cover_cache_dir = DataStorage:getDataDir() .. "/cache/booklore"
+    self.cover_cache_dir = DataStorage:getDataDir() .. "/cache/grimmory"
     lfs.mkdir(self.cover_cache_dir)
     self:showDashboard()
 end
 
-function BookLore:browseLibrary()
+function Grimmory:browseLibrary()
     local logged_in = self.session:isLoggedIn()
 
     -- The snapshot is loaded lazily: decoding a large library JSON from disk
@@ -1111,7 +1111,7 @@ end
 -- All three list calls run as ONE async batch task (one child session, at
 -- most one shared token refresh) while a tap-to-dismiss message shows;
 -- dismissing cancels the fetch and drops straight to the offline copy.
-function BookLore:fetchAndShowLibrary(snap)
+function Grimmory:fetchAndShowLibrary(snap)
     if self._library_loading then return end
     self._library_loading = true
     -- Fresh online load: let previously-failed cover downloads be retried.
@@ -1178,7 +1178,7 @@ function BookLore:fetchAndShowLibrary(snap)
             elseif err == "not-logged-in" then
                 fallBackToSnapshot(err, true)
                 UIManager:show(InfoMessage:new{
-                    text = _("You're signed out of BookLore. Log in again to load your library."),
+                    text = _("You're signed out of Grimmory. Log in again to load your library."),
                 })
             else
                 fallBackToSnapshot(err, false)
@@ -1211,7 +1211,7 @@ function BookLore:fetchAndShowLibrary(snap)
         self:indexShelves(books)
 
         -- Ensure cover cache directory exists
-        self.cover_cache_dir = DataStorage:getDataDir() .. "/cache/booklore"
+        self.cover_cache_dir = DataStorage:getDataDir() .. "/cache/grimmory"
         lfs.mkdir(self.cover_cache_dir)
 
         self:showDashboard()
@@ -1224,7 +1224,7 @@ end
 -- offline mode. Tapping it reports the connection state (and, when offline, the
 -- cached-library age). Built as a fixed-size tappable image so buildTopBar can
 -- give the search field the remaining width and never overflow screen_w.
-function BookLore:buildWifiButton()
+function Grimmory:buildWifiButton()
     local icon_sz = Screen:scaleBySize(24)
     local name = self.offline_mode and "wifi_off" or "wifi"
     local glyph
@@ -1284,7 +1284,7 @@ end
 -- @param on_menu function: called when ☰ is tapped
 -- @param on_search function: called when search is tapped
 -- @return widget: the top bar row
-function BookLore:buildTopBar(on_menu, on_search, on_close)
+function Grimmory:buildTopBar(on_menu, on_search, on_close)
     local screen_w = Screen:getWidth()
     local padding = Size.padding.large
 
@@ -1350,13 +1350,13 @@ function BookLore:buildTopBar(on_menu, on_search, on_close)
 end
 
 --- Resolve an already-cached cover file without any network request.
--- Deliberately calls BookLoreApi directly: the probe needs no token, runs no
+-- Deliberately calls GrimmoryApi directly: the probe needs no token, runs no
 -- network, and must never be gated by login state (it backs offline
 -- rendering). The filename scheme lives in findCachedCover (shared with
 -- downloadCover's cache-hit path). Returns the path or nil.
-function BookLore:cachedCoverPath(book)
+function Grimmory:cachedCoverPath(book)
     if not (book and book.id and self.cover_cache_dir) then return nil end
-    return (BookLoreApi:findCachedCover(book.id, book.coverUpdatedOn, self.cover_cache_dir))
+    return (GrimmoryApi:findCachedCover(book.id, book.coverUpdatedOn, self.cover_cache_dir))
 end
 
 -- ─── Deferred render-time network work ───────────────────────────────
@@ -1368,7 +1368,7 @@ end
 -- session, one shared token refresh), re-rendering in place when results
 -- land. The view paints now; covers and blurbs fill in a moment later.
 
-function BookLore:_resetDeferred()
+function Grimmory:_resetDeferred()
     self._deferred_calls = {}
 end
 
@@ -1376,7 +1376,7 @@ end
 -- changed cover re-fetches across opens, but each miss is attempted only
 -- once per online library load (reset in fetchAndShowLibrary): a cover that
 -- fails to download must not re-queue forever on each in-place re-render.
-function BookLore:_noteCoverMiss(book)
+function Grimmory:_noteCoverMiss(book)
     if not (book and book.id and self.cover_cache_dir) then return end
     local key = tostring(book.id) .. "_" .. tostring(book.coverUpdatedOn)
     self._cover_attempted = self._cover_attempted or {}
@@ -1393,7 +1393,7 @@ end
 -- place. current_fn is an identity guard: a completion that lands after the
 -- user navigated away (widget reference replaced) is dropped rather than
 -- popping a stale view back on screen.
-function BookLore:_flushDeferredCalls(current_fn, rerender_fn)
+function Grimmory:_flushDeferredCalls(current_fn, rerender_fn)
     local calls = self._deferred_calls or {}
     self._deferred_calls = {}
     if #calls == 0 then return end
@@ -1416,7 +1416,7 @@ function BookLore:_flushDeferredCalls(current_fn, rerender_fn)
     end)
 end
 
-function BookLore:_refreshDashboard()
+function Grimmory:_refreshDashboard()
     if not self.dashboard_widget then return end
     UIManager:close(self.dashboard_widget)
     self:showDashboard()
@@ -1428,7 +1428,7 @@ end
 -- @param card_w number: card width in pixels
 -- @param on_tap function: called when tapped
 -- @return widget, number: the card widget and its height
-function BookLore:buildCoverCard(book, card_w, on_tap)
+function Grimmory:buildCoverCard(book, card_w, on_tap)
     local cover_h = math.floor(card_w * 1.4)
     local meta = book.metadata or {}
     local title = meta.title or book.fileName or _("Untitled")
@@ -1531,7 +1531,7 @@ end
 -- @param max_cards number: max cards in the row
 -- @param on_tap function(book): called when a card is tapped
 -- @return widget: the row
-function BookLore:buildCoverRow(books, max_cards, on_tap)
+function Grimmory:buildCoverRow(books, max_cards, on_tap)
     local screen_w = Screen:getWidth()
     local padding = Size.padding.large
     local gap = Size.padding.default
@@ -1556,7 +1556,7 @@ function BookLore:buildCoverRow(books, max_cards, on_tap)
 end
 
 --- Build a section header ("Continue Reading", "Recently Added", etc.)
-function BookLore:buildSectionHeader(text)
+function Grimmory:buildSectionHeader(text)
     local screen_w = Screen:getWidth()
     local padding = Size.padding.large
     return FrameContainer:new{
@@ -1576,7 +1576,7 @@ end
 
 -- ─── Dashboard ───────────────────────────────────────────────────────
 
-function BookLore:showDashboard()
+function Grimmory:showDashboard()
     local books = self.cached_books
     if not books then return end
     self:_resetDeferred()
@@ -1686,7 +1686,7 @@ end
 
 --- Close all active views (dashboard, book list, filters, detail).
 -- Called before navigating from the sidebar to avoid stale widgets.
-function BookLore:closeAllViews()
+function Grimmory:closeAllViews()
     if self.detail_widget then
         UIManager:close(self.detail_widget)
         self.detail_widget = nil
@@ -1728,7 +1728,7 @@ function BookLore:closeAllViews()
     UIManager:setDirty("all", "full")
 end
 
-function BookLore:showSidebar()
+function Grimmory:showSidebar()
     local books = self.cached_books
     if not books then return end
     local screen_w = Screen:getWidth()
@@ -2008,13 +2008,13 @@ end
 
 -- ─── Book list ───────────────────────────────────────────────────────
 
-function BookLore:showBookList(base_set, title, back_callback)
+function Grimmory:showBookList(base_set, title, back_callback)
     local screen_w = Screen:getWidth()
     local screen_h = Screen:getHeight()
 
     -- Apply current view_state (sort + filters) to the base set.
-    local view_result = BookLoreView.applyView(base_set, self.view_state)
-    local n_active = BookLoreView.activeFilterCount(self.view_state)
+    local view_result = GrimmoryView.applyView(base_set, self.view_state)
+    local n_active = GrimmoryView.activeFilterCount(self.view_state)
 
     -- Build top bar
     local top_bar = self:buildTopBar(
@@ -2039,7 +2039,7 @@ function BookLore:showBookList(base_set, title, back_callback)
     -- Combined view-options row (sort + filter summary, single row).
     local sort_key = self.view_state.sort and self.view_state.sort.key or "title"
     local sort_dir = self.view_state.sort and self.view_state.sort.dir or "asc"
-    local sort_desc = BookLoreView.SORTS[sort_key] or BookLoreView.SORTS["title"]
+    local sort_desc = GrimmoryView.SORTS[sort_key] or GrimmoryView.SORTS["title"]
     local sort_label = _(sort_desc.label) .. (sort_dir == "asc" and " ↑" or " ↓")
     local filter_label = n_active > 0 and (_("Filter: ") .. n_active .. " ▾") or _("Filter ▾")
     table.insert(item_table, {
@@ -2152,7 +2152,7 @@ end
 
 -- ─── View options: Sort, Filter, Clear ───────────────────────────────
 
-function BookLore:showViewOptions(base_set, parent_title, back_callback)
+function Grimmory:showViewOptions(base_set, parent_title, back_callback)
     local navigated = false
 
     self.view_options_widget = InputContainer:new{
@@ -2203,7 +2203,7 @@ end
 
 -- ─── Sort menu ───────────────────────────────────────────────────────
 
-function BookLore:showSortMenu(base_set, parent_title, back_callback)
+function Grimmory:showSortMenu(base_set, parent_title, back_callback)
     local navigated = false
 
     self.sort_menu_widget = InputContainer:new{
@@ -2225,10 +2225,10 @@ function BookLore:showSortMenu(base_set, parent_title, back_callback)
     local item_table = {}
     for ki = 1, #ordered_keys do
         local k = ordered_keys[ki]
-        local sd = BookLoreView.SORTS[k]
+        local sd = GrimmoryView.SORTS[k]
         -- Locked is conditional: only list it if the data carries the field.
         if sd and not (k == "locked"
-                and not BookLoreView.isDimensionPresent(base_set, "locked")) then
+                and not GrimmoryView.isDimensionPresent(base_set, "locked")) then
             local is_active = (k == cur_key)
             local dir_arrow = ""
             if is_active then
@@ -2291,12 +2291,12 @@ end
 -- Persist the active filter selection so it survives a restart (sort + combine
 -- already persist). The table is plain nested booleans, so LuaSettings can
 -- serialize it directly.
-function BookLore:_saveFilters()
+function Grimmory:_saveFilters()
     self.settings:saveSetting("view_filters", self.view_state.filters)
     self.settings:flush()
 end
 
-function BookLore:showFilterMenu(base_set, parent_title, back_callback)
+function Grimmory:showFilterMenu(base_set, parent_title, back_callback)
     local navigated = false
 
     self.filter_menu_widget = InputContainer:new{
@@ -2322,7 +2322,7 @@ function BookLore:showFilterMenu(base_set, parent_title, back_callback)
             is_combine = true,
         }
         -- Pinned: Clear all filters (only while something is active).
-        if BookLoreView.activeFilterCount(self.view_state) > 0 then
+        if GrimmoryView.activeFilterCount(self.view_state) > 0 then
             rows[#rows+1] = {
                 text      = _("Clear all filters"),
                 mandatory = "",
@@ -2331,10 +2331,10 @@ function BookLore:showFilterMenu(base_set, parent_title, back_callback)
         end
         for ki = 1, #ordered_keys do
             local k = ordered_keys[ki]
-            local dd = BookLoreView.DIMENSIONS[k]
+            local dd = GrimmoryView.DIMENSIONS[k]
             -- metadata_match_score is conditional on the data carrying it.
             if dd and not (k == "metadata_match_score"
-                    and not BookLoreView.isDimensionPresent(base_set, k)) then
+                    and not GrimmoryView.isDimensionPresent(base_set, k)) then
                 local dim_filters = self.view_state.filters[k]
                 local n_selected = 0
                 if dim_filters then
@@ -2406,10 +2406,10 @@ end
 
 -- ─── Filter values (multi-select checkmark picker) ───────────────────
 
-function BookLore:showFilterValues(base_set, parent_title, back_callback, dim_key)
+function Grimmory:showFilterValues(base_set, parent_title, back_callback, dim_key)
     local navigated = false
 
-    local dd = BookLoreView.DIMENSIONS[dim_key]
+    local dd = GrimmoryView.DIMENSIONS[dim_key]
     if not dd then
         UIManager:show(InfoMessage:new{ text = _("Unknown filter dimension.") })
         self:showFilterMenu(base_set, parent_title, back_callback)
@@ -2422,7 +2422,7 @@ function BookLore:showFilterValues(base_set, parent_title, back_callback, dim_ke
     end
 
     local function build_value_rows()
-        local facets = BookLoreView.computeFacetCounts(base_set, self.view_state, dim_key)
+        local facets = GrimmoryView.computeFacetCounts(base_set, self.view_state, dim_key)
         local rows = {}
 
         -- Pinned: Select all / Clear
@@ -2476,7 +2476,7 @@ function BookLore:showFilterValues(base_set, parent_title, back_callback, dim_ke
             if item.is_empty then return end
             if item.is_select_all then
                 -- Select all values currently visible in facets
-                local facets = BookLoreView.computeFacetCounts(base_set, self.view_state, dim_key)
+                local facets = GrimmoryView.computeFacetCounts(base_set, self.view_state, dim_key)
                 for _, entry in ipairs(facets.ordered) do
                     self.view_state.filters[dim_key][entry.value] = true
                 end
@@ -2516,7 +2516,7 @@ end
 
 -- ─── Search ──────────────────────────────────────────────────────────
 
-function BookLore:showSearchWithin(books, parent_title, back_callback)
+function Grimmory:showSearchWithin(books, parent_title, back_callback)
     self.search_dialog = InputDialog:new{
         title = T(_("Search in %1"), parent_title),
         input_hint = _("Title, author, or series…"),
@@ -2569,7 +2569,7 @@ function BookLore:showSearchWithin(books, parent_title, back_callback)
     self.search_dialog:onShowKeyboard()
 end
 
-function BookLore:showSearch()
+function Grimmory:showSearch()
     self:showSearchWithin(
         self.cached_books,
         _("All Books"),
@@ -2580,21 +2580,21 @@ end
 -- ─── Download infrastructure ─────────────────────────────────────────
 
 -- Registry + destination-path logic lives in downloads.lua (the registry is
--- the contract booklore_sync reads to map file paths back to book ids);
+-- the contract grimmory_sync reads to map file paths back to book ids);
 -- these thin delegates keep the existing call sites unchanged.
-function BookLore:buildDestPath(book)
+function Grimmory:buildDestPath(book)
     return self.downloads:destPath(book)
 end
 
-function BookLore:getLocalPath(book)
+function Grimmory:getLocalPath(book)
     return self.downloads:localPath(self.server_url, book)
 end
 
-function BookLore:registerDownload(book, path)
+function Grimmory:registerDownload(book, path)
     self.downloads:register(self.server_url, book, path)
 end
 
-function BookLore:refreshDetailView(book)
+function Grimmory:refreshDetailView(book)
     -- Preserve scroll position across a same-book rebuild (Show more / Reveal),
     -- so the reader doesn't get bounced to the top. showBookDetail clamps and
     -- only restores when the book is unchanged.
@@ -2610,7 +2610,7 @@ function BookLore:refreshDetailView(book)
     UIManager:setDirty(self.detail_widget, "ui")
 end
 
-function BookLore:downloadBook(book)
+function Grimmory:downloadBook(book)
     if not self.session:isLoggedIn() then
         UIManager:show(InfoMessage:new{ text = _("Not logged in.") })
         return
@@ -2629,7 +2629,7 @@ end
 --- Run the download in an async subprocess: child streams to dest..".part",
 -- parent polls the part-file size for live progress and renames into place
 -- on success. Tapping the progress message cancels (kills the child).
-function BookLore:_startBookDownload(book)
+function Grimmory:_startBookDownload(book)
     local dest = self:buildDestPath(book)
     local tmp = dest .. ".part"
     local title = (book.metadata or {}).title or book.fileName or _("book")
@@ -2725,7 +2725,7 @@ function BookLore:_startBookDownload(book)
     end
 end
 
-function BookLore:openBook(file_path)
+function Grimmory:openBook(file_path)
     if self.detail_widget then
         UIManager:close(self.detail_widget)
         self.detail_widget = nil
@@ -2763,7 +2763,7 @@ local function readStatusLabel(status)
     return READ_STATUS_LABEL[status] or status
 end
 
---- Render an enriched, scrollable book-detail page (mirrors the BookLore web
+--- Render an enriched, scrollable book-detail page (mirrors the Grimmory web
 --- details page, reformatted for a grayscale e-ink Paperwhite).
 ---
 --- Layout: fixed top bar + a single vertical ScrollableContainer + a fixed
@@ -2773,7 +2773,7 @@ end
 --- "More in Series" / "More by Author" / "Reviews" are derived with ZERO extra
 --- network from self.cached_books and meta.bookReviews. Every field is
 --- nil-guarded; absent fields drop their row/section rather than error.
-function BookLore:showBookDetail(book)
+function Grimmory:showBookDetail(book)
     local meta = book.metadata or {}
     book.metadata = meta   -- ensure enrichment below persists on the cached book
 
@@ -3012,7 +3012,7 @@ function BookLore:showBookDetail(book)
     end
     -- External ratings, directly under "Your rating", each on its own row with
     -- a bundled SVG brand icon to the left of the name. No googleRating field
-    -- exists in the BookLore payload, so Google is not shown (only a googleId
+    -- exists in the Grimmory payload, so Google is not shown (only a googleId
     -- link, which is admin/non-reader).
     do
         local icon_sz = Screen:scaleBySize(22)
@@ -3080,7 +3080,7 @@ function BookLore:showBookDetail(book)
             ratingRow("hardcover", "H", "Hardcover  " .. pct(meta.hardcoverRating) .. "%" .. cnt(meta.hardcoverReviewCount))
         end
         if meta.rating then
-            ratingRow("booklore", "B", "BookLore  " .. fmtNum(meta.rating) .. "/5")
+            ratingRow("grimmory", "B", "Grimmory  " .. fmtNum(meta.rating) .. "/5")
         end
     end
 
@@ -3193,7 +3193,7 @@ function BookLore:showBookDetail(book)
         if book.readStatus then
             infoRow(_("Read Status"), readStatusLabel(book.readStatus))
         end
-        -- Progress shape varies by BookLore version: usually an object with a
+        -- Progress shape varies by Grimmory version: usually an object with a
         -- numeric .percentage, but some payloads return a bare number. Coerce
         -- defensively — never pass a non-number to string.format.
         local prog = book.epubProgress or book.pdfProgress
@@ -3244,7 +3244,7 @@ function BookLore:showBookDetail(book)
     -- ── 6. Description with Show more / Show less ───────────────────
     do
         local desc = meta.description
-        -- BookLore descriptions are HTML (<br />, <p>, entities, …); flatten to
+        -- Grimmory descriptions are HTML (<br />, <p>, entities, …); flatten to
         -- plain text with real line breaks so TextBoxWidget renders them.
         if type(desc) == "string" and desc ~= "" then
             desc = util.htmlToPlainTextIfHtml(desc)
@@ -3536,4 +3536,4 @@ function BookLore:showBookDetail(book)
         function() self:refreshDetailView(book) end)
 end
 
-return BookLore
+return Grimmory

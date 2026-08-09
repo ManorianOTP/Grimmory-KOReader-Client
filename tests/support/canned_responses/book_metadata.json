@@ -1,14 +1,20 @@
 {
   "id": 1,
   "title": "Test Book One",
-  "fileName": "test_book_one.epub",
-  "fileSizeKb": 1024,
+  "primaryFile": {
+    "id": 101,
+    "bookId": 1,
+    "fileName": "test_book_one.epub",
+    "fileSizeKb": 1024,
+    "bookType": "EPUB"
+  },
   "metadata": {
     "title": "Test Book One",
     "authors": ["Author A"],
     "publisher": "Test Publisher",
-    "publishedDate": "2024-01-01"
+    "publishedDate": "2024-01-01",
+    "coverUpdatedOn": "2026-08-01T10:00:00Z"
   },
   "epubProgress": null,
-  "_captured_against": "BookLore v0.1.0"
+  "_captured_against": "Grimmory v3.3.1"
 }

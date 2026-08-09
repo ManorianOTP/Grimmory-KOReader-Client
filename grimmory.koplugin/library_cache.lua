@@ -14,7 +14,7 @@
     the sync plugin already relies on.
 
     One file per (username, server_url) at DataStorage:getSettingsDir() ..
-    "/booklore_library_cache_<slug>.json": on a shared device, one account's
+    "/grimmory_library_cache_<slug>.json": on a shared device, one account's
     fetch must not destroy another account's offline library. Earlier versions
     wrote a single shared file; load() falls back to it (account-checked) so an
     upgraded device keeps its cache until the first fresh fetch, and save()
@@ -46,14 +46,14 @@ local function accountSlug(username, server_url)
 end
 
 function LibraryCache.path(username, server_url)
-    return DataStorage:getSettingsDir() .. "/booklore_library_cache_"
+    return DataStorage:getSettingsDir() .. "/grimmory_library_cache_"
         .. accountSlug(username, server_url) .. ".json"
 end
 
 -- The single shared file pre-per-account versions wrote. Read as a fallback
 -- by load(), deleted by save().
 function LibraryCache.legacy_path()
-    return DataStorage:getSettingsDir() .. "/booklore_library_cache.json"
+    return DataStorage:getSettingsDir() .. "/grimmory_library_cache.json"
 end
 
 -- Read and decode one snapshot file; nil on absence, corruption, or wrong
@@ -67,7 +67,7 @@ local function readSnapshot(path)
 
     local ok, snap = pcall(json.decode, raw)
     if not ok or type(snap) ~= "table" or type(snap.books) ~= "table" then
-        logger.warn("BookLore: library snapshot decode failed:", path)
+        logger.warn("Grimmory: library snapshot decode failed:", path)
         return nil
     end
     return snap
@@ -85,12 +85,12 @@ function LibraryCache.save(username, server_url, books, shelves, libraries)
         libraries  = libraries,
     })
     if not ok or type(encoded) ~= "string" then
-        logger.warn("BookLore: library snapshot encode failed:", tostring(encoded))
+        logger.warn("Grimmory: library snapshot encode failed:", tostring(encoded))
         return false
     end
     local f, open_err = io.open(LibraryCache.path(username, server_url), "w")
     if not f then
-        logger.warn("BookLore: library snapshot write failed:", tostring(open_err))
+        logger.warn("Grimmory: library snapshot write failed:", tostring(open_err))
         return false
     end
     f:write(encoded)
@@ -106,11 +106,11 @@ function LibraryCache.load(username, server_url)
     local snap = readSnapshot(LibraryCache.path(username, server_url))
         or readSnapshot(LibraryCache.legacy_path())
     if not snap then
-        logger.dbg("BookLore: no library snapshot on disk")
+        logger.dbg("Grimmory: no library snapshot on disk")
         return nil
     end
     if snap.username ~= username or snap.server_url ~= server_url then
-        logger.dbg("BookLore: library snapshot is for a different account, ignoring")
+        logger.dbg("Grimmory: library snapshot is for a different account, ignoring")
         return nil
     end
     return snap

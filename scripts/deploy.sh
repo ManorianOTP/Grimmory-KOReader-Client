@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Deploy both BookLore plugins to a jailbroken Kindle over scp.
+# Deploy both Grimmory plugins to a jailbroken Kindle over scp.
 # This is the "advanced" install path; most users should use the USB-copy
 # method in INSTALL.md instead.
 #
@@ -24,6 +24,6 @@ fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "Deploying both plugins to root@${IP}:${DEST} ..."
-scp -r "$ROOT/booklore.koplugin"      "root@${IP}:${DEST}/"
-scp -r "$ROOT/booklore_sync.koplugin" "root@${IP}:${DEST}/"
+scp -r "$ROOT/grimmory.koplugin"      "root@${IP}:${DEST}/"
+scp -r "$ROOT/grimmory_sync.koplugin" "root@${IP}:${DEST}/"
 echo "Done. Restart KOReader on the device to load the plugins."

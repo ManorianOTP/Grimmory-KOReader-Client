@@ -1,7 +1,7 @@
 --[[
   Stub WidgetContainer base class.
 
-  booklore_sync/main.lua calls WidgetContainer:extend{...} at module load.
+  grimmory_sync/main.lua calls WidgetContainer:extend{...} at module load.
   This stub provides a minimal extend() so module load succeeds without
   the real KOReader widget hierarchy.
 ]]

@@ -1,5 +1,5 @@
 --[[
-  Self-updater spec for booklore.koplugin/updater.lua.
+  Self-updater spec for grimmory.koplugin/updater.lua.
 
   The download/extract/swap pipeline runs for real: each test builds genuine
   plugin .tar.gz artifacts with the system tar, serves them (and the manifest)
@@ -70,7 +70,7 @@ describe("Updater", function()
     describe("construction", function()
         it("derives staging_dir as a sibling of plugins_root by default", function()
             local up = Updater.new{ plugins_root = "/x/plugins" }
-            assert.are.equal("/x/plugins/.booklore_update", up.staging_dir)
+            assert.are.equal("/x/plugins/.grimmory_update", up.staging_dir)
         end)
         it("honors an explicit staging_dir override", function()
             local up = Updater.new{ plugins_root = "/x/plugins", staging_dir = "/tmp/stage" }
@@ -81,10 +81,10 @@ describe("Updater", function()
     describe("parseManifest", function()
         it("accepts a well-formed manifest", function()
             local m, err = Updater.parseManifest(
-                '{"version":"1.1.0","plugins":[{"dir":"booklore.koplugin","url":"http://x"}]}')
+                '{"version":"1.1.0","plugins":[{"dir":"grimmory.koplugin","url":"http://x"}]}')
             assert.is_nil(err)
             assert.are.equal("1.1.0", m.version)
-            assert.are.equal("booklore.koplugin", m.plugins[1].dir)
+            assert.are.equal("grimmory.koplugin", m.plugins[1].dir)
         end)
         it("rejects malformed JSON and missing fields", function()
             assert.is_nil((Updater.parseManifest("not json")))
@@ -108,7 +108,7 @@ describe("Updater", function()
     end
 
     local function install_plugins(root, version)
-        local dirs = { "booklore.koplugin", "booklore_sync.koplugin" }
+        local dirs = { "grimmory.koplugin", "grimmory_sync.koplugin" }
         for i = 1, #dirs do
             os.execute("mkdir -p '" .. root .. "/" .. dirs[i] .. "'")
             write_file(root .. "/" .. dirs[i] .. "/_meta.lua",
@@ -121,7 +121,7 @@ describe("Updater", function()
         local opts = {
             request = require("socket.http").request,
             plugins_root = root,
-            staging_dir = root .. "/.booklore_update",
+            staging_dir = root .. "/.grimmory_update",
             min_artifact_bytes = 16,
         }
         for k, v in pairs(overrides or {}) do opts[k] = v end
@@ -130,14 +130,14 @@ describe("Updater", function()
 
     -- Serve both artifacts and return a manifest table pointing at them.
     local function serve_release(version, extra)
-        local sync_tgz = build_plugin_tgz(version, "booklore_sync.koplugin")
-        local bl_tgz = build_plugin_tgz(version, "booklore.koplugin")
+        local sync_tgz = build_plugin_tgz(version, "grimmory_sync.koplugin")
+        local bl_tgz = build_plugin_tgz(version, "grimmory.koplugin")
         http_handle = spec_helper.start_http_fixture({
             { path = "/sync.tgz", body_file = sync_tgz },
             { path = "/bl.tgz", body_file = bl_tgz },
         })
-        local sync = { dir = "booklore_sync.koplugin", url = http_handle.url("/sync.tgz") }
-        local bl = { dir = "booklore.koplugin", url = http_handle.url("/bl.tgz") }
+        local sync = { dir = "grimmory_sync.koplugin", url = http_handle.url("/sync.tgz") }
+        local bl = { dir = "grimmory.koplugin", url = http_handle.url("/bl.tgz") }
         for k, v in pairs(extra or {}) do
             if k == "sync" then for kk, vv in pairs(v) do sync[kk] = vv end end
             if k == "bl" then for kk, vv in pairs(v) do bl[kk] = vv end end
@@ -158,20 +158,20 @@ describe("Updater", function()
             assert.are.equal("1.1.0", ver)
 
             assert.are.equal("1.1.0", up:installedVersion())
-            assert.are.equal("1.1.0", up:getInstalledVersion("booklore_sync.koplugin"))
+            assert.are.equal("1.1.0", up:getInstalledVersion("grimmory_sync.koplugin"))
             -- new content really landed (main.lua replaced)
-            local main = assert(io.open(root .. "/booklore.koplugin/main.lua")):read("*a")
+            local main = assert(io.open(root .. "/grimmory.koplugin/main.lua")):read("*a")
             assert.matches("1.1.0", main)
             -- staging + .new/.old all cleaned up
-            assert.are_not.equal(0, os.execute("test -d '" .. root .. "/.booklore_update'"))
-            assert.are_not.equal(0, os.execute("test -e '" .. root .. "/booklore.koplugin.new'"))
-            assert.are_not.equal(0, os.execute("test -e '" .. root .. "/booklore.koplugin.old'"))
+            assert.are_not.equal(0, os.execute("test -d '" .. root .. "/.grimmory_update'"))
+            assert.are_not.equal(0, os.execute("test -e '" .. root .. "/grimmory.koplugin.new'"))
+            assert.are_not.equal(0, os.execute("test -e '" .. root .. "/grimmory.koplugin.old'"))
         end)
 
         it("verifies a matching checksum and rejects a mismatch", function()
             local root = spec_helper._tmp_dir .. "/plugins"
             install_plugins(root, "1.0.0")
-            -- Inject a wrong sha256 for the booklore artifact.
+            -- Inject a wrong sha256 for the grimmory artifact.
             local manifest = serve_release("1.1.0", { bl = { sha256 = "deadbeef" } })
             local up = make_updater(root, {
                 hash_file = function() return "cafef00d" end,  -- never matches
@@ -181,22 +181,22 @@ describe("Updater", function()
             assert.matches("checksum mismatch", err)
             -- nothing swapped; still on the old version, no .new left behind
             assert.are.equal("1.0.0", up:installedVersion())
-            assert.are_not.equal(0, os.execute("test -e '" .. root .. "/booklore.koplugin.new'"))
+            assert.are_not.equal(0, os.execute("test -e '" .. root .. "/grimmory.koplugin.new'"))
         end)
 
         it("rejects an archive whose _meta version disagrees with the manifest", function()
             local root = spec_helper._tmp_dir .. "/plugins"
             install_plugins(root, "1.0.0")
             -- Manifest claims 1.1.0 but the artifacts are built as 9.9.9.
-            local sync_tgz = build_plugin_tgz("9.9.9", "booklore_sync.koplugin")
-            local bl_tgz = build_plugin_tgz("9.9.9", "booklore.koplugin")
+            local sync_tgz = build_plugin_tgz("9.9.9", "grimmory_sync.koplugin")
+            local bl_tgz = build_plugin_tgz("9.9.9", "grimmory.koplugin")
             http_handle = spec_helper.start_http_fixture({
                 { path = "/sync.tgz", body_file = sync_tgz },
                 { path = "/bl.tgz", body_file = bl_tgz },
             })
             local manifest = { version = "1.1.0", plugins = {
-                { dir = "booklore_sync.koplugin", url = http_handle.url("/sync.tgz") },
-                { dir = "booklore.koplugin", url = http_handle.url("/bl.tgz") },
+                { dir = "grimmory_sync.koplugin", url = http_handle.url("/sync.tgz") },
+                { dir = "grimmory.koplugin", url = http_handle.url("/bl.tgz") },
             } }
             local up = make_updater(root)
             local ok, err = up:performUpdate(manifest)
@@ -210,15 +210,15 @@ describe("Updater", function()
             install_plugins(root, "1.0.0")
             http_handle = spec_helper.start_http_fixture({})  -- serves nothing
             local manifest = { version = "1.1.0", plugins = {
-                { dir = "booklore_sync.koplugin", url = http_handle.url("/sync.tgz") },
-                { dir = "booklore.koplugin", url = http_handle.url("/bl.tgz") },
+                { dir = "grimmory_sync.koplugin", url = http_handle.url("/sync.tgz") },
+                { dir = "grimmory.koplugin", url = http_handle.url("/bl.tgz") },
             } }
             local up = make_updater(root)
             local ok, err = up:performUpdate(manifest)
             assert.is_nil(ok)
             assert.matches("download failed", err)
             assert.are.equal("1.0.0", up:installedVersion())
-            assert.are_not.equal(0, os.execute("test -d '" .. root .. "/.booklore_update'"))
+            assert.are_not.equal(0, os.execute("test -d '" .. root .. "/.grimmory_update'"))
         end)
     end)
 
@@ -228,7 +228,7 @@ describe("Updater", function()
             install_plugins(root, "1.0.0")
             http_handle = spec_helper.start_http_fixture({
                 { path = "/manifest.json",
-                  body = '{"version":"1.2.0","plugins":[{"dir":"booklore.koplugin","url":"http://x"}]}' },
+                  body = '{"version":"1.2.0","plugins":[{"dir":"grimmory.koplugin","url":"http://x"}]}' },
             })
             local up = make_updater(root, { manifest_url = http_handle.url("/manifest.json") })
             local res, err = up:checkForUpdate()
@@ -243,7 +243,7 @@ describe("Updater", function()
             install_plugins(root, "1.2.0")
             http_handle = spec_helper.start_http_fixture({
                 { path = "/manifest.json",
-                  body = '{"version":"1.2.0","plugins":[{"dir":"booklore.koplugin","url":"http://x"}]}' },
+                  body = '{"version":"1.2.0","plugins":[{"dir":"grimmory.koplugin","url":"http://x"}]}' },
             })
             local up = make_updater(root, { manifest_url = http_handle.url("/manifest.json") })
             local res = up:checkForUpdate()
@@ -262,7 +262,7 @@ describe("Updater", function()
     end)
 
     describe("commitStaged ordering", function()
-        it("commits booklore_sync before booklore (self last)", function()
+        it("commits grimmory_sync before grimmory (self last)", function()
             local root = "/p"
             local exec, calls = recording_exec(function(cmd)
                 return "", 0  -- every `test -d` succeeds -> both have .new + live
@@ -270,9 +270,9 @@ describe("Updater", function()
             local up = Updater.new{ plugins_root = root, exec = exec }
             assert.is_true(up:commitStaged())
             local sync_i = first_index(calls,
-                "mv '/p/booklore_sync%.koplugin%.new' '/p/booklore_sync%.koplugin'")
+                "mv '/p/grimmory_sync%.koplugin%.new' '/p/grimmory_sync%.koplugin'")
             local bl_i = first_index(calls,
-                "mv '/p/booklore%.koplugin%.new' '/p/booklore%.koplugin'")
+                "mv '/p/grimmory%.koplugin%.new' '/p/grimmory%.koplugin'")
             assert.is_truthy(sync_i)
             assert.is_truthy(bl_i)
             assert.is_true(sync_i < bl_i)
@@ -283,34 +283,34 @@ describe("Updater", function()
         it("installs a leftover .new (download done, swap interrupted)", function()
             local root = spec_helper._tmp_dir .. "/plugins"
             install_plugins(root, "1.0.0")
-            -- Simulate a promoted-but-not-committed booklore.koplugin.new at 1.1.0
-            os.execute("mkdir -p '" .. root .. "/booklore.koplugin.new'")
-            write_file(root .. "/booklore.koplugin.new/_meta.lua",
+            -- Simulate a promoted-but-not-committed grimmory.koplugin.new at 1.1.0
+            os.execute("mkdir -p '" .. root .. "/grimmory.koplugin.new'")
+            write_file(root .. "/grimmory.koplugin.new/_meta.lua",
                 'return { version = "1.1.0" }\n')
             local up = make_updater(root)
             up:reconcile()
-            assert.are.equal("1.1.0", up:getInstalledVersion("booklore.koplugin"))
-            assert.are_not.equal(0, os.execute("test -e '" .. root .. "/booklore.koplugin.new'"))
+            assert.are.equal("1.1.0", up:getInstalledVersion("grimmory.koplugin"))
+            assert.are_not.equal(0, os.execute("test -e '" .. root .. "/grimmory.koplugin.new'"))
         end)
 
         it("rolls back from .old when live is missing and there is no .new", function()
             local root = spec_helper._tmp_dir .. "/plugins"
             install_plugins(root, "1.0.0")
-            os.execute("mv '" .. root .. "/booklore.koplugin' '" .. root .. "/booklore.koplugin.old'")
+            os.execute("mv '" .. root .. "/grimmory.koplugin' '" .. root .. "/grimmory.koplugin.old'")
             local up = make_updater(root)
             up:reconcile()
-            assert.are.equal("1.0.0", up:getInstalledVersion("booklore.koplugin"))
-            assert.are_not.equal(0, os.execute("test -e '" .. root .. "/booklore.koplugin.old'"))
+            assert.are.equal("1.0.0", up:getInstalledVersion("grimmory.koplugin"))
+            assert.are_not.equal(0, os.execute("test -e '" .. root .. "/grimmory.koplugin.old'"))
         end)
 
         it("cleans up a leftover .old when live already exists", function()
             local root = spec_helper._tmp_dir .. "/plugins"
             install_plugins(root, "1.0.0")
-            os.execute("mkdir -p '" .. root .. "/booklore.koplugin.old'")
+            os.execute("mkdir -p '" .. root .. "/grimmory.koplugin.old'")
             local up = make_updater(root)
             up:reconcile()
-            assert.are_not.equal(0, os.execute("test -e '" .. root .. "/booklore.koplugin.old'"))
-            assert.are.equal("1.0.0", up:getInstalledVersion("booklore.koplugin"))
+            assert.are_not.equal(0, os.execute("test -e '" .. root .. "/grimmory.koplugin.old'"))
+            assert.are.equal("1.0.0", up:getInstalledVersion("grimmory.koplugin"))
         end)
     end)
 
@@ -320,14 +320,14 @@ describe("Updater", function()
             install_plugins(root, "1.0.0")
             local up = make_updater(root)
             assert.is_true(up:uninstall())
-            assert.are_not.equal(0, os.execute("test -d '" .. root .. "/booklore.koplugin'"))
-            assert.are_not.equal(0, os.execute("test -d '" .. root .. "/booklore_sync.koplugin'"))
+            assert.are_not.equal(0, os.execute("test -d '" .. root .. "/grimmory.koplugin'"))
+            assert.are_not.equal(0, os.execute("test -d '" .. root .. "/grimmory_sync.koplugin'"))
         end)
 
         it("keeps settings by default and purges them only when asked", function()
             local root = spec_helper._tmp_dir .. "/plugins"
             install_plugins(root, "1.0.0")
-            local settings = spec_helper._tmp_dir .. "/booklore.lua"
+            local settings = spec_helper._tmp_dir .. "/grimmory.lua"
             write_file(settings, "return {}\n")
 
             local up = make_updater(root)
