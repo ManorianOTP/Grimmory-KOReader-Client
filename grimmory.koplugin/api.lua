@@ -225,6 +225,9 @@ local function collectPagedBooks(api, server_url, token, endpoint, first)
     if not total_pages then
         return nil, "paginated books response omitted totalPages; refusing partial library"
     end
+    if first_number ~= 0 then
+        return nil, "books first page number mismatch: expected 0"
+    end
 
     local books = normalizeBookList(first)
     for page = first_number + 1, total_pages - 1 do

@@ -195,6 +195,23 @@ describe("GrimmoryApi", function()
             assert.matches("omitted totalPages", err)
         end)
 
+        it("rejects a first page whose response number is not zero", function()
+            fixture = spec_helper.start_http_fixture({
+                {
+                    method = "GET",
+                    path = "/api/v1/books/page",
+                    status = 200,
+                    headers = { ["Content-Type"] = "application/json" },
+                    expect_query = { page = "0", size = "100" },
+                    body = [[{"content":[{"id":2}],"page":{"number":1,"size":100,"totalElements":2,"totalPages":2}}]],
+                    repeat_ = 1,
+                },
+            })
+            local data, err = GrimmoryApi:getBooks(fixture.base_url(), "test-token")
+            assert.is_nil(data)
+            assert.matches("first page number mismatch", err)
+        end)
+
         it("keeps a BookLore-era flat primary file downloadable", function()
             local book = GrimmoryApi.normalizeBook({
                 id = 77,
