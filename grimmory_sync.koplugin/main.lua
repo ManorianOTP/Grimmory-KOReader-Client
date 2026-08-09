@@ -171,20 +171,38 @@ end
 -- the format-specific fallback remains correct for their primary download.
 local function buildProgressPayload(file_id, file_type, percentage, position_data)
     file_type = normalizeFileType(file_type)
+    local exact_position = position_data
+    if file_type == "EPUB" then
+        if type(position_data) ~= "string"
+                or not position_data:match("^epubcfi%(.+%)$") then
+            return nil
+        end
+    elseif file_type == "PDF" or file_type == "CBX" then
+        local page = tonumber(position_data)
+        if not page or page ~= page or page == math.huge or page == -math.huge
+                or page < 0 or page ~= math.floor(page) then
+            return nil
+        end
+        exact_position = tostring(page)
+    end
     if file_id then
         return {
             fileProgress = {
                 bookFileId = file_id,
-                positionData = position_data,
+                positionData = exact_position,
                 progressPercent = percentage,
             },
         }
+    elseif file_type == "EPUB" then
+        return { epubProgress = { cfi = exact_position, percentage = percentage } }
     elseif EBOOK_TYPES[file_type] then
-        return { epubProgress = { cfi = position_data, percentage = percentage } }
+        -- KOReader does not expose an EPUB CFI for FB2/MOBI/AZW3. Grimmory
+        -- can still safely update their percentage without erasing a position.
+        return { epubProgress = { percentage = percentage } }
     elseif file_type == "PDF" then
-        return { pdfProgress = { page = tonumber(position_data), percentage = percentage } }
+        return { pdfProgress = { page = tonumber(exact_position), percentage = percentage } }
     elseif file_type == "CBX" then
-        return { cbxProgress = { page = tonumber(position_data), percentage = percentage } }
+        return { cbxProgress = { page = tonumber(exact_position), percentage = percentage } }
     end
     return nil
 end
@@ -194,7 +212,8 @@ local function httpPushProgress(server_url, book_id, file_id, file_type,
     if not book_id or not server_url then return { success = false, auth = credentials } end
     local payload = buildProgressPayload(file_id, file_type, percentage, position_data)
     if not payload then
-        logger.warn("GrimmorySync: unsupported progress type:", tostring(file_type))
+        logger.warn("GrimmorySync: invalid/unsupported progress payload; retaining queue:",
+            tostring(file_type), tostring(position_data))
         return { success = false, auth = credentials }
     end
     local response = requestWithAuth(server_url, credentials,

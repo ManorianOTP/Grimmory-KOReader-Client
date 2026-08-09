@@ -352,12 +352,57 @@ describe("Grimmory App progress wire contract", function()
     end)
 
     it("builds type-correct primary-file fallbacks for existing Grimmory entries", function()
-        assert.same({ epubProgress = { cfi = "cfi", percentage = 10 } },
-            GrimmorySync._buildProgressPayload(nil, "EPUB", 10, "cfi"))
+        local cfi_value = "epubcfi(/6/4[chapter]!/4/2/1:7)"
+        assert.same({ epubProgress = { cfi = cfi_value, percentage = 10 } },
+            GrimmorySync._buildProgressPayload(nil, "EPUB", 10, cfi_value))
         assert.same({ pdfProgress = { page = 7, percentage = 20 } },
             GrimmorySync._buildProgressPayload(nil, "PDF", 20, "7"))
         assert.same({ cbxProgress = { page = 9, percentage = 30 } },
             GrimmorySync._buildProgressPayload(nil, "CBX", 30, "9"))
+    end)
+
+    it("fails closed on invalid selected-file EPUB/PDF/CBX positions", function()
+        for _, case in ipairs({
+            { file_id = 501, file_type = "EPUB" },
+            { file_id = 502, file_type = "EPUB", position = "   " },
+            { file_id = 503, file_type = "EPUB", position = "not-a-cfi" },
+            { file_id = 601, file_type = "PDF", position = "page-17" },
+            { file_id = 602, file_type = "PDF", position = "1.5" },
+            { file_id = 701, file_type = "CBX" },
+            { file_id = 702, file_type = "CBX", position = "-1" },
+        }) do
+            assert.is_nil(GrimmorySync._buildProgressPayload(
+                case.file_id, case.file_type, 42, case.position),
+                case.file_type .. " must not erase its exact web-reader position")
+        end
+
+        assert.same({
+            fileProgress = { bookFileId = 801, progressPercent = 42 },
+        }, GrimmorySync._buildProgressPayload(801, "FB2", 42, nil))
+    end)
+
+    it("fails closed on invalid primary-file EPUB/PDF/CBX fallbacks", function()
+        assert.is_nil(GrimmorySync._buildProgressPayload(nil, "EPUB", 42, nil))
+        assert.is_nil(GrimmorySync._buildProgressPayload(nil, "PDF", 42, "unknown"))
+        assert.is_nil(GrimmorySync._buildProgressPayload(nil, "CBX", 42, "2.5"))
+        assert.same({ epubProgress = { percentage = 42 } },
+            GrimmorySync._buildProgressPayload(nil, "MOBI", 42, nil))
+    end)
+
+    it("retains selected-file and fallback queue slots when exact capture fails", function()
+        fixture = spec_helper.start_http_fixture({})
+        local sync = make_contract_sync("/books/test.epub", false, 0.42)
+        sync.file_id, sync.file_type = 501, "EPUB"
+        local server = fixture.base_url()
+        sync.queue:enqueue(99, server, 42, "   ", "alice", 501, "EPUB")
+        sync.queue:enqueue(99, server, 55, "not-a-page", "alice", nil, "PDF")
+
+        sync:_drainAll()
+
+        assert.equals(2, sync.queue:size(),
+            "invalid position capture must not make a destructive progress request")
+        assert.not_nil(sync.queue:peek(99, "alice", server, 501, "EPUB"))
+        assert.not_nil(sync.queue:peek(99, "alice", server, nil, "PDF"))
     end)
 
     local function set_credentials(token, refresh_token, token_time)
@@ -709,10 +754,15 @@ describe("GrimmorySync state machine", function()
             sync.enabled = true
             sync.book_id = 99
             sync.pulled = false
-            sync.has_pages = true
+            sync.has_pages = false
+            sync.file_type = "EPUB"
             sync.push_in_progress = false
             sync.awaiting_decision = false
-            sync.cfi = nil
+            sync.cfi = {
+                xpointerToCFI = function()
+                    return "epubcfi(/6/4[chapter]!/4/2/1:7)"
+                end,
+            }
 
             -- pullProgress sees server at 80%, local at 0% => sets awaiting_decision=true
             sync:pullProgress()
@@ -933,7 +983,8 @@ describe("GrimmorySync offline queue", function()
         sync.awaiting_decision = false
         sync.cfi = nil
         sync.queue = require("queue").new{}
-        sync.queue:enqueue(99, fixture.base_url(), 42.0, nil)
+        sync.queue:enqueue(99, fixture.base_url(), 42.0,
+            "epubcfi(/6/4[chapter]!/4/2/1:7)", nil, nil, "EPUB")
 
         assert.equals(1, sync.queue:size(), "pre-populated queue should have one entry")
 
@@ -1073,7 +1124,8 @@ describe("GrimmorySync token-independent capture & per-account drain", function(
         sync.has_pages = true
         sync.awaiting_decision = false
         sync.queue = require("queue").new{}
-        sync.queue:enqueue(88, fixture.base_url(), 30.0, nil, "alice")
+        sync.queue:enqueue(88, fixture.base_url(), 30.0,
+            "epubcfi(/6/4[chapter]!/4/2/1:7)", "alice", nil, "EPUB")
         sync.queue:enqueue(77, fixture.base_url(), 60.0, nil, "bob")
 
         sync:_drainAll()
@@ -1178,7 +1230,8 @@ describe("GrimmorySync token-independent capture & per-account drain", function(
         sync.queue = require("queue").new{}
         -- Pre-upgrade on-disk entry for the book currently open.
         sync.queue._store.data["99"] = { book_id = 99, server_url = fixture.base_url(),
-            percentage = 33.0, enqueued_at = 0 }
+            percentage = 33.0, cfi = "epubcfi(/6/4[chapter]!/4/2/1:7)",
+            enqueued_at = 0 }
         sync.queue._store:flush()
 
         sync:_drainAll()
@@ -1212,7 +1265,8 @@ describe("GrimmorySync token-independent capture & per-account drain", function(
         sync.has_pages = true
         sync.awaiting_decision = false
         sync.queue = require("queue").new{}
-        sync.queue:enqueue(55, fixture.base_url(), 12.0, nil, nil)  -- legacy: no username
+        sync.queue:enqueue(55, fixture.base_url(), 12.0,
+            "epubcfi(/6/4[chapter]!/4/2/1:7)", nil, nil, "EPUB")
 
         sync:_drainAll()
 
