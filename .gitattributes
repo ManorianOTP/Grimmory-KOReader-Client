@@ -1,0 +1,5 @@
+# Keep text files stable across Windows and WSL checkouts.
+* text=auto
+
+# WSL/Linux executes these directly; CRLF breaks their shebangs.
+*.sh text eol=lf
