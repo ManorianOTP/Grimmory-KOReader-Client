@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit luarocks python3
+          sudo luarocks install busted
+          sudo luarocks install dkjson
+          sudo luarocks install luasocket
+          sudo luarocks install luafilesystem
+      - name: Test and compile Lua
+        run: scripts/ci-check.sh
+      - name: Build and validate release archives
+        run: |
+          version="$(sed -n -E 's/.*version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' grimmory.koplugin/_meta.lua)"
+          scripts/release.sh "$version"

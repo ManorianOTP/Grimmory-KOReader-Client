@@ -3173,7 +3173,7 @@ function Grimmory:showBookDetail(book)
             ratingRow("hardcover", "H", "Hardcover  " .. pct(meta.hardcoverRating) .. "%" .. cnt(meta.hardcoverReviewCount))
         end
         if meta.rating then
-            ratingRow("grimmory", "B", "Grimmory  " .. fmtNum(meta.rating) .. "/5")
+            ratingRow("grimmory", "G", "Grimmory  " .. fmtNum(meta.rating) .. "/5")
         end
     end
 

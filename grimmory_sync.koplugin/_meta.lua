@@ -5,5 +5,5 @@ return {
     -- grimmory.koplugin/_meta.lua: the updater ships both plugins per release.
     version = "2.0.0",
     fullname = _("Grimmory Sync"),
-    description = _("Syncs reading progress with Grimmory via kosync protocol"),
+    description = _("Syncs reading progress with Grimmory"),
 }

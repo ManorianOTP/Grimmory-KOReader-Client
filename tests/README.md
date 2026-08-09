@@ -30,7 +30,7 @@ KOReader runtime modules (`UIManager`, `ffi/archiver`, `logger`, `datastorage`, 
 
 **luajit, not PUC-Lua.** KOReader's runtime VM is LuaJIT 2.1. Running under luajit ensures FFI-free plugin code paths execute under the same VM as on device.
 
-**No line-coverage threshold, no CI.** The three covered subsystems account for every regression in recent commit history. KOReader UI widgets and the Tailscale onboarding flow are out of scope: they require extensive widget mocking for marginal value and are cheaply verified on device. A numeric coverage target would incentivize testing trivial getters over high-value scenarios. CI is explicitly deferred until contributor count or regression rate justifies the infrastructure.
+**No numeric line-coverage threshold; CI enforces functional gates.** KOReader UI widgets remain out of scope because they require extensive widget mocking for marginal value and are more reliably verified on device. A numeric coverage target would incentivize testing trivial getters over high-value scenarios. GitHub Actions runs `scripts/ci-check.sh`, which executes the complete off-device suite, compiles every plugin Lua file with LuaJIT, and rejects stale BookLore branding. The workflow also builds both plugin archives and validates their manifest, checksums, sizes, roots, metadata versions, and required entry points. On-device verification remains the final gate for runtime-coupled UI flows.
 
 ## Invariants
 

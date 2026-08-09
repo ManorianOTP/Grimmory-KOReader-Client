@@ -1,7 +1,7 @@
 # Installing Grimmory KOReader Client
 
-You install both plugins once. After that, updates happen in-app
-(**Menu ▸ Grimmory ▸ Check for updates**) — you won't need to copy files again.
+You install both plugins once. Grimmory v2 and later can then update in-app
+(**Menu ▸ Grimmory ▸ Check for updates**) after a public release is available.
 
 Both plugins must end up here on the device:
 
@@ -13,6 +13,29 @@ koreader/plugins/grimmory_sync.koplugin/
 On a Kindle that's `/mnt/us/koreader/plugins/`.
 
 Pick whichever method suits you. **Method A needs no command line.**
+
+## Replacing the old BookLore plugins
+
+This is a clean installation, not an in-place update from BookLore. The old
+updater cannot safely rename the plugin pair, and KOReader can load both pairs
+if the old directories are left installed.
+
+Before copying Grimmory, exit KOReader and remove exactly these two old plugin
+code directories from the Kindle:
+
+```
+/mnt/us/koreader/plugins/booklore.koplugin
+/mnt/us/koreader/plugins/booklore_sync.koplugin
+```
+
+Do not use a wildcard and do not remove the broader
+`/mnt/us/koreader/plugins` directory. Removing the two paths above only removes
+the old plugin code. It does not delete downloaded books or server-side data.
+
+Legacy client state is intentionally not migrated. You will log in again, and
+old BookLore settings, cache, download-registry, and queued-progress files are
+not consumed by Grimmory. Leave those data files in place unless you separately
+choose to remove them after verifying the new installation.
 
 ---
 
@@ -35,10 +58,10 @@ That's it — go to [the README quick start](README.md#quick-start) to log in.
 
 ## Method B — via the community AppStore plugin (on-device)
 
-If you already use [`appstore.koplugin`](https://github.com/omer-faruq/appstore.koplugin),
-it can discover and install Grimmory on-device (this repo is tagged with the
-`koreader-plugin` GitHub topic). Open **Tools ▸ App Store**, find Grimmory,
-and install. The AppStore can also keep it updated.
+This method becomes available only after the repository is public, tagged with
+the `koreader-plugin` topic, and has a published Grimmory release containing
+both plugin archives. Until then, use USB copy or scp. Once available, open
+**Tools ▸ App Store**, find Grimmory, and install it.
 
 ---
 

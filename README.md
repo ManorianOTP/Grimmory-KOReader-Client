@@ -25,8 +25,9 @@ back to the server automatically.
   password (shared/household devices).
 - **Tailscale onboarding** — install and connect Tailscale from inside the app
   to reach a server that isn't on your local network.
-- **In-app updates** — **Grimmory ▸ Check for updates** downloads and installs
-  new versions of both plugins for you. No more scp after the first install.
+- **In-app updates** — after a public Grimmory release is available,
+  **Grimmory ▸ Check for updates** downloads, checksum-verifies, and installs
+  the complete two-plugin release as one lockstep update.
 
 ## Prerequisites
 
@@ -59,9 +60,14 @@ your phone to authenticate.
 
 ## Updating
 
-After the first install, you never need to copy files again:
+After installing Grimmory v2 or later, and once a public release is available:
 **Menu ▸ Grimmory ▸ Check for updates**. If a newer version is published it is
 downloaded, verified, and installed for both plugins; restart KOReader to apply.
+
+The old BookLore updater is not a supported route to Grimmory. Existing
+BookLore users must follow the exact clean-install transition in
+[INSTALL.md](INSTALL.md#replacing-the-old-booklore-plugins) so KOReader does not
+load both plugin pairs.
 
 ## Settings
 
@@ -77,7 +83,9 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for the common issues
 ## For developers
 
 The off-device test harness is documented in [tests/README.md](tests/README.md).
-Run the tests with `scripts/test.sh`. To cut a release, see `scripts/release.sh`.
+Run the tests with `scripts/test.sh` or the complete CI gate with
+`scripts/ci-check.sh`. To build and validate exactly two release artifacts, run
+`scripts/release.sh <version>`.
 
 ## License
 

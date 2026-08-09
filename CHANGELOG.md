@@ -20,13 +20,14 @@ First Grimmory-native release.
 - This is intentionally a clean install with no migration of older client
   settings or plugin data.
 
-## [1.0.0] - 2026-06-15
+## [1.0.0] - 2026-06-15 (historical BookLore release)
 
-Initial public release: a pair of KOReader plugins that turn a jailbroken Kindle
-into a client for a self-hosted [Grimmory](https://github.com/grimmory-tools/grimmory)
-server.
+Version 1.0.0 was published under the old `booklore.koplugin` and
+`booklore_sync.koplugin` names. Its release assets are not Grimmory packages and
+cannot be updated in place to v2; use the clean-install transition in
+[INSTALL.md](INSTALL.md#replacing-the-old-booklore-plugins).
 
-### grimmory.koplugin
+### booklore.koplugin
 
 - Log in to a Grimmory server (URL plus username/password) with multi-account
   support and silent access-token refresh.
@@ -46,7 +47,7 @@ server.
   (sha256), and swaps both plugins from a GitHub release, with crash-safe staging
   and boot-time reconciliation.
 
-### grimmory_sync.koplugin
+### booklore_sync.koplugin
 
 - Bidirectional reading-progress sync with Grimmory via the kosync protocol,
   translating between KOReader XPointer and Grimmory CFI positions.
