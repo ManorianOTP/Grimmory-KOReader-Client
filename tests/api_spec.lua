@@ -59,9 +59,8 @@ describe("GrimmoryApi", function()
             })
             local token, refresh, err = GrimmoryApi:login(fixture.base_url(), "user", "pass")
             assert.is_nil(err, tostring(err))
-            assert.is_string(token)
-            assert.is_string(refresh)
-            assert.truthy(token:match("^eyJ"))  -- JWT prefix
+            assert.equals("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0dXNlciJ9.stub", token)
+            assert.equals("refresh-stub-token-abc123", refresh)
         end)
 
         it("surfaces a typed error on 401", function()
@@ -98,8 +97,8 @@ describe("GrimmoryApi", function()
             })
             local token, refresh, err = GrimmoryApi:refreshToken(fixture.base_url(), "old-refresh-token")
             assert.is_nil(err, tostring(err))
-            assert.is_string(token)
-            assert.is_string(refresh)
+            assert.equals("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0dXNlciIsImV4cCI6OTk5OTk5OTk5OX0.new", token)
+            assert.equals("new-refresh-token-xyz789", refresh)
         end)
     end)
 
@@ -145,6 +144,13 @@ describe("GrimmoryApi", function()
             assert.equals(201, data[1].downloadFiles[2].id)
             assert.equals("PDF", data[1].downloadFiles[2].bookType)
             assert.is_true(data[1].downloadEligible)
+            assert.same({ 101, 201 }, {
+                data[1].bookFiles[1].id, data[1].bookFiles[2].id,
+            })
+            assert.same({ 101, 201 }, {
+                data[1].downloadFiles[1].id, data[1].downloadFiles[2].id,
+            })
+            assert.same({ 2 }, { data[2].downloadFiles[1].bookId })
         end)
 
         it("traverses every native Grimmory page", function()
@@ -212,6 +218,55 @@ describe("GrimmoryApi", function()
             assert.matches("first page number mismatch", err)
         end)
 
+        it("rejects a duplicate book identity across pages", function()
+            fixture = spec_helper.start_http_fixture({
+                {
+                    method = "GET", path = "/api/v1/books/page", status = 200,
+                    expect_query = { page = "0", size = "100" },
+                    body = [[{"content":[{"id":1}],"page":{"number":0,"size":100,"totalElements":2,"totalPages":2}}]],
+                    repeat_ = 1,
+                },
+                {
+                    method = "GET", path = "/api/v1/books/page", status = 200,
+                    expect_query = { page = "1", size = "100" },
+                    body = [[{"content":[{"id":1}],"page":{"number":1,"size":100,"totalElements":2,"totalPages":2}}]],
+                },
+            })
+            local data, err = GrimmoryApi:getBooks(fixture.base_url(), "test-token")
+            assert.is_nil(data)
+            assert.equals("books pagination repeated book id 1", err)
+        end)
+
+        it("rejects missing or extra records against totalElements", function()
+            fixture = spec_helper.start_http_fixture({{
+                method = "GET", path = "/api/v1/books/page", status = 200,
+                expect_query = { page = "0", size = "100" },
+                body = [[{"content":[{"id":1},{"id":2}],"page":{"number":0,"size":100,"totalElements":1,"totalPages":1}}]],
+            }})
+            local data, err = GrimmoryApi:getBooks(fixture.base_url(), "test-token")
+            assert.is_nil(data)
+            assert.equals("books pagination count mismatch: expected 1, got 2", err)
+        end)
+
+        it("rejects totals that change on a later page", function()
+            fixture = spec_helper.start_http_fixture({
+                {
+                    method = "GET", path = "/api/v1/books/page", status = 200,
+                    expect_query = { page = "0", size = "100" },
+                    body = [[{"content":[{"id":1}],"page":{"number":0,"size":100,"totalElements":2,"totalPages":2}}]],
+                    repeat_ = 1,
+                },
+                {
+                    method = "GET", path = "/api/v1/books/page", status = 200,
+                    expect_query = { page = "1", size = "100" },
+                    body = [[{"content":[{"id":2}],"page":{"number":1,"size":100,"totalElements":3,"totalPages":2}}]],
+                },
+            })
+            local data, err = GrimmoryApi:getBooks(fixture.base_url(), "test-token")
+            assert.is_nil(data)
+            assert.equals("books pagination totals changed on page 1", err)
+        end)
+
         it("keeps a BookLore-era flat primary file downloadable", function()
             local book = GrimmoryApi.normalizeBook({
                 id = 77,
@@ -228,6 +283,33 @@ describe("GrimmoryApi", function()
             assert.equals("2024-01-01T00:00:00Z", book.addedOn)
             assert.equals("2024-02-01T00:00:00Z", book.lastReadTime)
         end)
+
+        it("treats decoded JSON null sentinels as absent optional fields", function()
+            local json_null = function() end
+            local book = GrimmoryApi.normalizeBook({
+                id = 78,
+                lastReadTime = json_null,
+                addedOn = json_null,
+                metadata = {
+                    title = "Nullable",
+                    subtitle = json_null,
+                },
+                primaryFile = {
+                    id = 7801,
+                    fileName = "nullable.epub",
+                    bookType = "EPUB",
+                    book = true,
+                    folderBased = json_null,
+                },
+            })
+
+            assert.is_nil(book.lastReadTime)
+            assert.is_nil(book.addedOn)
+            assert.is_nil(book.metadata.subtitle)
+            assert.is_nil(book.primaryFile.folderBased)
+            assert.equals("Nullable", book.title)
+            assert.is_true(book.primaryFile.downloadEligible)
+        end)
     end)
 
     describe("getVersion", function()
@@ -242,10 +324,18 @@ describe("GrimmoryApi", function()
             }})
             local info, err = GrimmoryApi:getVersion(fixture.base_url(), "test-token")
             assert.is_nil(err, tostring(err))
-            assert.is_true(info.available)
-            assert.equals("3.3.1", info.current)
-            assert.is_true(info.capabilities.paginatedBooks)
-            assert.is_true(info.capabilities.bookFiles)
+            assert.same({
+                available = true,
+                current = "3.3.1",
+                latest = "3.3.1",
+                capabilities = {
+                    version = true,
+                    paginatedBooks = true,
+                    bookFiles = true,
+                    multiFormat = true,
+                    physicalBooks = true,
+                },
+            }, info)
         end)
 
         it("gracefully reports an absent BookLore-era version endpoint", function()
@@ -257,8 +347,16 @@ describe("GrimmoryApi", function()
             }})
             local info, err = GrimmoryApi:getVersion(fixture.base_url(), "test-token")
             assert.is_nil(err, tostring(err))
-            assert.is_false(info.available)
-            assert.is_false(info.capabilities.paginatedBooks)
+            assert.same({
+                available = false,
+                capabilities = {
+                    version = false,
+                    paginatedBooks = false,
+                    bookFiles = false,
+                    multiFormat = false,
+                    physicalBooks = false,
+                },
+            }, info)
         end)
     end)
 
@@ -291,6 +389,43 @@ describe("GrimmoryApi", function()
         end)
     end)
 
+    describe("mergeBookDetail", function()
+        it("replaces stripped list placeholders with authoritative detail metadata", function()
+            local list_book = {
+                id = 7,
+                metadata = {
+                    title = "List title",
+                    categories = {},
+                    bookReviews = {},
+                    _enriched = false,
+                },
+                alternativeFormats = {},
+            }
+            local full = {
+                id = 7,
+                primaryFile = {
+                    id = 8, fileName = "book.epub", bookType = "EPUB", book = true,
+                },
+                metadata = {
+                    title = "Provider title",
+                    categories = { "Fantasy", "Adventure" },
+                    bookReviews = { { reviewerName = "Reader" } },
+                },
+                alternativeFormats = {
+                    { id = 9, fileName = "book.pdf", bookType = "PDF", book = true },
+                },
+            }
+
+            local merged = GrimmoryApi.mergeBookDetail(list_book, full)
+
+            assert.are.same({ "Fantasy", "Adventure" }, merged.metadata.categories)
+            assert.are.equal(1, #merged.metadata.bookReviews)
+            assert.are.equal("Provider title", merged.metadata.title)
+            assert.is_false(merged.metadata._enriched)
+            assert.are.equal(2, #merged.downloadFiles)
+        end)
+    end)
+
     describe("Book Files", function()
         it("lists only book files and preserves exact file identity", function()
             fixture = spec_helper.start_http_fixture({{
@@ -305,11 +440,12 @@ describe("GrimmoryApi", function()
             local files, err = GrimmoryApi:getBookFiles(
                 fixture.base_url(), "files-token", 9)
             assert.is_nil(err, tostring(err))
-            assert.equals(1, #files)
-            assert.equals(901, files[1].id)
-            assert.equals(9, files[1].bookId)
-            assert.equals("PDF", files[1].bookType)
-            assert.is_true(files[1].downloadEligible)
+            assert.same({{
+                id = 901, bookId = 9, fileName = "nine.pdf", fileSizeKb = 55,
+                bookType = "PDF", extension = "pdf", book = true,
+                folderBased = false, isBook = true, isPrimary = false,
+                downloadEligible = true,
+            }}, files)
         end)
 
         it("marks physical and audiobook-only records ineligible", function()
@@ -374,10 +510,12 @@ describe("GrimmoryApi", function()
             assert.is_nil(err, tostring(err))
             assert.is_table(data)
             local prog = data.epubProgress
-            assert.is_table(prog)
-            assert.is_string(prog.cfi)
-            assert.is_number(prog.percentage)
-            assert.is_string(prog.href)
+            assert.same({
+                cfi = "epubcfi(/6/2[chapter1]!/4/2/6:21)",
+                href = "OEBPS/chapter1.xhtml",
+                percentage = 34.5,
+            }, prog)
+            assert.equals(42, data.id)
             assert.equals("2026-04-26T20:00:00Z", data.lastReadTime)
         end)
     end)
@@ -395,9 +533,11 @@ describe("GrimmoryApi", function()
             })
             local data, err = GrimmoryApi:get(fixture.base_url() .. "/api/v1/books/1", "test-token")
             assert.is_nil(err, tostring(err))
-            assert.is_table(data)
-            assert.is_number(data.id)
-            assert.is_string(data.title)
+            assert.equals(1, data.id)
+            assert.equals("Test Book One", data.title)
+            assert.same({ "Author A" }, data.metadata.authors)
+            assert.equals("Test Publisher", data.metadata.publisher)
+            assert.equals("2024-01-01", data.metadata.publishedDate)
         end)
     end)
 
@@ -454,9 +594,14 @@ describe("GrimmoryApi", function()
                 fixture.base_url(), 7, 701, "file-token", dest, nil)
             assert.is_truthy(ok, tostring(err))
             local f = assert(io.open(dest, "rb"))
-            assert.truthy(#f:read("*a") > 0)
+            local got = f:read("*a")
             f:close()
+            local canned = assert(io.open(
+                REPO_ROOT .. "/tests/support/canned_responses/download_book.bin", "rb"))
+            local expected = canned:read("*a")
+            canned:close()
             os.remove(dest)
+            assert.equals(expected, got)
         end)
     end)
 

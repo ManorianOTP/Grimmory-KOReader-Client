@@ -1,0 +1,59 @@
+name: "${GRIMMORY_COMPOSE_PROJECT:-grimmory-visual-real}"
+
+services:
+  grimmory:
+    # The acceptance harness resolves these human-readable tags to immutable
+    # repo@sha256 references before starting the stack.  The defaults keep the
+    # older manual `grimmory-visual-fixture.sh real-up` command working.
+    image: "${GRIMMORY_IMAGE:-ghcr.io/grimmory-tools/grimmory:v3.3.1}"
+    environment:
+      USER_ID: "1000"
+      GROUP_ID: "1000"
+      TZ: Etc/UTC
+      DATABASE_URL: jdbc:mariadb://mariadb:3306/grimmory
+      DATABASE_USERNAME: "${GRIMMORY_DATABASE_USERNAME:-grimmory}"
+      DATABASE_PASSWORD: "${GRIMMORY_DATABASE_PASSWORD:-grimmory_visual_database}"
+      API_DOCS_ENABLED: "true"
+      DISK_TYPE: LOCAL
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${GRIMMORY_REAL_PORT:-16060}:6060"
+    volumes:
+      - type: bind
+        source: "${GRIMMORY_APP_DATA:-../../build/grimmory-real/app-data}"
+        target: /app/data
+      - type: bind
+        source: "${GRIMMORY_BOOKS_DIR:-../../build/grimmory-real/books}"
+        target: /books
+        read_only: true
+      - type: bind
+        source: "${GRIMMORY_BOOKDROP_DIR:-../../build/grimmory-real/bookdrop}"
+        target: /bookdrop
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:6060/api/v1/healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 45s
+
+  mariadb:
+    image: "${GRIMMORY_MARIADB_IMAGE:-lscr.io/linuxserver/mariadb:11.4.8}"
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Etc/UTC
+      MYSQL_ROOT_PASSWORD: "${GRIMMORY_DATABASE_ROOT_PASSWORD:-grimmory_visual_root}"
+      MYSQL_DATABASE: grimmory
+      MYSQL_USER: "${GRIMMORY_DATABASE_USERNAME:-grimmory}"
+      MYSQL_PASSWORD: "${GRIMMORY_DATABASE_PASSWORD:-grimmory_visual_database}"
+    volumes:
+      - type: bind
+        source: "${GRIMMORY_MARIADB_DATA:-../../build/grimmory-real/mariadb}"
+        target: /config
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 20

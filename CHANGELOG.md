@@ -5,6 +5,32 @@ project follows [Semantic Versioning](https://semver.org/). Both plugins
 (`grimmory.koplugin` and `grimmory_sync.koplugin`) share a single version per
 release.
 
+## [Unreleased]
+
+- Added opt-in, conflict-safe EPUB highlight/note sync and opt-in durable
+  reading-session sync.
+- Added additive Grimmory shelf mirroring into scoped KOReader collections.
+- Turned the top-bar Wi-Fi indicator into a Connection & Sync panel with an
+  explicit connect attempt, sync settings, per-book device/server positions,
+  and a distinct-book pending badge capped at `9+`.
+- Made background bulk progress sync pull each closed book/alternate format
+  before pushing, so newer server progress is retained as a pending conflict.
+- Fixed progress identity after switching accounts by consistently using the
+  active account rather than the legacy default username.
+- Fixed EPUB annotation endpoints containing smart punctuation or other
+  non-ASCII text by translating CREngine Unicode-scalar offsets to epub.js
+  UTF-16 offsets instead of treating them as UTF-8 bytes. Existing uploaded
+  annotations are not rewritten automatically: Grimmory CFIs are immutable
+  and old records do not prove whether the device or web reader originated
+  them; delete and recreate a visibly truncated annotation to repair it safely.
+- Added a device-to-web regression that creates a highlight through KOReader's
+  reader UI and independently resolves its CFI with Foliate, requiring the full
+  KOReader, Grimmory, and DOM-range text to match byte-for-byte on the synthetic
+  Unicode fixture and all eight configured real EPUBs.
+- Hardened Tailscale installation by checksum-verifying the pinned archive and
+  extracted binaries and rejecting traversal, links, unexpected members, and
+  post-extraction byte mismatches before either executable is installed.
+
 ## [2.0.0] - 2026-08-09
 
 First Grimmory-native release.

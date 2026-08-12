@@ -51,6 +51,10 @@ local function defaultExec(cmd)
     return output, code
 end
 
+local function shq(value)
+    return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+end
+
 function Tailscale.new(opts)
     opts = opts or {}
     local self = setmetatable({}, Tailscale)
@@ -58,6 +62,13 @@ function Tailscale.new(opts)
         if opts[k] ~= nil then self[k] = opts[k] else self[k] = default end
     end
     self.exec = opts.exec or defaultExec
+    self.hash_file = opts.hash_file or function(path)
+        local out, code = self.exec("sha256sum " .. shq(path))
+        if code ~= 0 then return nil end
+        local digest = (out or ""):match("^([0-9a-fA-F]+)")
+        if not digest or #digest ~= 64 then return nil end
+        return digest:lower()
+    end
     self.request = opts.request
     -- Overridable so specs can point at a fixture path without a query string;
     -- defaults to pkgs_base .. "?mode=json" inside fetchLatestRelease.
@@ -189,7 +200,55 @@ function Tailscale:fetchLatestRelease()
     if type(version) ~= "string" or type(tarball) ~= "string" then
         return nil, nil, "No Tailscale static build for arch '" .. tostring(arch) .. "'."
     end
+    -- Network-controlled metadata must never become a path or shell fragment.
+    if not version:match("^%d+%.%d+%.%d+$")
+            or tarball ~= "tailscale_" .. version .. "_" .. arch .. ".tgz" then
+        return nil, nil, "The Tailscale package list contained an unsafe package name."
+    end
     return version, tarball
+end
+
+-- Validate tar metadata before extraction. Static packages contain only the
+-- executables and optional systemd metadata; links and surprise payloads fail
+-- closed so they cannot redirect or influence subsequent binary reads.
+function Tailscale:_validateArchiveListing(listing, expected_root)
+    local allowed = {
+        [expected_root] = "d",
+        [expected_root .. "/tailscale"] = "-",
+        [expected_root .. "/tailscaled"] = "-",
+        [expected_root .. "/systemd"] = "d",
+        [expected_root .. "/systemd/tailscaled.service"] = "-",
+        [expected_root .. "/systemd/tailscaled.defaults"] = "-",
+    }
+    local found_cli, found_daemon = false, false
+    for line in tostring(listing):gmatch("[^\r\n]+") do
+        if line:match("%S") then
+            local member_type = line:sub(1, 1)
+            if member_type ~= "d" and member_type ~= "-" then
+                return nil, "unsafe archive member type"
+            end
+            local name = line:match("(%S+)%s*$")
+            if not name then return nil, "unreadable archive member" end
+            name = name:gsub("^%./", ""):gsub("/+$", "")
+            if name == "" or name:sub(1, 1) == "/" or name:find("\\", 1, true) then
+                return nil, "unsafe archive path"
+            end
+            for component in name:gmatch("[^/]+") do
+                if component == "." or component == ".." then
+                    return nil, "unsafe archive path"
+                end
+            end
+            if allowed[name] ~= member_type then
+                return nil, "unexpected archive member: " .. name
+            end
+            if name == expected_root .. "/tailscale" then found_cli = true end
+            if name == expected_root .. "/tailscaled" then found_daemon = true end
+        end
+    end
+    if not found_cli or not found_daemon then
+        return nil, "archive does not contain both expected binaries"
+    end
+    return true
 end
 
 --- Installed Tailscale version (parsed from `tailscale version`), or nil if
@@ -220,14 +279,16 @@ function Tailscale:install(notify)
     -- Download URL + temp path come straight from the manifest's filename.
     local url = self.pkgs_base .. tarball
     local tmp_tgz = self.tmp_root .. "/" .. tarball
+    local extract_name = tarball:gsub("%.tgz$", "")
 
     local function fail(msg)
-        self.exec("rm -rf " .. self.tmp_root)
+        self.exec("rm -rf " .. shq(self.tmp_root))
         return nil, msg
     end
 
-    self.exec("rm -rf " .. self.tmp_root)
-    self.exec("mkdir -p " .. self.tmp_root)
+    self.exec("rm -rf " .. shq(self.tmp_root))
+    local mkdir_ok, mkdir_err = self:_checkedExec("mkdir -p " .. shq(self.tmp_root))
+    if not mkdir_ok then return fail(mkdir_err) end
 
     logger.info("Grimmory: downloading", url)
 
@@ -249,14 +310,14 @@ function Tailscale:install(notify)
         if dl_result and dl_code == 200 then break end
         logger.warn("Grimmory: Tailscale download attempt", attempt,
             "failed (HTTP", tostring(dl_code), ")")
-        self.exec("rm -f " .. tmp_tgz)  -- clear the partial before retrying
+        self.exec("rm -f " .. shq(tmp_tgz))  -- clear the partial before retrying
     end
     if not dl_result or dl_code ~= 200 then
         return fail("Download failed (HTTP " .. tostring(dl_code) .. "):\n" .. url)
     end
 
     -- Verify file size: a tiny payload is a server error page, not a tarball.
-    local size_out = self.exec("wc -c < " .. tmp_tgz)
+    local size_out = self.exec("wc -c < " .. shq(tmp_tgz))
     local file_size = tonumber(size_out) or 0
     if file_size < self.min_tarball_bytes then
         return fail("Downloaded file too small (" .. tostring(math.floor(file_size / 1024))
@@ -266,44 +327,151 @@ function Tailscale:install(notify)
     logger.info("Grimmory: downloaded", string.format("%.1f MB", file_size / 1048576))
     notify("Installing Tailscale " .. version .. "…")
 
-    -- Extract tarball
-    local tar_out, tar_code = self.exec("cd " .. self.tmp_root .. " && tar xzf " .. tarball)
+    -- Verify the checksum Tailscale publishes beside every static tarball.
+    local checksum_body = {}
+    local checksum_result, checksum_code = self:_request{
+        url = url .. ".sha256",
+        sink = ltn12.sink.table(checksum_body),
+        headers = { ["User-Agent"] = "KOReader-Grimmory/1.0" },
+    }
+    if not checksum_result or checksum_code ~= 200 then
+        return fail("Could not fetch the Tailscale checksum (HTTP "
+            .. tostring(checksum_code) .. ").")
+    end
+    local expected_hash = table.concat(checksum_body):match("^%s*([0-9a-fA-F]+)")
+    if not expected_hash or #expected_hash ~= 64 then
+        return fail("The Tailscale checksum response was invalid.")
+    end
+    local archive_hash = self.hash_file(tmp_tgz)
+    if not archive_hash then
+        return fail("Could not verify the Tailscale archive checksum.")
+    end
+    if archive_hash:lower() ~= expected_hash:lower() then
+        return fail("Tailscale archive checksum mismatch.")
+    end
+
+    -- Reject links, traversal and unexpected members before extraction.
+    local listing, list_code = self.exec("tar tvzf " .. shq(tmp_tgz))
+    if list_code ~= 0 then
+        return fail("Failed to inspect tarball:\n" .. (listing or ""))
+    end
+    local listing_ok, listing_err = self:_validateArchiveListing(listing, extract_name)
+    if not listing_ok then return fail("Unsafe Tailscale archive: " .. listing_err) end
+
+    local tar_out, tar_code = self.exec("cd " .. shq(self.tmp_root)
+        .. " && tar xzf " .. shq(tmp_tgz))
     if tar_code ~= 0 then
         return fail("Failed to extract tarball:\n" .. (tar_out or ""))
     end
 
-    -- The tarball extracts to a dir named like the tarball without .tgz, e.g.
-    -- tailscale_1.80.0_arm/. Derive it from the filename rather than rebuilding.
-    local extract_dir = self.tmp_root .. "/" .. tarball:gsub("%.tgz$", "")
-
-    -- Verify extracted binaries exist
-    local check_f = io.open(extract_dir .. "/tailscale", "r")
-    if not check_f then
-        return fail("Extracted archive does not contain expected binaries.\nExpected: "
-            .. extract_dir .. "/tailscale")
+    local extract_dir = self.tmp_root .. "/" .. extract_name
+    local cli_src = extract_dir .. "/tailscale"
+    local daemon_src = extract_dir .. "/tailscaled"
+    local cli_stage = self.tmp_root .. "/tailscale.verified"
+    local daemon_stage = self.tmp_root .. "/tailscaled.verified"
+    local cli_hash = self.hash_file(cli_src)
+    local daemon_hash = self.hash_file(daemon_src)
+    if not cli_hash or not daemon_hash then
+        return fail("Extracted archive does not contain readable expected binaries.")
     end
-    check_f:close()
 
-    -- Create target directory and install binaries
-    local steps = {
-        "mkdir -p " .. self.bin_dir,
-        "cp " .. extract_dir .. "/tailscale " .. self.cmd,
-        "cp " .. extract_dir .. "/tailscaled " .. self.daemon_cmd,
-        "chmod +x " .. self.cmd,
-        "chmod +x " .. self.daemon_cmd,
+    -- Prove both private copies before publishing either live binary.
+    local copy_steps = {
+        "cp " .. shq(cli_src) .. " " .. shq(cli_stage),
+        "cp " .. shq(daemon_src) .. " " .. shq(daemon_stage),
     }
-    for i = 1, #steps do
-        local ok, step_err = self:_checkedExec(steps[i])
+    for i = 1, #copy_steps do
+        local ok, step_err = self:_checkedExec(copy_steps[i])
+        if not ok then return fail(step_err) end
+    end
+    if self.hash_file(cli_stage) ~= cli_hash or self.hash_file(daemon_stage) ~= daemon_hash then
+        return fail("Tailscale binary copy verification failed.")
+    end
+
+    local prepare_steps = {
+        "chmod +x " .. shq(cli_stage),
+        "chmod +x " .. shq(daemon_stage),
+        "mkdir -p " .. shq(self.bin_dir),
+    }
+    for i = 1, #prepare_steps do
+        local ok, step_err = self:_checkedExec(prepare_steps[i])
         if not ok then return fail(step_err) end
     end
 
-    -- Clean up (best-effort; install already succeeded)
-    self.exec("rm -rf " .. self.tmp_root)
-
-    -- Final verification
-    if not self:isInstalled() then
-        return nil, "Installation failed - binary not found after copy."
+    -- Publish the pair transactionally. Moving prior files into tmp_root
+    -- preserves their exact bytes and mode, and lets every later failure put
+    -- the complete old pair back (or remove both files on a fresh install).
+    local cli_backup = self.tmp_root .. "/tailscale.previous"
+    local daemon_backup = self.tmp_root .. "/tailscaled.previous"
+    local function exists(path)
+        local _out, code = self.exec("test -e " .. shq(path))
+        return code == 0
     end
+    local cli_existed, daemon_existed = exists(self.cmd), exists(self.daemon_cmd)
+    local prior_cli_hash = cli_existed and self.hash_file(self.cmd) or nil
+    local prior_daemon_hash = daemon_existed and self.hash_file(self.daemon_cmd) or nil
+    if (cli_existed and not prior_cli_hash) or (daemon_existed and not prior_daemon_hash) then
+        return fail("Could not verify the existing Tailscale installation before update.")
+    end
+    local cli_backed, daemon_backed = false, false
+
+    local function rollback(primary_err)
+        local rollback_errors = {}
+        local function run(cmd)
+            local ok, err = self:_checkedExec(cmd)
+            if not ok then table.insert(rollback_errors, err) end
+        end
+        local function restore(live, backup, existed, backed, prior_hash)
+            if backed then
+                run("rm -f " .. shq(live))
+                run("mv " .. shq(backup) .. " " .. shq(live))
+            elseif not existed then
+                run("rm -f " .. shq(live))
+            end
+            if existed and prior_hash and self.hash_file(live) ~= prior_hash then
+                table.insert(rollback_errors, "restored binary checksum mismatch: " .. live)
+            elseif not existed and exists(live) then
+                table.insert(rollback_errors, "new binary remained after rollback: " .. live)
+            end
+        end
+        restore(self.cmd, cli_backup, cli_existed, cli_backed, prior_cli_hash)
+        restore(self.daemon_cmd, daemon_backup, daemon_existed, daemon_backed,
+            prior_daemon_hash)
+        if #rollback_errors > 0 then
+            primary_err = primary_err .. "\nRollback incomplete:\n"
+                .. table.concat(rollback_errors, "\n")
+        end
+        return fail(primary_err)
+    end
+
+    if cli_existed then
+        local ok, err = self:_checkedExec("mv " .. shq(self.cmd) .. " " .. shq(cli_backup))
+        if not ok then return rollback(err) end
+        cli_backed = true
+    end
+    if daemon_existed then
+        local ok, err = self:_checkedExec(
+            "mv " .. shq(self.daemon_cmd) .. " " .. shq(daemon_backup))
+        if not ok then return rollback(err) end
+        daemon_backed = true
+    end
+
+    local publish_steps = {
+        "mv " .. shq(cli_stage) .. " " .. shq(self.cmd),
+        "mv " .. shq(daemon_stage) .. " " .. shq(self.daemon_cmd),
+    }
+    for i = 1, #publish_steps do
+        local ok, step_err = self:_checkedExec(publish_steps[i])
+        if not ok then return rollback(step_err) end
+    end
+    if not self:isInstalled()
+            or self.hash_file(self.cmd) ~= cli_hash
+            or self.hash_file(self.daemon_cmd) ~= daemon_hash then
+        return rollback("Installed Tailscale binary verification failed.")
+    end
+
+    -- Clean up (best-effort; install already succeeded)
+    self.exec("rm -rf " .. shq(self.tmp_root))
     logger.info("Grimmory: Tailscale", version, "installed successfully")
     return version
 end

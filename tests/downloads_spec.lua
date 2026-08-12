@@ -102,10 +102,15 @@ describe("Downloads", function()
             }
             d:register(SERVER, { id = 9 }, path, file)
             local entry = d.registry:readSetting(SERVER .. "|9|file:902")
-            assert.are.equal(path, entry.path)
-            assert.are.equal(902, entry.file_id)
-            assert.are.equal("PDF", entry.book_type)
-            assert.is_false(entry.is_primary)
+            assert.are.same({
+                path = path,
+                server_id = 9,
+                server_url = SERVER,
+                file_id = 902,
+                file_name = "x.pdf",
+                book_type = "PDF",
+                is_primary = false,
+            }, entry)
             assert.are.equal(path, d:localPath(SERVER, { id = 9 }, file))
         end)
 
@@ -128,12 +133,66 @@ describe("Downloads", function()
         it("drops the registry entry when the file was deleted on device", function()
             local d = make_downloads()
             local path = d.download_dir .. "/x.epub"
+            local same_server_path = d.download_dir .. "/survivor.epub"
+            local other_server_path = d.download_dir .. "/other.epub"
             touch(path)
+            touch(same_server_path)
+            touch(other_server_path)
             d:register(SERVER, { id = 7 }, path)
+            d:register(SERVER, { id = 8 }, same_server_path)
+            d:register("http://other:6060", { id = 7 }, other_server_path)
             os.remove(path)
             assert.is_nil(d:localPath(SERVER, { id = 7 }))
             -- pruned from disk, not just nil-ed for this call
             assert.is_nil(d.registry:readSetting(SERVER .. "|7"))
+            assert.same({
+                path = same_server_path, server_id = 8, server_url = SERVER,
+                is_primary = true,
+            }, d.registry:readSetting(SERVER .. "|8"))
+            assert.same({
+                path = other_server_path, server_id = 7,
+                server_url = "http://other:6060", is_primary = true,
+            }, d.registry:readSetting("http://other:6060|7"))
+        end)
+    end)
+
+    describe("localFilesByBook", function()
+        it("groups every downloaded format by book on the selected server", function()
+            local d = make_downloads()
+            local epub = d.download_dir .. "/x.epub"
+            local pdf = d.download_dir .. "/x.pdf"
+            local other = d.download_dir .. "/other.epub"
+            touch(epub); touch(pdf); touch(other)
+            d:register(SERVER, { id = 9, title = "X" }, epub, {
+                id = 901, fileName = "x.epub", bookType = "EPUB", isPrimary = true,
+            })
+            d:register(SERVER, { id = 9, title = "X" }, pdf, {
+                id = 902, fileName = "x.pdf", bookType = "PDF", isPrimary = false,
+            })
+            d:register("http://other:6060", { id = 9 }, other)
+
+            local grouped = d:localFilesByBook(SERVER)
+            table.sort(grouped["9"])
+            assert.are.same({ ["9"] = { epub, pdf } }, grouped)
+        end)
+
+        it("ignores missing files and duplicate registry paths", function()
+            local d = make_downloads()
+            local path = d.download_dir .. "/x.epub"
+            touch(path)
+            d.registry:saveSetting("one", {
+                server_id = 7, server_url = SERVER, path = path,
+            })
+            d.registry:saveSetting("duplicate", {
+                server_id = 7, server_url = SERVER, path = path,
+            })
+            d.registry:saveSetting("missing", {
+                server_id = 7, server_url = SERVER,
+                path = d.download_dir .. "/missing.epub",
+            })
+            d.registry:flush()
+
+            assert.are.same({ ["7"] = { path } }, d:localFilesByBook(SERVER))
         end)
     end)
 end)

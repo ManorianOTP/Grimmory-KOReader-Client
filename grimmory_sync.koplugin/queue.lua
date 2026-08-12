@@ -186,6 +186,24 @@ function Queue:removeIfUnchanged(key, entry)
     return false
 end
 
+-- The server-ahead dialog is a decision about this exact open file. Choosing
+-- Jump Ahead rejects any local progress captured before that decision; leaving
+-- it queued would let the next periodic drain overwrite the position the user
+-- just chose. Other books, accounts, servers and formats remain untouched.
+function Queue:discardCurrentBook(book_id, current_username, server_url,
+        file_id, file_type)
+    local removed = 0
+    for _, item in ipairs(self:currentBookDrainable(book_id, current_username,
+            server_url, file_id, file_type)) do
+        if self._store.data[item.key] == item.entry then
+            self._store.data[item.key] = nil
+            removed = removed + 1
+        end
+    end
+    if removed > 0 then self._store:flush() end
+    return removed
+end
+
 -- Synchronous drains, kept for any in-process caller (the async path in
 -- main.lua uses the collectors above directly). Reimplemented on the
 -- collectors so behavior is identical to the pre-async version.

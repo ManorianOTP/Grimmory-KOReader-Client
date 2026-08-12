@@ -57,7 +57,7 @@ describe("Session", function()
     end
 
     -- ctx: { session, api, settings, expired() }
-    local function make_ctx(tokens)
+    local function make_ctx(tokens, now)
         local settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/grimmory.lua")
         if tokens then
             settings:saveSetting("token", tokens.token)
@@ -71,6 +71,7 @@ describe("Session", function()
             settings = settings,
             api = api,
             on_expired = function() expired_count = expired_count + 1 end,
+            now = now,
         }
         return {
             session = session,
@@ -87,6 +88,40 @@ describe("Session", function()
     -- Older than the 50-minute pre-emptive refresh threshold.
     local function stale_tokens()
         return { token = "t1", refresh_token = "r1", token_time = os.time() - 51 * 60 }
+    end
+
+    local function deep_copy(value)
+        if type(value) ~= "table" then return value end
+        local out = {}
+        for k, v in pairs(value) do out[deep_copy(k)] = deep_copy(v) end
+        return out
+    end
+
+    local function seed_unrelated(ctx)
+        local values = {
+            server_url = "https://library.example",
+            username = "reader",
+            download_dir = "/mnt/us/books",
+            view_filters = { shelf = "later", nested = { keep = true } },
+            tailscale_autostart = true,
+            future_setting = { version = 7, label = "untouched" },
+        }
+        for key, value in pairs(values) do ctx.settings:saveSetting(key, deep_copy(value)) end
+        ctx.settings:flush()
+        return values
+    end
+
+    local function settings_file_bytes(ctx)
+        local f = assert(io.open(ctx.settings._path, "rb"))
+        local bytes = f:read("*a")
+        f:close()
+        return bytes
+    end
+
+    local function assert_settings_exact(ctx, expected)
+        assert.are.same(expected, ctx.settings.data)
+        local reopened = LuaSettings:open(ctx.settings._path)
+        assert.are.same(expected, reopened.data)
     end
 
     describe("dispatch gates", function()
@@ -310,6 +345,41 @@ describe("Session", function()
             assert.are.equal("r9", ctx.settings:readSetting("refresh_token"))
             assert.is_number(ctx.settings:readSetting("token_time"))
         end)
+
+        it("mutates exactly the token triple and preserves every unrelated setting", function()
+            local issued_at = 1700000123
+            local ctx = make_ctx(nil, function() return issued_at end)
+            local expected = deep_copy(seed_unrelated(ctx))
+            ctx.session:setTokens("t9", "r9")
+            expected.token = "t9"
+            expected.refresh_token = "r9"
+            expected.token_time = issued_at
+            assert_settings_exact(ctx, expected)
+        end)
+
+        it("clearTokens removes exactly the token triple", function()
+            local ctx = make_ctx(fresh_tokens())
+            seed_unrelated(ctx)
+            local expected = deep_copy(ctx.settings.data)
+            expected.token = nil
+            expected.refresh_token = nil
+            expected.token_time = nil
+            ctx.session:clearTokens()
+            assert_settings_exact(ctx, expected)
+        end)
+
+        it("a transient refresh failure preserves exact persisted bytes and fields", function()
+            local ctx = make_ctx(stale_tokens())
+            seed_unrelated(ctx)
+            local expected = deep_copy(ctx.settings.data)
+            local before_bytes = settings_file_bytes(ctx)
+            ctx.api.refresh_queue = { { err = "HTTP timeout" } }
+            local result, err = ctx.session:call(SERVER, "getBooks")
+            assert.is_nil(result)
+            assert.are.equal("HTTP timeout", err)
+            assert_settings_exact(ctx, expected)
+            assert.are.equal(before_bytes, settings_file_bytes(ctx))
+        end)
     end)
 
     -- The account switcher lets a shared device hold several logins and
@@ -354,12 +424,26 @@ describe("Session", function()
             assert.are.equal("tb", ctx.settings:readSetting("token"))
         end)
 
-        it("returns nil when switching to an unknown account", function()
+        it("returns nil for an unknown account with zero persistence side effects", function()
             local ctx = make_ctx(nil)
             login(ctx, "http://a", "alice", "ta", "ra")
+            -- Rotate only the live triple. The stored account is intentionally
+            -- stale, making an accidental outgoing-account snapshot visible.
+            ctx.session:setTokens("ta2", "ra2")
+            local expected = deep_copy(ctx.settings.data)
+            local before_bytes = settings_file_bytes(ctx)
+            local real_flush = ctx.settings.flush
+            local flushes = 0
+            ctx.settings.flush = function(self)
+                flushes = flushes + 1
+                return real_flush(self)
+            end
             assert.is_nil(ctx.session:switchTo("http://x", "nobody"))
             -- active account is untouched
-            assert.are.equal("ta", ctx.session.token)
+            assert.are.equal("ta2", ctx.session.token)
+            assert.are.equal(0, flushes)
+            assert.are.same(expected, ctx.settings.data)
+            assert.are.equal(before_bytes, settings_file_bytes(ctx))
         end)
 
         it("captures a rotation that happened while active before leaving", function()
@@ -415,6 +499,21 @@ describe("Session", function()
             local accounts = ctx.session:listAccounts()
             assert.are.equal(1, #accounts)  -- only A remains
             assert.are.equal("alice", accounts[1].username)
+        end)
+
+        it("signOutActive removes only the active identity and token keys", function()
+            local ctx = make_ctx(nil)
+            login(ctx, "http://a", "alice", "ta", "ra")
+            login(ctx, "http://b", "bob", "tb", "rb")
+            seed_unrelated(ctx)
+            local expected = deep_copy(ctx.settings.data)
+            expected.token = nil
+            expected.refresh_token = nil
+            expected.token_time = nil
+            expected.active_account = nil
+            expected.accounts = { deep_copy(expected.accounts[1]) }
+            ctx.session:signOutActive()
+            assert_settings_exact(ctx, expected)
         end)
     end)
 

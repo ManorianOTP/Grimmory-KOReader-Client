@@ -55,6 +55,28 @@ function http_fixture.start(spec_table)
         return handle._base
     end
 
+    -- Return the server-observed request ledger.  The control request itself
+    -- is deliberately excluded by http_server.py, making this suitable for
+    -- load-bearing zero-request and exact-count assertions.
+    function handle.requests()
+        local http = require("socket.http")
+        local ltn12 = require("ltn12")
+        local chunks = {}
+        local _, code = http.request{
+            url = handle.url("/__fixture__/requests"),
+            method = "GET",
+            sink = ltn12.sink.table(chunks),
+        }
+        if tonumber(code) ~= 200 then
+            error("http_fixture: request ledger returned HTTP " .. tostring(code))
+        end
+        local decoded, _, err = require("dkjson").decode(table.concat(chunks))
+        if type(decoded) ~= "table" then
+            error("http_fixture: invalid request ledger: " .. tostring(err))
+        end
+        return decoded
+    end
+
     -- swap(new_spec) stops the current server and restarts it with new_spec,
     -- updating handle fields in-place so existing references remain valid.
     -- Use this to change which canned responses the server serves mid-test.

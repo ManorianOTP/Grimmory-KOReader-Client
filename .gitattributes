@@ -3,3 +3,5 @@
 
 # WSL/Linux executes these directly; CRLF breaks their shebangs.
 *.sh text eol=lf
+*.py text eol=lf
+*.png binary

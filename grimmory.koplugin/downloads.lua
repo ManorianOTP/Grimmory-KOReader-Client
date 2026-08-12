@@ -84,12 +84,32 @@ function Downloads:register(server_url, book, path, book_file)
         path = path,
         server_id = book.id,
         server_url = server_url,
+        title = book.title,
+        author = book.author or book.authors,
         file_id = book_file and book_file.id or nil,
         file_name = book_file and book_file.fileName or book.fileName,
         book_type = book_file and book_file.bookType or book.bookType,
         is_primary = is_primary,
     })
     self.registry:flush()
+end
+
+-- Existing local files grouped by Grimmory book id for one server. Multiple
+-- downloaded formats are retained; missing registry paths are ignored.
+function Downloads:localFilesByBook(server_url)
+    local out, seen = {}, {}
+    for _, entry in pairs(self.registry.data or {}) do
+        if type(entry) == "table" and entry.server_id ~= nil
+                and entry.server_url == server_url and entry.path
+                and lfs.attributes(entry.path, "mode") == "file"
+                and not seen[entry.path] then
+            local id = tostring(entry.server_id)
+            out[id] = out[id] or {}
+            out[id][#out[id] + 1] = entry.path
+            seen[entry.path] = true
+        end
+    end
+    return out
 end
 
 return Downloads

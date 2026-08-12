@@ -12,6 +12,27 @@ local ui
 local fixture
 local settings_dir
 
+local function assert_request_ledger(expected, actual)
+    assert.equals(#expected, #actual, "unexpected request count")
+    local json = require("dkjson")
+    for index, wanted in ipairs(expected) do
+        local got = actual[index]
+        assert.equals(wanted.method, got.method,
+            "request " .. tostring(index) .. " method")
+        assert.equals(wanted.path, got.path,
+            "request " .. tostring(index) .. " path")
+        if wanted.json ~= nil then
+            local decoded, _, err = json.decode(got.body)
+            assert.is_nil(err, tostring(err))
+            assert.same(wanted.json, decoded,
+                "request " .. tostring(index) .. " JSON body")
+        else
+            assert.equals("", got.body,
+                "request " .. tostring(index) .. " must have no body")
+        end
+    end
+end
+
 local function make_fake_ui(file_path, book_id, server_url)
     local fake_reader_ui = require("fake_reader_ui")
     return fake_reader_ui.new({
@@ -123,6 +144,8 @@ describe("Grimmory App progress wire contract", function()
         sync:pullProgress()
 
         assert.is_false(sync.pulled)
+        assert.same({}, fixture.requests(),
+            "account ownership rejection must produce no HTTP side effect")
         assert.is_true(require("logger").has("warn", "active account does not own"),
             "the server-scoping guard must run before any HTTP request")
     end)
@@ -238,6 +261,15 @@ describe("Grimmory App progress wire contract", function()
                 },
             },
             {
+                method = "GET",
+                path = "/api/v1/app/books/99/progress",
+                status = 200,
+                headers = { ["Content-Type"] = "application/json" },
+                body = '{"id":99,"pdfProgress":null}',
+                repeat_ = 1,
+                expect_headers = { Authorization = "Bearer wire-token" },
+            },
+            {
                 method = "PUT",
                 path = "/api/v1/app/books/99/progress",
                 status = 200,
@@ -281,6 +313,23 @@ describe("Grimmory App progress wire contract", function()
 
         assert.equals(0, sync.queue:size(),
             "both exact per-file 200 responses acknowledge their own slots")
+        assert_request_ledger({
+            {
+                method = "PUT", path = "/api/v1/app/books/99/progress",
+                json = { fileProgress = {
+                    bookFileId = 501, positionData = cfi_value,
+                    progressPercent = 42,
+                } },
+            },
+            { method = "GET", path = "/api/v1/app/books/99/progress" },
+            {
+                method = "PUT", path = "/api/v1/app/books/99/progress",
+                json = { fileProgress = {
+                    bookFileId = 601, positionData = "17",
+                    progressPercent = 55,
+                } },
+            },
+        }, fixture.requests())
     end)
 
     it("keeps identical account/book/file identities separate by server", function()
@@ -627,6 +676,7 @@ describe("GrimmorySync state machine", function()
                     headers = { ["Content-Type"] = "application/json" },
                     body = '{"id":99,"epubProgress":null}',
                     repeat_ = 1,
+                    expect_headers = { Authorization = "Bearer test-token" },
                 },
             })
             -- Override server_url to point at fixture
@@ -644,6 +694,12 @@ describe("GrimmorySync state machine", function()
             uim.tickBy(2)
 
             assert.is_true(sync.pulled, "pulled flag should be set after pull")
+            assert.same({{
+                method = "GET",
+                path = "/api/v1/app/books/99/progress",
+                body = "",
+            }}, fixture.requests(),
+                "ReaderReady must perform the exact authenticated pull once")
         end)
     end)
 
@@ -679,7 +735,8 @@ describe("GrimmorySync state machine", function()
 
             sync:onPageUpdate()
 
-            -- No push should have been made because pulled=false
+            assert.equals(0, #fixture.requests(),
+                "pull gate must prevent every HTTP request from a page update")
             local logger = require("logger")
             assert.is_false(logger.has("dbg", "pushed progress"),
                 "push should not happen before pull completes")
@@ -693,6 +750,9 @@ describe("GrimmorySync state machine", function()
                     status = 200,
                     headers = {},
                     body = "",
+                    repeat_ = 1,
+                    expect_headers = { Authorization = "Bearer test-token" },
+                    expect_json = { epubProgress = { percentage = 50 } },
                 },
             })
             local sync = GrimmorySync:new()
@@ -701,34 +761,77 @@ describe("GrimmorySync state machine", function()
             sync.token = "test-token"
             sync.enabled = true
             sync.book_id = 99
+            sync.file_type = "FB2"
             sync.pulled = true
             sync.last_push_time = os.time()
             sync.push_in_progress = false
             sync.has_pages = true
             sync.awaiting_decision = false
+            sync.queue = require("queue").new{}
+            require("ui/network/manager")._set_wifi(true)
 
-            -- Three rapid page updates within the 30s debounce window; no push should fire
-            sync:onPageUpdate()
-            sync:onPageUpdate()
-            sync:onPageUpdate()
-
+            -- ReaderReady normally installs this production periodic drain.
+            -- Install it explicitly here without also scheduling an initial
+            -- pull, because this case starts with the pull gate already open.
             local uim = require("ui/uimanager")
-            -- Tick past any scheduled callback to confirm nothing fires within the 30s debounce window
-            uim.tickBy(0.5)
+            sync._flush_fn = function() sync:_periodicFlush() end
+            uim:scheduleIn(30, sync._flush_fn)
 
-            local logger = require("logger")
-            local push_count = 0
-            for _, msg in ipairs(logger.get("dbg")) do
-                if msg:find("pushed progress", 1, true) then
-                    push_count = push_count + 1
-                end
+            -- Three rapid page updates collapse to one latest-wins disk slot.
+            for _, percent in ipairs({ 0.1, 0.2, 0.5 }) do
+                sync.ui._percent = percent
+                sync:onPageUpdate()
             end
-            assert.equals(0, push_count, "debounce should suppress all pushes within the 30s window")
+            assert.equals(1, sync.queue:size(),
+                "rapid updates must create one durable slot before the timer")
+            assert.equals(fixture.base_url(), sync.queue:peek(99).server_url)
+
+            uim.tickBy(29.9)
+            assert.equals(0, #fixture.requests(),
+                "debounce must make no HTTP request before its deadline")
+
+            uim.tickBy(0.2)
+            local requests = fixture.requests()
+            assert.equals(1, #requests,
+                "the deadline must produce exactly one upload; queue="
+                    .. tostring(sync.queue:size()) .. ", warnings="
+                    .. table.concat(require("logger").get("warn"), " | ")
+                    .. ", debug="
+                    .. table.concat(require("logger").get("dbg"), " | "))
+            assert_request_ledger({{
+                method = "PUT", path = "/api/v1/app/books/99/progress",
+                json = { epubProgress = { percentage = 50 } },
+            }}, requests)
+            assert.equals(0, sync.queue:size(),
+                "the one acknowledged upload must clear its durable slot")
+            uim:unschedule(sync._flush_fn)
+            sync._flush_fn = nil
         end)
     end)
 
     describe("showConflictPrompt callbacks", function()
+        it("passes percentage points to KOReader when exact EPUB CFI navigation is unavailable", function()
+            local sync = GrimmorySync:new()
+            sync.ui = ui
+            sync.file_type = "EPUB"
+            sync.has_pages = false
+            sync.cfi = nil
+            sync.awaiting_decision = true
+            sync.pulled = false
+
+            sync:showConflictPrompt({ percentage = 80, cfi = nil }, 10, 70)
+            local box = require("ui/widget/multiconfirmbox")._last
+            assert.not_nil(box)
+            box.choice1_callback()
+
+            local event = sync.ui._events[#sync.ui._events]
+            assert.equals("GotoPercent", event.name)
+            assert.equals(80, event.args[1],
+                "KOReader GotoPercent consumes 0..100, not a 0..1 fraction")
+        end)
+
         it("choice1 (Jump Ahead) sets pulled=true and clears awaiting_decision; choice2 (Sync Here) calls pushProgress", function()
+            local sync_here_cfi = "epubcfi(/6/4[chapter]!/4/2/1:7)"
             fixture = spec_helper.start_http_fixture({
                 {
                     method = "GET",
@@ -737,6 +840,7 @@ describe("GrimmorySync state machine", function()
                     headers = { ["Content-Type"] = "application/json" },
                     body = '{"id":99,"epubProgress":{"percentage":80.0,"cfi":null}}',
                     repeat_ = 1,
+                    expect_headers = { Authorization = "Bearer test-token" },
                 },
                 {
                     method = "PUT",
@@ -745,6 +849,13 @@ describe("GrimmorySync state machine", function()
                     headers = {},
                     body = "",
                     repeat_ = 1,
+                    expect_headers = { Authorization = "Bearer test-token" },
+                    expect_json = {
+                        epubProgress = {
+                            cfi = sync_here_cfi,
+                            percentage = 42,
+                        },
+                    },
                 },
             })
 
@@ -761,9 +872,12 @@ describe("GrimmorySync state machine", function()
             sync.awaiting_decision = false
             sync.cfi = {
                 xpointerToCFI = function()
-                    return "epubcfi(/6/4[chapter]!/4/2/1:7)"
+                    return sync_here_cfi
                 end,
             }
+            sync.queue = require("queue").new{}
+            sync.queue:enqueue(99, fixture.base_url(), 0.63,
+                "epubcfi(/6/2[chapter]!/4/2/1:0)", nil, nil, "EPUB")
 
             -- pullProgress sees server at 80%, local at 0% => sets awaiting_decision=true
             sync:pullProgress()
@@ -785,12 +899,15 @@ describe("GrimmorySync state machine", function()
                 "choice1_callback should set pulled=true")
             assert.is_false(sync.awaiting_decision,
                 "choice1_callback should clear awaiting_decision")
+            assert.equals(0, sync.queue:size(),
+                "Jump Ahead must discard progress captured before the decision")
 
             -- Reset state and invoke choice2 (Sync Here): expect pushProgress was called
             sync.pulled = false
             sync.awaiting_decision = true
             sync.push_in_progress = false
             sync.last_push_time = 0
+            sync.ui._percent = 0.42
 
             box.choice2_callback()
 
@@ -801,6 +918,15 @@ describe("GrimmorySync state machine", function()
                 "choice2_callback should clear awaiting_decision")
             assert.is_true(sync.pulled,
                 "choice2_callback should set pulled=true")
+            assert_request_ledger({
+                { method = "GET", path = "/api/v1/app/books/99/progress" },
+                {
+                    method = "PUT", path = "/api/v1/app/books/99/progress",
+                    json = { epubProgress = {
+                        cfi = sync_here_cfi, percentage = 42,
+                    } },
+                },
+            }, fixture.requests())
         end)
     end)
 
@@ -861,6 +987,8 @@ describe("GrimmorySync state machine", function()
 
             sync:onCloseDocument()
 
+            assert.same({}, fixture.requests(),
+                "a closed pull gate must prohibit every close-time HTTP side effect")
             local logger = require("logger")
             assert.is_false(logger.has("dbg", "pushed progress"),
                 "onCloseDocument must not push when pull gate is still closed")
@@ -899,10 +1027,18 @@ describe("GrimmorySync offline queue", function()
     it("onPageUpdate while wifi off enqueues without HTTP", function()
         local nm = require("ui/network/manager")
         nm._set_wifi(false)
+        fixture = spec_helper.start_http_fixture({{
+            method = "PUT",
+            path = "/api/v1/app/books/99/progress",
+            status = 200,
+            headers = {},
+            body = "",
+            repeat_ = 1,
+        }})
 
         local sync = GrimmorySync:new()
         sync.ui = ui
-        sync.server_url = "http://127.0.0.1"
+        sync.server_url = fixture.base_url()
         sync.token = "test-token"
         sync.enabled = true
         sync.book_id = 99
@@ -913,15 +1049,19 @@ describe("GrimmorySync offline queue", function()
         sync.queue = require("queue").new{}
 
         sync:onPageUpdate()
+        sync:_periodicFlush()
 
         assert.equals(1, sync.queue:size(),
             "onPageUpdate should enqueue one entry when offline")
+        assert.equals(0, #fixture.requests(),
+            "wifi-off capture and flush must not contact a reachable server")
         local logger = require("logger")
         assert.is_false(logger.has("dbg", "pushed progress"),
             "no HTTP push should occur when wifi is off")
     end)
 
     it("three onPageUpdate calls collapse to one queue entry (latest-wins)", function()
+        local queue_path = settings_dir2.dir .. "/durable-progress-queue.lua"
         local sync = GrimmorySync:new()
         sync.ui = ui
         sync.server_url = "http://127.0.0.1"
@@ -932,16 +1072,18 @@ describe("GrimmorySync offline queue", function()
         sync.push_in_progress = false
         sync.has_pages = true
         sync.awaiting_decision = false
-        sync.queue = require("queue").new{}
+        sync.queue = require("queue").new{ path = queue_path }
 
         for _, pct in ipairs({ 0.1, 0.2, 0.5 }) do
             ui._percent = pct
             sync:onPageUpdate()
         end
 
-        assert.equals(1, sync.queue:size(),
+        sync.queue = nil
+        local reloaded = require("queue").new{ path = queue_path }
+        assert.equals(1, reloaded:size(),
             "multiple onPageUpdate calls should collapse to one queue entry per book")
-        local entry = sync.queue:peek(99)
+        local entry = reloaded:peek(99)
         assert.not_nil(entry)
         local expected_pct = math.floor(0.5 * 10000) / 100
         assert.equals(expected_pct, entry.percentage,
@@ -949,6 +1091,7 @@ describe("GrimmorySync offline queue", function()
     end)
 
     it("post-pull drain pushes queued current-book entry", function()
+        local queued_cfi = "epubcfi(/6/4[chapter]!/4/2/1:7)"
         fixture = spec_helper.start_http_fixture({
             {
                 method = "GET",
@@ -957,6 +1100,7 @@ describe("GrimmorySync offline queue", function()
                 headers = { ["Content-Type"] = "application/json" },
                 body = '{"id":99,"epubProgress":null}',
                 repeat_ = 1,
+                expect_headers = { Authorization = "Bearer test-token" },
             },
             {
                 method = "PUT",
@@ -965,6 +1109,10 @@ describe("GrimmorySync offline queue", function()
                 headers = {},
                 body = "",
                 repeat_ = 1,
+                expect_headers = { Authorization = "Bearer test-token" },
+                expect_json = {
+                    epubProgress = { cfi = queued_cfi, percentage = 42 },
+                },
             },
         })
 
@@ -983,20 +1131,31 @@ describe("GrimmorySync offline queue", function()
         sync.has_pages = true
         sync.awaiting_decision = false
         sync.cfi = nil
-        sync.queue = require("queue").new{}
-        sync.queue:enqueue(99, fixture.base_url(), 42.0,
-            "epubcfi(/6/4[chapter]!/4/2/1:7)", nil, nil, "EPUB")
+        local queue_path = settings_dir2.dir .. "/post-pull-queue.lua"
+        local writer = require("queue").new{ path = queue_path }
+        writer:enqueue(99, fixture.base_url(), 42.0,
+            queued_cfi, nil, nil, "EPUB")
+        writer = nil
+        sync.queue = require("queue").new{ path = queue_path }
 
         assert.equals(1, sync.queue:size(), "pre-populated queue should have one entry")
 
         sync:pullProgress()
         require("ui/uimanager").tickBy(0.5)
 
-        assert.equals(0, sync.queue:size(),
+        local after_ack = require("queue").new{ path = queue_path }
+        assert.equals(0, after_ack:size(),
             "queue entry should be removed after successful drain")
         local logger = require("logger")
         assert.is_true(logger.has("dbg", "pushed progress"),
             "push should be recorded after drain")
+        assert_request_ledger({
+            { method = "GET", path = "/api/v1/app/books/99/progress" },
+            {
+                method = "PUT", path = "/api/v1/app/books/99/progress",
+                json = { epubProgress = { cfi = queued_cfi, percentage = 42 } },
+            },
+        }, fixture.requests())
     end)
 
     it("pull failure leaves current-book queue intact", function()
@@ -1032,6 +1191,112 @@ describe("GrimmorySync offline queue", function()
             "pull failure should keep push gate closed")
         assert.equals(1, sync.queue:size(),
             "queue entry must remain intact when pull fails")
+    end)
+end)
+
+describe("GrimmorySync status notifications", function()
+    before_each(function()
+        spec_helper.setup()
+        GrimmorySync = require("grimmory_sync")
+    end)
+
+    after_each(function()
+        spec_helper.teardown()
+    end)
+
+    it("coalesces changes and stops calling a detached listener", function()
+        local sync = GrimmorySync:new()
+        local calls = 0
+        sync:setStatusListener(function() calls = calls + 1 end)
+        sync:_notifyStatusChanged()
+        sync:_notifyStatusChanged()
+        require("ui/uimanager").tickBy(0.2)
+        assert.equals(1, calls)
+
+        sync:setStatusListener(nil)
+        sync:_notifyStatusChanged()
+        require("ui/uimanager").tickBy(0.2)
+        assert.equals(1, calls)
+    end)
+
+    it("shows the newest queued format with only its matching server position", function()
+        local server = "http://multi-format:6060"
+        local DataStorage = require("datastorage")
+        local LuaSettings = require("luasettings")
+        local settings_dir = DataStorage:getSettingsDir()
+        local settings = LuaSettings:open(settings_dir .. "/grimmory.lua")
+        settings:saveSetting("active_account", {
+            username = "alice", server_url = server,
+        })
+        settings:flush()
+        local downloads = LuaSettings:open(
+            settings_dir .. "/grimmory_downloads.lua")
+        downloads.data = {
+            [server .. "|42"] = {
+                server_id = 42, server_url = server,
+                path = "/books/book.epub", title = "The Book",
+                file_id = 501, book_type = "EPUB", is_primary = true,
+            },
+            [server .. "|42|file:601"] = {
+                server_id = 42, server_url = server,
+                path = "/books/book.pdf", title = "The Book",
+                file_id = 601, book_type = "PDF", is_primary = false,
+            },
+        }
+        downloads:flush()
+
+        local sync = GrimmorySync:new()
+        sync.queue = { _store = { data = {
+            stale_epub = {
+                username = "alice", server_url = server, book_id = 42,
+                file_id = 501, file_type = "EPUB", percentage = 10,
+                position_data = "epubcfi(/6/2)", enqueued_at = 100,
+            },
+            stale_duplicate_pdf = {
+                username = "alice", server_url = server, book_id = 42,
+                file_id = 601, file_type = "PDF", percentage = 60,
+                position_data = "12", enqueued_at = 150,
+            },
+            newest_pdf = {
+                username = "alice", server_url = server, book_id = 42,
+                file_id = 601, file_type = "PDF", percentage = 70,
+                position_data = "17", enqueued_at = 200,
+            },
+        } } }
+        sync.state = {
+            entries = function()
+                return {
+                    {
+                        key = "epub-state",
+                        entry = {
+                            username = "alice", server_url = server, book_id = 42,
+                            file_id = 501, file_type = "EPUB",
+                            server_percentage = 90,
+                            server_position = "epubcfi(/6/20)",
+                            server_observed_at = 300,
+                        },
+                    },
+                    {
+                        key = "pdf-state",
+                        entry = {
+                            username = "alice", server_url = server, book_id = 42,
+                            file_id = 601, file_type = "PDF",
+                            server_percentage = 65, server_position = "16",
+                            server_observed_at = 120,
+                        },
+                    },
+                }
+            end,
+        }
+
+        assert.same({{
+            key = "alice\n" .. server .. "\n42",
+            book_id = 42, server_url = server, username = "alice",
+            title = "The Book", path = "/books/book.pdf", file_type = "PDF",
+            active = true, features = { progress = true },
+            device_percentage = 70, device_position = "17",
+            server_percentage = 65, server_position = "16",
+        }}, sync:pendingBooks())
     end)
 end)
 
@@ -1105,8 +1370,18 @@ describe("GrimmorySync token-independent capture & per-account drain", function(
     end)
 
     it("drain pushes only entries owned by the logged-in account", function()
+        local local_cfi = "epubcfi(/6/4[chapter]!/4/2/1:7)"
         fixture = spec_helper.start_http_fixture({
-            { method = "PUT", path = "/api/v1/app/books/88/progress", status = 200, headers = {}, body = "", repeat_ = 5 },
+            { method = "GET", path = "/api/v1/app/books/88/progress", status = 200,
+                headers = { ["Content-Type"] = "application/json" },
+                body = '{"id":88,"epubProgress":null}', repeat_ = 1,
+                expect_headers = { Authorization = "Bearer alice-token" } },
+            { method = "PUT", path = "/api/v1/app/books/88/progress",
+                status = 200, headers = {}, body = "", repeat_ = 1,
+                expect_headers = { Authorization = "Bearer alice-token" },
+                expect_json = { epubProgress = {
+                    cfi = local_cfi, percentage = 30,
+                } } },
         })
         local settings = require("luasettings"):open(settings_dir3.dir .. "/grimmory.lua")
         settings:saveSetting("username", "alice")
@@ -1126,7 +1401,7 @@ describe("GrimmorySync token-independent capture & per-account drain", function(
         sync.awaiting_decision = false
         sync.queue = require("queue").new{}
         sync.queue:enqueue(88, fixture.base_url(), 30.0,
-            "epubcfi(/6/4[chapter]!/4/2/1:7)", "alice", nil, "EPUB")
+            local_cfi, "alice", nil, "EPUB")
         sync.queue:enqueue(77, fixture.base_url(), 60.0, nil, "bob")
 
         sync:_drainAll()
@@ -1136,15 +1411,68 @@ describe("GrimmorySync token-independent capture & per-account drain", function(
         assert.not_nil(sync.queue:peek(77, "bob"),
             "bob's entry must stay queued until bob is logged in")
         assert.equals(1, sync.queue:size())
+        assert_request_ledger({
+            { method = "GET", path = "/api/v1/app/books/88/progress" },
+            {
+                method = "PUT", path = "/api/v1/app/books/88/progress",
+                json = { epubProgress = { cfi = local_cfi, percentage = 30 } },
+            },
+        }, fixture.requests())
+    end)
+
+    it("bulk drain keeps a closed book queued when the server is ahead", function()
+        local remote_cfi = "epubcfi(/6/4[chapter]!/4/2/1:20)"
+        fixture = spec_helper.start_http_fixture({
+            { method = "GET", path = "/api/v1/app/books/88/progress", status = 200,
+                headers = { ["Content-Type"] = "application/json" },
+                body = '{"id":88,"epubProgress":{"cfi":"' .. remote_cfi
+                    .. '","percentage":80}}', repeat_ = 1,
+                expect_headers = { Authorization = "Bearer alice-token" } },
+        })
+        local settings = require("luasettings"):open(settings_dir3.dir .. "/grimmory.lua")
+        settings:saveSetting("username", "alice")
+        settings:saveSetting("token", "alice-token")
+        settings:flush()
+        require("ui/network/manager")._set_wifi(true)
+
+        local sync = GrimmorySync:new()
+        sync.ui, sync.server_url, sync.token = ui, fixture.base_url(), "alice-token"
+        sync.enabled, sync.book_id, sync.pulled = true, 99, true
+        sync.has_pages, sync.awaiting_decision = true, false
+        sync.queue = require("queue").new{}
+        sync.queue:enqueue(88, fixture.base_url(), 30,
+            "epubcfi(/6/4[chapter]!/4/2/1:7)", "alice", nil, "EPUB")
+        local queued = assert(sync.queue:peek(88, "alice"))
+        local exact_before = {
+            book_id = 88, server_url = fixture.base_url(), percentage = 30,
+            position_data = "epubcfi(/6/4[chapter]!/4/2/1:7)",
+            cfi = "epubcfi(/6/4[chapter]!/4/2/1:7)", username = "alice",
+            file_type = "EPUB", enqueued_at = queued.enqueued_at,
+        }
+
+        sync:_drainAll()
+
+        assert.same(exact_before, sync.queue:peek(88, "alice"),
+            "a background sync must retain the exact queued entry")
+        local observed = sync.state:get({ username = "alice",
+            server_url = fixture.base_url(), book_id = 88, file_type = "EPUB" })
+        assert.equals(80, observed.server_percentage)
+        assert.equals(remote_cfi, observed.server_position)
+        assert_request_ledger({{
+            method = "GET", path = "/api/v1/app/books/88/progress",
+        }}, fixture.requests())
     end)
 
     it("collectors return drainable slots and removeIfUnchanged guards on identity", function()
         -- The async drain collects entries, forks to push, then removes on the
         -- callback. A page turn that replaces a slot (latest-wins) in between
         -- must NOT have its fresher progress dropped by the stale removal.
-        local q = require("queue").new{}
-        q:enqueue(99, "http://127.0.0.1", 42.0, nil, "alice")  -- current book
-        q:enqueue(88, "http://127.0.0.1", 30.0, nil, "alice")  -- other book
+        local queue_path = settings_dir3.dir .. "/collector-queue.lua"
+        local writer = require("queue").new{ path = queue_path }
+        writer:enqueue(99, "http://127.0.0.1", 42.0, nil, "alice")  -- current book
+        writer:enqueue(88, "http://127.0.0.1", 30.0, nil, "alice")  -- other book
+        writer = nil
+        local q = require("queue").new{ path = queue_path }
 
         local current = q:currentBookDrainable(99, "alice")
         assert.equals(1, #current)
@@ -1171,9 +1499,12 @@ describe("GrimmorySync token-independent capture & per-account drain", function(
         -- The multi-user guarantee at the queue layer: latest-wins applies
         -- per (account, book), so bob reading the same book must not destroy
         -- alice's undrained offline progress.
-        local q = require("queue").new{}
-        q:enqueue(99, "http://127.0.0.1", 42.0, nil, "alice")
-        q:enqueue(99, "http://127.0.0.1", 60.0, nil, "bob")
+        local queue_path = settings_dir3.dir .. "/account-queue.lua"
+        local writer = require("queue").new{ path = queue_path }
+        writer:enqueue(99, "http://127.0.0.1", 42.0, nil, "alice")
+        writer:enqueue(99, "http://127.0.0.1", 60.0, nil, "bob")
+        writer = nil
+        local q = require("queue").new{ path = queue_path }
 
         assert.equals(2, q:size(), "one slot per account, not one per book")
         assert.equals(42.0, q:peek(99, "alice").percentage)
@@ -1181,8 +1512,11 @@ describe("GrimmorySync token-independent capture & per-account drain", function(
 
         -- Latest-wins still collapses within one account.
         q:enqueue(99, "http://127.0.0.1", 55.0, nil, "alice")
-        assert.equals(2, q:size())
-        assert.equals(55.0, q:peek(99, "alice").percentage)
+        local after_replacement = require("queue").new{ path = queue_path }
+        assert.equals(2, after_replacement:size())
+        assert.equals(55.0, after_replacement:peek(99, "alice").percentage)
+        assert.equals(60.0, after_replacement:peek(99, "bob").percentage,
+            "alice's durable replacement must not mutate bob's slot")
     end)
 
     it("enqueue supersedes only the enqueuing account's legacy bare-key entry", function()
@@ -1247,6 +1581,9 @@ describe("GrimmorySync token-independent capture & per-account drain", function(
 
     it("a legacy (no-username) entry drains under the current account", function()
         fixture = spec_helper.start_http_fixture({
+            { method = "GET", path = "/api/v1/app/books/55/progress", status = 200,
+                headers = { ["Content-Type"] = "application/json" },
+                body = '{"id":55,"epubProgress":null}', repeat_ = 1 },
             { method = "PUT", path = "/api/v1/app/books/55/progress", status = 200, headers = {}, body = "", repeat_ = 2 },
         })
         local settings = require("luasettings"):open(settings_dir3.dir .. "/grimmory.lua")

@@ -7,7 +7,7 @@ back to the server automatically.
 
 > Two plugins, one install:
 > - **`grimmory.koplugin`** — log in, browse/search/filter your library, download books, and (optionally) get on your network over Tailscale.
-> - **`grimmory_sync.koplugin`** — syncs your reading progress to Grimmory in the background while you read.
+> - **`grimmory_sync.koplugin`** — syncs progress and, when enabled, EPUB annotations and reading sessions.
 
 ## Features
 
@@ -22,12 +22,32 @@ back to the server automatically.
   Grimmory's web reader. A conflict prompt appears when the server is ahead.
   EPUB uses our exact CFI converter, PDF/CBX use exact pages, and FB2/MOBI/AZW3
   sync percentage without mislabelling KOReader positions as EPUB CFI.
+- **EPUB annotation sync (opt in)** — highlights and notes use a durable
+  three-way merge. Concurrent edits are kept as visible pending conflicts
+  instead of silently overwriting either copy. Bookmarks and alternate EPUB
+  files are deliberately excluded because Grimmory annotations are book-scoped.
+  KOReader Unicode-scalar positions are translated to the UTF-16 units used by
+  epub.js, including around smart punctuation and emoji. A visibly truncated
+  annotation uploaded by an older build must be deleted and recreated: Grimmory
+  CFIs are immutable, so the plugin will flag but not silently rewrite it.
+- **Reading-session sync (opt in)** — reading time, progress and locations are
+  recorded with the book's real format. Short opens are discarded and retries
+  search server history first to avoid duplicate sessions after a lost response.
+- **Shelf collections** — fresh online Grimmory shelves are mirrored into
+  clearly namespaced KOReader collections. Only plugin-managed memberships are
+  removed; manually added books and collections are preserved.
+- **Connection & Sync panel** — tap the top-bar Wi-Fi icon to turn Wi-Fi on and
+  try the configured server, change sync options, or inspect every pending book
+  with its current device and last-known server position. A badge shows the
+  number of pending books (capped at `9+`).
 - **Works offline** — the last library view is cached, so the app still opens
   and your progress is queued and pushed when you're back online.
 - **Multiple accounts** — switch between saved logins without retyping a
   password (shared/household devices).
 - **Tailscale onboarding** — install and connect Tailscale from inside the app
-  to reach a server that isn't on your local network.
+  to reach a server that isn't on your local network. The installer verifies
+  the pinned archive and extracted executables and rejects unsafe archive paths,
+  links, unexpected members, or bytes that do not match their checksums.
 - **In-app updates** — after a public Grimmory release is available,
   **Grimmory ▸ Check for updates** downloads, checksum-verifies, and installs
   the complete two-plugin release as one lockstep update.
@@ -85,6 +105,11 @@ load both plugin pairs.
 accounts, change the download folder, sign out, or uninstall both plugins
 (with the option to keep your saved settings for an easy reinstall).
 
+Tap the Wi-Fi icon in any Grimmory view for **Connection & Sync**. Shelf
+collections are enabled by default. Annotation and reading-session sync are
+opt-in; their switches live in that panel alongside **Sync all now** and the
+per-book pending list.
+
 ## Troubleshooting
 
 See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for the common issues
@@ -94,7 +119,17 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for the common issues
 
 The off-device test harness is documented in [tests/README.md](tests/README.md).
 Run the tests with `scripts/test.sh` or the complete CI gate with
-`scripts/ci-check.sh`. To build and validate exactly two release artifacts, run
+`scripts/ci-check.sh`. Run `bash scripts/run-koreader-visual-tests.sh` for the real
+KOReader UI checks; its first run downloads and verifies the pinned desktop
+release, then all later runs capture and compare 47 scenarios in portrait and
+landscape (94 approved screenshots). On Windows, run that command through WSL.
+Reference images can only be changed by the explicit workflow documented in
+[tests/visual/README.md](tests/visual/README.md).
+The device-to-web annotation regression creates highlights through KOReader's
+real reader UI, then independently resolves the resulting CFI with Foliate and
+requires the complete DOM range to match KOReader and Grimmory byte-for-byte.
+It runs on the synthetic Unicode fixture and all eight configured real EPUBs.
+To build and validate exactly two release artifacts, run
 `scripts/release.sh <version>`.
 
 ## License

@@ -16,6 +16,13 @@ local function write_file(path, content)
     f:close()
 end
 
+local function read_file(path)
+    local f = assert(io.open(path, "rb"))
+    local content = f:read("*a")
+    f:close()
+    return content
+end
+
 -- Records every command; responder may override output/exit code.
 local function recording_exec(responder)
     local calls = {}
@@ -75,6 +82,19 @@ describe("Updater", function()
         it("honors an explicit staging_dir override", function()
             local up = Updater.new{ plugins_root = "/x/plugins", staging_dir = "/tmp/stage" }
             assert.are.equal("/tmp/stage", up.staging_dir)
+        end)
+
+        it("uses the production SHA-256 helper on exact file bytes", function()
+            local path = spec_helper._tmp_dir .. "/known-bytes"
+            write_file(path, "abc")
+            local up = Updater.new{}
+            assert.are.equal(
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                up.hash_file(path))
+            write_file(path, "abd") -- one-byte mutation must change the digest
+            assert.are_not.equal(
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                up.hash_file(path))
         end)
     end)
 
@@ -179,7 +199,10 @@ describe("Updater", function()
             if k == "sync" then for kk, vv in pairs(v) do sync[kk] = vv end end
             if k == "bl" then for kk, vv in pairs(v) do bl[kk] = vv end end
         end
-        return { version = version, plugins = { sync, bl } }
+        return { version = version, plugins = { sync, bl } }, {
+            sync = sync_tgz,
+            bl = bl_tgz,
+        }
     end
 
     describe("full pipeline (real shell + local HTTP)", function()
@@ -208,29 +231,37 @@ describe("Updater", function()
         it("accepts matching checksums", function()
             local root = spec_helper._tmp_dir .. "/plugins"
             install_plugins(root, "1.0.0")
-            local expected = string.rep("a", 64)
-            local manifest = serve_release("1.1.0", {
-                sync = { sha256 = expected }, bl = { sha256 = expected },
-            })
-            local up = make_updater(root, {
-                hash_file = function() return expected end,
-            })
+            local manifest, artifacts = serve_release("1.1.0")
+            local up = make_updater(root)
+            manifest.plugins[1].sha256 = assert(up.hash_file(artifacts.sync))
+            manifest.plugins[2].sha256 = assert(up.hash_file(artifacts.bl))
             local ok, ver = up:performUpdate(manifest)
             assert.is_true(ok)
             assert.are.equal("1.1.0", ver)
         end)
 
-        it("rejects a checksum mismatch", function()
+        it("rejects one-byte artifact corruption with the production hasher", function()
             local root = spec_helper._tmp_dir .. "/plugins"
             install_plugins(root, "1.0.0")
-            local expected = string.rep("a", 64)
-            local wrong = string.rep("b", 64)
-            local manifest = serve_release("1.1.0", {
-                sync = { sha256 = expected }, bl = { sha256 = wrong },
+            local sync_tgz = build_plugin_tgz("1.1.0", "grimmory_sync.koplugin")
+            local bl_tgz = build_plugin_tgz("1.1.0", "grimmory.koplugin")
+            local up = make_updater(root)
+            local sync_hash = assert(up.hash_file(sync_tgz))
+            local bl_hash = assert(up.hash_file(bl_tgz))
+            local original = read_file(bl_tgz)
+            local last = original:byte(#original)
+            write_file(bl_tgz,
+                original:sub(1, -2) .. string.char((last + 1) % 256))
+            http_handle = spec_helper.start_http_fixture({
+                { path = "/sync.tgz", body_file = sync_tgz },
+                { path = "/bl.tgz", body_file = bl_tgz },
             })
-            local up = make_updater(root, {
-                hash_file = function() return expected end,
-            })
+            local manifest = { version = "1.1.0", plugins = {
+                { dir = "grimmory_sync.koplugin", url = http_handle.url("/sync.tgz"),
+                    sha256 = sync_hash },
+                { dir = "grimmory.koplugin", url = http_handle.url("/bl.tgz"),
+                    sha256 = bl_hash },
+            } }
             local ok, err = up:performUpdate(manifest)
             assert.is_nil(ok)
             assert.matches("checksum mismatch", err)

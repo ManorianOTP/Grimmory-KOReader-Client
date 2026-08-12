@@ -28,19 +28,102 @@ describe("LibraryCache snapshot persistence", function()
     end)
 
     it("round-trips a snapshot for the same account", function()
-        local books = { { id = 1, fileName = "a.epub" }, { id = 2, fileName = "b.epub" } }
-        local shelves = { { id = 10, name = "Fav" } }
-        local libraries = { { id = 5, name = "Lib" } }
+        local books = {
+            {
+                id = 2,
+                fileName = "b.epub",
+                readStatus = "READING",
+                metadata = {
+                    title = "Second",
+                    authors = { "Beta", "Coauthor" },
+                    categories = { "Fiction", "Case Study" },
+                    seriesName = "Cycle",
+                    seriesNumber = 2,
+                    allMetadataLocked = false,
+                },
+                primaryFile = { id = 202, extension = "epub", isPrimary = true },
+            },
+            {
+                id = 1,
+                fileName = "a.pdf",
+                readStatus = "UNREAD",
+                metadata = {
+                    title = "First",
+                    authors = {},
+                    categories = {},
+                    pageCount = 0,
+                },
+                primaryFile = { id = 101, extension = "pdf", isPrimary = true },
+            },
+        }
+        local shelves = {
+            { id = 11, name = "Later", bookIds = { 2, 1 } },
+            { id = 10, name = "Earlier", bookIds = {} },
+        }
+        local libraries = {
+            { id = 6, name = "Secondary", bookCount = 1 },
+            { id = 5, name = "Primary", bookCount = 2 },
+        }
+        local expected_books = {
+            {
+                id = 2, fileName = "b.epub", readStatus = "READING",
+                metadata = {
+                    title = "Second", authors = { "Beta", "Coauthor" },
+                    categories = { "Fiction", "Case Study" },
+                    seriesName = "Cycle", seriesNumber = 2,
+                    allMetadataLocked = false,
+                },
+                primaryFile = { id = 202, extension = "epub", isPrimary = true },
+            },
+            {
+                id = 1, fileName = "a.pdf", readStatus = "UNREAD",
+                metadata = {
+                    title = "First", authors = {}, categories = {}, pageCount = 0,
+                },
+                primaryFile = { id = 101, extension = "pdf", isPrimary = true },
+            },
+        }
+        local expected_shelves = {
+            { id = 11, name = "Later", bookIds = { 2, 1 } },
+            { id = 10, name = "Earlier", bookIds = {} },
+        }
+        local expected_libraries = {
+            { id = 6, name = "Secondary", bookCount = 1 },
+            { id = 5, name = "Primary", bookCount = 2 },
+        }
         LibraryCache.save("alice", "http://srv", books, shelves, libraries)
 
+        -- Mutating every caller-owned collection after save proves the later
+        -- result is reconstructed from serialized disk bytes, not shared
+        -- in-memory tables.
+        books[1].metadata.title = "MUTATED"
+        books[2].primaryFile.id = -1
+        books[#books + 1] = { id = 999 }
+        shelves[1].bookIds[1] = 999
+        libraries[1].name = "MUTATED"
+        package.loaded.library_cache = nil
+        LibraryCache = require("library_cache")
         local snap = LibraryCache.load("alice", "http://srv")
         assert.not_nil(snap)
         assert.equals("alice", snap.username)
         assert.equals("http://srv", snap.server_url)
-        assert.equals(2, #snap.books)
-        assert.equals(1, snap.books[1].id)
-        assert.equals(1, #snap.shelves)
+        assert.same(expected_books, snap.books,
+            "complete normalized book records and order must survive restart")
+        assert.same(expected_shelves, snap.shelves,
+            "complete shelf records and order must survive restart")
+        assert.same(expected_libraries, snap.libraries,
+            "complete library records and order must survive restart")
         assert.equals("number", type(snap.fetched_at))
+
+        -- A consumer mutating its decoded snapshot cannot alter the file; a
+        -- second fresh module/decoder must recover the original record graph.
+        snap.books[1].metadata.authors[1] = "MUTATED AGAIN"
+        snap.shelves = {}
+        package.loaded.library_cache = nil
+        local reloaded = require("library_cache").load("alice", "http://srv")
+        assert.same(expected_books, reloaded.books)
+        assert.same(expected_shelves, reloaded.shelves)
+        assert.same(expected_libraries, reloaded.libraries)
     end)
 
     it("returns nil for a different account (username or server mismatch)", function()
@@ -85,19 +168,23 @@ describe("LibraryCache snapshot persistence", function()
         LibraryCache.save("alice", "http://srv", { { id = 1 } }, {}, {})
         LibraryCache.save("bob", "http://srv", { { id = 2 } }, {}, {})
 
-        local alice_snap = LibraryCache.load("alice", "http://srv")
-        local bob_snap = LibraryCache.load("bob", "http://srv")
+        package.loaded.library_cache = nil
+        local reloaded_cache = require("library_cache")
+        local alice_snap = reloaded_cache.load("alice", "http://srv")
+        local bob_snap = reloaded_cache.load("bob", "http://srv")
         assert.not_nil(alice_snap, "alice's snapshot must survive bob's save")
-        assert.equals(1, alice_snap.books[1].id)
+        assert.same({ { id = 1 } }, alice_snap.books)
         assert.not_nil(bob_snap)
-        assert.equals(2, bob_snap.books[1].id)
+        assert.same({ { id = 2 } }, bob_snap.books)
     end)
 
     it("distinguishes same username on different servers", function()
         LibraryCache.save("alice", "http://srv", { { id = 1 } }, {}, {})
         LibraryCache.save("alice", "http://other", { { id = 9 } }, {}, {})
-        assert.equals(1, LibraryCache.load("alice", "http://srv").books[1].id)
-        assert.equals(9, LibraryCache.load("alice", "http://other").books[1].id)
+        package.loaded.library_cache = nil
+        local reloaded = require("library_cache")
+        assert.same({ { id = 1 } }, reloaded.load("alice", "http://srv").books)
+        assert.same({ { id = 9 } }, reloaded.load("alice", "http://other").books)
     end)
 
     it("falls back to the pre-per-account shared file, for its owner only", function()

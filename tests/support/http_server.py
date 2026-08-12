@@ -119,6 +119,26 @@ class FixtureHandler(BaseHTTPRequestHandler):
     def do_DELETE(self): self._handle()
 
     def _handle(self):
+        # Test-only control surface.  Keep it out of ``received`` so asking for
+        # the ledger cannot make a zero-request assertion pass or fail by
+        # changing the value being observed.
+        if self.command == "GET" and urlsplit(self.path).path == "/__fixture__/requests":
+            with self.lock:
+                received = [
+                    {
+                        "method": item["method"],
+                        "path": item["path"],
+                        "body": item["body"].decode("utf-8", errors="replace"),
+                    }
+                    for item in self.received
+                ]
+            payload = json.dumps(received).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         body = self._read_body()
         with self.lock:
             self.received.append({

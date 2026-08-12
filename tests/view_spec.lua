@@ -30,14 +30,14 @@ local function make_books()
             lastReadTime = "2024-03-01",
             personalRating = 9,
             metadata = {
-                title        = "The Final Empire",
-                authors      = { "Brandon Sanderson", "Isaac Stewart" },
-                seriesName   = "Mistborn",
+                title        = "The Glass Cartographer",
+                authors      = { "Mira Vale", "Jun Orr" },
+                seriesName   = "The Meridian Cycle",
                 seriesNumber = 1,
                 pageCount    = 541,
                 publishedDate= "2006-07-17",
                 categories   = { "Fantasy", "Epic Fantasy" },
-                publisher    = "Tor Books",
+                publisher    = "Northbridge Press",
                 language     = "English",
                 amazonRating     = 4.7,
                 goodreadsRating  = 4.4,
@@ -51,14 +51,14 @@ local function make_books()
             addedOn = "2022-06-15",
             lastReadTime = "2025-01-20",
             metadata = {
-                title        = "Dune",
-                authors      = { "Frank Herbert" },
-                seriesName   = "Dune",
+                title        = "Signal at Perihelion",
+                authors      = { "Rowan Keel" },
+                seriesName   = "The Orbitals",
                 seriesNumber = 1,
                 pageCount    = 412,
                 publishedDate= "1965-08-01",
                 categories   = { "Sci-Fi" },
-                publisher    = "Chilton Books",
+                publisher    = "Aster House",
                 language     = "English",
                 goodreadsRating = 4.2,
             },
@@ -70,14 +70,14 @@ local function make_books()
             fileSizeKb = 768,    -- 0.75 MB → <1 MB
             addedOn = "2022-06-16",
             metadata = {
-                title        = "Dune Messiah",
-                authors      = { "Frank Herbert" },
-                seriesName   = "Dune",
+                title        = "The Quiet Aphelion",
+                authors      = { "Rowan Keel" },
+                seriesName   = "The Orbitals",
                 seriesNumber = 2,
                 pageCount    = 226,
                 publishedDate= "1969-10-15",
                 categories   = { "Sci-Fi" },
-                publisher    = "Putnam",
+                publisher    = "Aster House",
                 language     = "English",
             },
         },
@@ -89,12 +89,12 @@ local function make_books()
             addedOn = "2021-11-01",
             personalRating = 7,
             metadata = {
-                title        = "The Alchemist",
-                authors      = { "Paulo Coelho" },
+                title        = "The Orchard Clock",
+                authors      = { "Elian Voss" },
                 pageCount    = 208,
                 publishedDate= "1988-01-01",
                 categories   = { "Fiction", "Self-help" },
-                publisher    = "HarperCollins",
+                publisher    = "Lantern House Editions",
                 language     = "English",
                 amazonRating = 4.6,
             },
@@ -106,12 +106,12 @@ local function make_books()
             fileSizeKb = 22000,  -- 21.5 MB → 20 MB+
             addedOn = "2020-03-05",
             metadata = {
-                title        = "A Brief History of Time",
-                authors      = { "Stephen Hawking" },
+                title        = "A Compact History of Dust",
+                authors      = { "Nia Sen" },
                 pageCount    = 212,
                 publishedDate= "1998-09-01",
                 categories   = { "Non-fiction", "Science" },
-                publisher    = "Bantam",
+                publisher    = "Cairn Academic",
                 language     = "English",
                 goodreadsRating = 4.2,
             },
@@ -123,14 +123,14 @@ local function make_books()
             fileSizeKb = 5500,   -- 5.37 MB → 5-20 MB
             addedOn = "2023-07-20",
             metadata = {
-                title        = "A Study in Scarlet",
-                authors      = { "Arthur Conan Doyle" },
-                seriesName   = "Sherlock Holmes",
+                title        = "The Red Thread Ledger",
+                authors      = { "Tomas Quill" },
+                seriesName   = "Inspector Rook",
                 seriesNumber = 1,
                 pageCount    = 300,
                 publishedDate= "1887-11-01",
                 categories   = { "Mystery" },
-                publisher    = "Ward Lock & Co",
+                publisher    = "Copper Street Press",
                 language     = "English",
             },
         },
@@ -141,12 +141,12 @@ local function make_books()
             fileSizeKb = 1200,   -- 1.17 MB → 1-5 MB
             addedOn = "2024-01-01",
             metadata = {
-                title        = "The Name of the Wind",
-                authors      = { "Patrick Rothfuss" },
+                title        = "Wind Over Hollow Glass",
+                authors      = { "Cerys North" },
                 pageCount    = 662,
                 publishedDate= "2007-03-27",
                 categories   = { "Fantasy" },
-                publisher    = "DAW Books",
+                publisher    = "Northbank Fiction",
                 language     = "English",
             },
         },
@@ -174,12 +174,12 @@ local function make_books()
             fileSizeKb = 3000,   -- 2.93 MB → 1-5 MB
             addedOn = "2018-08-08",
             metadata = {
-                title        = "Fight Club",
-                authors      = { "Chuck Palahniuk" },
+                title        = "After the Last Bell",
+                authors      = { "Ivo Marsh" },
                 pageCount    = 218,
                 publishedDate= "1999-08-17",
                 categories   = { "Fiction" },
-                publisher    = "W. W. Norton",
+                publisher    = "Stonecrop Books",
                 language     = "English",
                 amazonRating = 4.0,
             },
@@ -193,6 +193,22 @@ local function make_books()
             metadata   = {},
         },
     }
+end
+
+local function ids(books)
+    local result = {}
+    for index, book in ipairs(books) do result[index] = book.id end
+    return result
+end
+
+local function assert_ids(expected, books, label)
+    local actual, seen = ids(books), {}
+    assert.same(expected, actual, label)
+    for _, id in ipairs(actual) do
+        assert.is_nil(seen[id], (label or "result") .. " duplicated id " .. tostring(id))
+        seen[id] = true
+    end
+    assert.equals(#expected, #actual, (label or "result") .. " contains extras")
 end
 
 -- ---------------------------------------------------------------------------
@@ -271,54 +287,124 @@ describe("view", function()
     describe("applySort", function()
         it("sorts by title asc", function()
             local books = make_books()
-            local sorted = view.applySort(books, { key = "title", dir = "asc" })
-            -- First book alphabetically should be "A Brief History of Time"
-            assert.equals("A Brief History of Time",
-                (sorted[1].metadata or {}).title)
+            local expected = {
+                title = {
+                    asc = {5, 9, 8, 2, 1, 4, 3, 6, 7, 10},
+                    desc = {7, 6, 3, 4, 1, 2, 8, 9, 5, 10},
+                },
+                title_series = {
+                    asc = {6, 1, 2, 3, 4, 5, 7, 8, 9, 10},
+                    desc = {3, 2, 1, 6, 4, 5, 7, 8, 9, 10},
+                },
+                author = {
+                    asc = {8, 7, 4, 9, 1, 5, 2, 3, 6, 10},
+                    desc = {6, 2, 3, 5, 1, 9, 4, 7, 8, 10},
+                },
+                last_read = {
+                    asc = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+                    desc = {2, 1, 3, 4, 5, 6, 7, 8, 9, 10},
+                },
+                added_on = {
+                    asc = {9, 8, 5, 4, 2, 3, 1, 6, 7, 10},
+                    desc = {7, 6, 1, 3, 2, 4, 5, 8, 9, 10},
+                },
+                personal_rating = {
+                    asc = {4, 1, 2, 3, 5, 6, 7, 8, 9, 10},
+                    desc = {1, 4, 2, 3, 5, 6, 7, 8, 9, 10},
+                },
+                pages = {
+                    asc = {8, 4, 5, 9, 3, 6, 2, 1, 7, 10},
+                    desc = {7, 1, 2, 6, 3, 9, 5, 4, 8, 10},
+                },
+                author_series = {
+                    asc = {8, 7, 4, 9, 1, 5, 2, 3, 6, 10},
+                    desc = {6, 3, 2, 5, 1, 9, 4, 7, 8, 10},
+                },
+                file_name = {
+                    asc = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+                    desc = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+                },
+                file_size = {
+                    asc = {4, 2, 3, 8, 7, 1, 9, 6, 5, 10},
+                    desc = {5, 6, 9, 1, 7, 8, 3, 2, 4, 10},
+                },
+                publisher = {
+                    asc = {2, 3, 5, 6, 4, 7, 1, 8, 9, 10},
+                    desc = {9, 8, 1, 7, 4, 6, 5, 2, 3, 10},
+                },
+                published_date = {
+                    asc = {6, 2, 3, 4, 5, 9, 1, 7, 8, 10},
+                    desc = {8, 7, 1, 9, 5, 4, 3, 2, 6, 10},
+                },
+                amazon_rating = {
+                    asc = {9, 4, 1, 2, 3, 5, 6, 7, 8, 10},
+                    desc = {1, 4, 9, 2, 3, 5, 6, 7, 8, 10},
+                },
+                amazon_count = {
+                    asc = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+                    desc = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+                },
+                goodreads_rating = {
+                    asc = {2, 5, 1, 3, 4, 6, 7, 8, 9, 10},
+                    desc = {1, 2, 5, 3, 4, 6, 7, 8, 9, 10},
+                },
+                goodreads_count = {
+                    asc = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+                    desc = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+                },
+                hardcover_rating = {
+                    asc = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+                    desc = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+                },
+                hardcover_count = {
+                    asc = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+                    desc = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+                },
+                locked = {
+                    asc = {8, 1, 2, 3, 4, 5, 6, 7, 9, 10},
+                    desc = {8, 1, 2, 3, 4, 5, 6, 7, 9, 10},
+                },
+            }
+            for key, descriptor in pairs(view.SORTS) do
+                if key ~= "random" then
+                    assert.is_table(expected[key], "missing exact sort oracle for " .. key)
+                    for _, direction in ipairs({ "asc", "desc" }) do
+                        assert_ids(expected[key][direction], view.applySort(books, {
+                            key = key, dir = direction,
+                        }), key .. " " .. direction)
+                    end
+                end
+            end
         end)
 
         it("sorts by title desc, highest title first", function()
             local books = make_books()
             local sorted = view.applySort(books, { key = "title", dir = "desc" })
-            -- "The Name of the Wind" starts with T — highest alphabetically among our fixtures
-            -- Book 7 = "The Name of the Wind", book 9 = "The...", book 1 = "The Final Empire"
-            -- Desc: T > ... > A. First non-nil title should be highest alphabetically.
-            -- Book 10 has nil title and must still sink to last.
-            assert.equals(10, sorted[#sorted].id)
-            -- First element should have a title starting with "T" (The Name of the Wind)
-            local first_title = (sorted[1].metadata or {}).title or ""
-            assert.truthy(first_title > "S", "expected desc first title > 'S', got: " .. first_title)
+            assert_ids({7, 6, 3, 4, 1, 2, 8, 9, 5, 10}, sorted, "title desc")
         end)
 
         it("sorts by pages asc", function()
             local books = make_books()
             local sorted = view.applySort(books, { key = "pages", dir = "asc" })
-            -- Only books with pageCount should come first; nil-pageCount (book 10) sinks last
-            assert.not_equals(10, sorted[1].id)
-            assert.equals(10, sorted[#sorted].id)
+            assert_ids({8, 4, 5, 9, 3, 6, 2, 1, 7, 10}, sorted, "pages asc")
         end)
 
         it("sorts by pages desc, nil still sinks last", function()
             local books = make_books()
             local sorted = view.applySort(books, { key = "pages", dir = "desc" })
-            -- Highest pages first; book 10 (nil pages) must still be last
-            assert.equals(10, sorted[#sorted].id)
-            -- book 7 has 662 pages = max
-            assert.equals(7, sorted[1].id)
+            assert_ids({7, 1, 2, 6, 3, 9, 5, 4, 8, 10}, sorted, "pages desc")
         end)
 
         it("missing values sink last in asc direction", function()
             local books = make_books()
             local sorted = view.applySort(books, { key = "added_on", dir = "asc" })
-            -- Book 10 has nil addedOn, should be last
-            assert.equals(10, sorted[#sorted].id)
+            assert_ids({9, 8, 5, 4, 2, 3, 1, 6, 7, 10}, sorted, "added asc")
         end)
 
         it("missing values sink last in desc direction", function()
             local books = make_books()
             local sorted = view.applySort(books, { key = "added_on", dir = "desc" })
-            -- Book 10 has nil addedOn, should still be last even in desc
-            assert.equals(10, sorted[#sorted].id)
+            assert_ids({7, 6, 1, 3, 2, 4, 5, 8, 9, 10}, sorted, "added desc")
         end)
 
         it("is stable: equal keys preserve original order", function()
@@ -330,66 +416,64 @@ describe("view", function()
             }
             -- Sort by pages (all nil) — should preserve original order
             local sorted = view.applySort(books, { key = "pages", dir = "asc" })
-            assert.equals(1, sorted[1].id)
-            assert.equals(2, sorted[2].id)
-            assert.equals(3, sorted[3].id)
+            assert_ids({1, 2, 3}, sorted, "stable nil tie")
         end)
 
         it("random sort returns same id multiset (permutation)", function()
             local books = make_books()
             local sorted = view.applySort(books, { key = "random", dir = "asc", _seed = 42 })
-            assert.equals(#books, #sorted)
-            -- Same IDs present
-            local orig_ids = {}
-            for _, b in ipairs(books) do orig_ids[b.id] = true end
-            for _, b in ipairs(sorted) do
-                assert.truthy(orig_ids[b.id], "unexpected id in random sort: " .. tostring(b.id))
-            end
+            local shuffled = ids(sorted)
+            assert.not_same(ids(books), shuffled,
+                "random mode must actually move at least one book")
+            local ordered = {}
+            for _, id in ipairs(shuffled) do ordered[#ordered + 1] = id end
+            table.sort(ordered)
+            assert.same({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, ordered,
+                "random result must contain each input exactly once")
+            assert_ids(shuffled, sorted, "random permutation")
         end)
 
         it("random sort with same seed produces same order", function()
             local books = make_books()
             local s1 = view.applySort(books, { key = "random", dir = "asc", _seed = 99 })
             local s2 = view.applySort(books, { key = "random", dir = "asc", _seed = 99 })
-            for i = 1, #s1 do
-                assert.equals(s1[i].id, s2[i].id)
-            end
+            assert_ids(ids(s1), s2, "same-seed random replay")
+            assert.not_same(ids(s1), ids(view.applySort(books, {
+                key = "random", dir = "asc", _seed = 100,
+            })), "different seeds must not be a no-op alias")
         end)
 
         it("title+series sorts by series then number then title", function()
             local books = {
-                { id = 1, metadata = { title = "Dune Messiah",    seriesName = "Dune", seriesNumber = 2 } },
-                { id = 2, metadata = { title = "Dune",            seriesName = "Dune", seriesNumber = 1 } },
-                { id = 3, metadata = { title = "The Alchemist",   seriesName = nil } },
-                { id = 4, metadata = { title = "The Final Empire",seriesName = "Mistborn", seriesNumber = 1 } },
+                { id = 1, metadata = { title = "The Quiet Aphelion", seriesName = "The Orbitals", seriesNumber = 2 } },
+                { id = 2, metadata = { title = "Signal at Perihelion", seriesName = "The Orbitals", seriesNumber = 1 } },
+                { id = 3, metadata = { title = "The Orchard Clock", seriesName = nil } },
+                { id = 4, metadata = { title = "The Glass Cartographer", seriesName = "The Meridian Cycle", seriesNumber = 1 } },
             }
             local sorted = view.applySort(books, { key = "title_series", dir = "asc" })
-            -- Dune(1) < Dune Messiah(2) < Mistborn: Final Empire < no-series: The Alchemist
-            assert.equals(2, sorted[1].id)   -- Dune #1
-            assert.equals(1, sorted[2].id)   -- Dune Messiah #2
-            assert.equals(4, sorted[3].id)   -- Mistborn #1
-            assert.equals(3, sorted[4].id)   -- no series
+            -- Meridian precedes Orbitals; numbers order books within a series.
+            assert_ids({4, 2, 1, 3}, sorted, "title_series asc")
         end)
 
         it("title_series desc: no-series books sink last", function()
             local books = {
-                { id = 1, metadata = { title = "Dune", seriesName = "Dune", seriesNumber = 1 } },
-                { id = 2, metadata = { title = "The Alchemist", seriesName = nil } },
-                { id = 3, metadata = { title = "The Final Empire", seriesName = "Mistborn", seriesNumber = 1 } },
+                { id = 1, metadata = { title = "Signal at Perihelion", seriesName = "The Orbitals", seriesNumber = 1 } },
+                { id = 2, metadata = { title = "The Orchard Clock", seriesName = nil } },
+                { id = 3, metadata = { title = "The Glass Cartographer", seriesName = "The Meridian Cycle", seriesNumber = 1 } },
             }
             local sorted = view.applySort(books, { key = "title_series", dir = "desc" })
-            assert.equals(2, sorted[#sorted].id)
+            assert_ids({1, 3, 2}, sorted, "title_series desc")
         end)
 
         it("author_series: no-author books sink last asc and desc", function()
             local books = {
-                { id = 1, metadata = { title = "Dune", authors = {"Frank Herbert"}, seriesName = "Dune", seriesNumber = 1 } },
+                { id = 1, metadata = { title = "Signal at Perihelion", authors = {"Rowan Keel"}, seriesName = "The Orbitals", seriesNumber = 1 } },
                 { id = 2, metadata = { title = "Untitled", authors = {} } },
             }
             local asc = view.applySort(books, { key = "author_series", dir = "asc" })
-            assert.equals(2, asc[#asc].id)
+            assert_ids({1, 2}, asc, "author_series asc")
             local desc = view.applySort(books, { key = "author_series", dir = "desc" })
-            assert.equals(2, desc[#desc].id)
+            assert_ids({1, 2}, desc, "author_series desc")
         end)
     end)
 
@@ -402,17 +486,19 @@ describe("view", function()
             local books = make_books()
             local vs = { combine = "AND", filters = {} }
             local result = view.applyFilters(books, vs)
-            assert.equals(#books, #result)
+            assert_ids({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, result,
+                "empty filter identity")
         end)
 
         it("single dimension filter: readStatus READ returns only READ books", function()
             local books = make_books()
+            books[#books + 1] = { id = 11, readStatus = "", metadata = {} }
+            books[#books + 1] = { id = 12, readStatus = "read", metadata = {} }
+            books[#books + 1] = { id = 13, readStatus = false, metadata = {} }
             local vs = { combine = "AND", filters = { readStatus = { READ = true } } }
             local result = view.applyFilters(books, vs)
-            for _, b in ipairs(result) do
-                assert.equals("READ", b.readStatus)
-            end
-            assert.truthy(#result > 0)
+            assert_ids({1, 4, 8}, result,
+                "READ excludes missing, normalized-null, empty, and case variants")
         end)
 
         it("within-dim OR: readStatus READ or READING", function()
@@ -421,63 +507,61 @@ describe("view", function()
                 readStatus = { READ = true, READING = true }
             }}
             local result = view.applyFilters(books, vs)
-            for _, b in ipairs(result) do
-                assert.truthy(b.readStatus == "READ" or b.readStatus == "READING",
-                    "unexpected status: " .. tostring(b.readStatus))
-            end
+            assert_ids({1, 2, 4, 6, 8}, result, "READ or READING exact union")
         end)
 
         it("multi-dim AND: must match both readStatus AND author", function()
             local books = make_books()
             local vs = { combine = "AND", filters = {
                 readStatus = { READ = true },
-                author     = { ["Brandon Sanderson"] = true },
+                author     = { ["Mira Vale"] = true },
             }}
             local result = view.applyFilters(books, vs)
-            -- Only book 1 is READ and has Brandon Sanderson as author
-            assert.equals(1, #result)
-            assert.equals(1, result[1].id)
+            -- Only book 1 is READ and has Mira Vale as author
+            assert_ids({1}, result, "READ and Mira Vale exact intersection")
         end)
 
         it("multi-dim OR: match readStatus OR author", function()
             local books = make_books()
             local vs = { combine = "OR", filters = {
                 readStatus = { READ = true },
-                author     = { ["Frank Herbert"] = true },
+                author     = { ["Rowan Keel"] = true },
             }}
             local result = view.applyFilters(books, vs)
-            -- READ books: 1, 4, 8; Frank Herbert: 2, 3; union = 1,2,3,4,8
-            local ids = {}
-            for _, b in ipairs(result) do ids[b.id] = true end
-            assert.truthy(ids[1])
-            assert.truthy(ids[2])
-            assert.truthy(ids[3])
-            assert.truthy(ids[4])
-            assert.truthy(ids[8])
+            -- READ books: 1, 4, 8; Rowan Keel: 2, 3; union = 1,2,3,4,8
+            assert_ids({1, 2, 3, 4, 8}, result, "READ or Rowan Keel exact union")
         end)
 
         it("multi-author book matches either author", function()
             local books = make_books()
-            -- Book 1 has authors: Brandon Sanderson AND Isaac Stewart
-            local vs_brandon = { combine = "AND", filters = {
-                author = { ["Brandon Sanderson"] = true }
+            books[#books + 1] = { id = 11, metadata = { authors = { "mira vale" } } }
+            books[#books + 1] = { id = 12, metadata = { authors = { "" } } }
+            books[#books + 1] = { id = 13, metadata = { authors = false } }
+            books[#books + 1] = { id = 14, metadata = {} }
+            -- Book 1 has authors: Mira Vale AND Jun Orr
+            local vs_mira = { combine = "AND", filters = {
+                author = { ["Mira Vale"] = true }
             }}
-            local vs_isaac = { combine = "AND", filters = {
-                author = { ["Isaac Stewart"] = true }
+            local vs_jun = { combine = "AND", filters = {
+                author = { ["Jun Orr"] = true }
             }}
-            local r1 = view.applyFilters(books, vs_brandon)
-            local r2 = view.applyFilters(books, vs_isaac)
-            local found1, found2 = false, false
-            for _, b in ipairs(r1) do if b.id == 1 then found1 = true end end
-            for _, b in ipairs(r2) do if b.id == 1 then found2 = true end end
-            assert.truthy(found1, "multi-author book not found by first author")
-            assert.truthy(found2, "multi-author book not found by second author")
+            local r1 = view.applyFilters(books, vs_mira)
+            local r2 = view.applyFilters(books, vs_jun)
+            assert_ids({1}, r1, "exact first-author match")
+            assert_ids({1}, r2, "exact second-author match")
+            assert_ids({11}, view.applyFilters(books, {
+                combine = "AND", filters = { author = { ["mira vale"] = true } },
+            }), "author case variant remains a distinct exact value")
+            assert_ids({}, view.applyFilters(books, {
+                combine = "AND", filters = { author = { [""] = true } },
+            }), "empty/missing/null-normalized authors never become a facet value")
         end)
 
         it("nil view_state returns all books", function()
             local books = make_books()
             local result = view.applyFilters(books, nil)
-            assert.equals(#books, #result)
+            assert_ids({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, result,
+                "nil view state identity")
         end)
     end)
 
@@ -494,11 +578,9 @@ describe("view", function()
                 sort    = { key = "title", dir = "asc" },
             }
             local result = view.applyView(books, vs)
-            -- READING books: 2 (Dune), 6 (A Study in Scarlet)
-            -- Sorted asc: "A Study in Scarlet" < "Dune"
-            assert.equals(2, #result)
-            assert.equals(6, result[1].id)
-            assert.equals(2, result[2].id)
+            -- READING books: 2 (Signal at Perihelion), 6 (The Red Thread Ledger)
+            -- Sorted asc: "Signal at Perihelion" < "The Red Thread Ledger"
+            assert_ids({2, 6}, result, "filter-then-sort exact result")
         end)
     end)
 
@@ -509,30 +591,33 @@ describe("view", function()
     describe("computeFacetCounts", function()
         it("counts all values when no other filters active", function()
             local books = make_books()
+            books[#books + 1] = { id = 11, readStatus = "", metadata = {} }
+            books[#books + 1] = { id = 12, readStatus = "read", metadata = {} }
+            books[#books + 1] = { id = 13, readStatus = false, metadata = {} }
             local vs = { combine = "AND", filters = {} }
             local facets = view.computeFacetCounts(books, vs, "readStatus")
-            -- Should have READ, READING, UNREAD, PAUSED counts
-            local by_val = {}
-            for _, f in ipairs(facets.ordered) do by_val[f.value] = f.count end
-            assert.truthy(by_val["READ"] and by_val["READ"] >= 3)
-            assert.truthy(by_val["READING"] and by_val["READING"] >= 2)
-            assert.truthy(by_val["UNREAD"] and by_val["UNREAD"] >= 3)
+            assert.same({
+                { value = "PAUSED", label = "PAUSED", count = 1 },
+                { value = "READ", label = "READ", count = 3 },
+                { value = "READING", label = "READING", count = 2 },
+                { value = "UNREAD", label = "UNREAD", count = 3 },
+                { value = "read", label = "read", count = 1 },
+            }, facets.ordered,
+                "facets must include the case variant but no missing/null/empty extras")
         end)
 
         it("drops zero-count values", function()
             local books = make_books()
-            -- Filter to only Frank Herbert books (id 2 and 3, both READING/UNREAD)
+            -- Filter to only Rowan Keel books (id 2 and 3, both READING/UNREAD)
             local vs = { combine = "AND", filters = {
-                author = { ["Frank Herbert"] = true }
+                author = { ["Rowan Keel"] = true }
             }}
             -- Count readStatus facets: now only READING and UNREAD should appear
             local facets = view.computeFacetCounts(books, vs, "readStatus")
-            local by_val = {}
-            for _, f in ipairs(facets.ordered) do by_val[f.value] = f.count end
-            -- READ books by Frank Herbert: none → should be absent
-            assert.is_nil(by_val["READ"])
-            assert.truthy(by_val["READING"])
-            assert.truthy(by_val["UNREAD"])
+            assert.same({
+                { value = "READING", label = "READING", count = 1 },
+                { value = "UNREAD", label = "UNREAD", count = 1 },
+            }, facets.ordered, "zero-count facets must be absent with no extras")
         end)
 
         it("facets for the queried dim ignore that dim's own filter", function()
@@ -543,25 +628,24 @@ describe("view", function()
             }}
             -- Asking for readStatus facets: should see counts from ALL books (ignoring self-filter)
             local facets = view.computeFacetCounts(books, vs, "readStatus")
-            local by_val = {}
-            for _, f in ipairs(facets.ordered) do by_val[f.value] = f.count end
-            -- READING should appear (it's in the full set)
-            assert.truthy(by_val["READING"], "READING should appear when self-filter ignored")
+            assert.same({
+                { value = "PAUSED", label = "PAUSED", count = 1 },
+                { value = "READ", label = "READ", count = 3 },
+                { value = "READING", label = "READING", count = 2 },
+                { value = "UNREAD", label = "UNREAD", count = 3 },
+            }, facets.ordered, "self-filter must be ignored exactly")
         end)
 
         it("counts respect other active filters", function()
             local books = make_books()
-            -- Filter by Frank Herbert, count series facets
+            -- Filter by Rowan Keel, count series facets
             local vs = { combine = "AND", filters = {
-                author = { ["Frank Herbert"] = true }
+                author = { ["Rowan Keel"] = true }
             }}
             local facets = view.computeFacetCounts(books, vs, "series")
-            local by_val = {}
-            for _, f in ipairs(facets.ordered) do by_val[f.value] = f.count end
-            -- Only Dune series should appear (Frank Herbert's only series here)
-            assert.truthy(by_val["Dune"])
-            -- Mistborn should not appear
-            assert.is_nil(by_val["Mistborn"])
+            assert.same({
+                { value = "The Orbitals", label = "The Orbitals", count = 2 },
+            }, facets.ordered, "other filters must leave one exact series facet")
         end)
     end)
 
@@ -576,18 +660,7 @@ describe("view", function()
                 page_count = { ["300-499"] = true }
             }}
             local result = view.applyFilters(books, vs)
-            -- Book 6 has exactly 300 pages
-            local found = false
-            for _, b in ipairs(result) do
-                if b.id == 6 then found = true end
-            end
-            assert.truthy(found, "300-page book not in 300-499 bucket")
-            -- Book with 226 pages should not be in 300-499
-            local has_226 = false
-            for _, b in ipairs(result) do
-                if b.id == 3 then has_226 = true end
-            end
-            assert.falsy(has_226, "226-page book should not be in 300-499 bucket")
+            assert_ids({2, 6}, result, "300-499 exact bucket membership")
         end)
 
         it("4.0 amazon rating matches 4+ bucket", function()
@@ -597,11 +670,7 @@ describe("view", function()
                 amazon_rating = { ["4+"] = true }
             }}
             local result = view.applyFilters(books, vs)
-            local found = false
-            for _, b in ipairs(result) do
-                if b.id == 9 then found = true end
-            end
-            assert.truthy(found, "4.0 amazon rating should match 4+ bucket")
+            assert_ids({1, 4, 9}, result, "amazon 4+ exact bucket membership")
         end)
 
         it("1999 book lands in 1990s decade", function()
@@ -611,11 +680,7 @@ describe("view", function()
                 published_year = { ["1990s"] = true }
             }}
             local result = view.applyFilters(books, vs)
-            local found = false
-            for _, b in ipairs(result) do
-                if b.id == 9 then found = true end
-            end
-            assert.truthy(found, "1999 book should be in 1990s decade bucket")
+            assert_ids({5, 9}, result, "1990s exact bucket membership")
         end)
 
         it("1965 book lands in Pre-1990", function()
@@ -625,11 +690,7 @@ describe("view", function()
                 published_year = { ["Pre-1990"] = true }
             }}
             local result = view.applyFilters(books, vs)
-            local found = false
-            for _, b in ipairs(result) do
-                if b.id == 2 then found = true end
-            end
-            assert.truthy(found, "1965 book should be in Pre-1990 bucket")
+            assert_ids({2, 3, 4, 6}, result, "Pre-1990 exact bucket membership")
         end)
 
         it("file size <1 MB bucket", function()
@@ -639,13 +700,7 @@ describe("view", function()
                 file_size = { ["<1 MB"] = true }
             }}
             local result = view.applyFilters(books, vs)
-            local ids = {}
-            for _, b in ipairs(result) do ids[b.id] = true end
-            assert.truthy(ids[2])
-            assert.truthy(ids[3])
-            assert.truthy(ids[4])
-            -- Book 1 (2048 kb = 2MB) should not be in <1MB
-            assert.falsy(ids[1])
+            assert_ids({2, 3, 4, 8}, result, "sub-1MB exact bucket membership")
         end)
 
         it("personal rating 9 lands in 8+ bucket", function()
@@ -655,11 +710,7 @@ describe("view", function()
                 personal_rating = { ["8+"] = true }
             }}
             local result = view.applyFilters(books, vs)
-            local found = false
-            for _, b in ipairs(result) do
-                if b.id == 1 then found = true end
-            end
-            assert.truthy(found, "personalRating=9 should match 8+ bucket")
+            assert_ids({1}, result, "personal rating 8+ exact bucket membership")
         end)
 
         it("personal rating 7 lands in 6+ bucket, not 8+", function()
@@ -669,11 +720,8 @@ describe("view", function()
             local vs_6 = { combine = "AND", filters = { personal_rating = { ["6+"] = true } } }
             local r8 = view.applyFilters(books, vs_8)
             local r6 = view.applyFilters(books, vs_6)
-            local in8, in6 = false, false
-            for _, b in ipairs(r8) do if b.id == 4 then in8 = true end end
-            for _, b in ipairs(r6) do if b.id == 4 then in6 = true end end
-            assert.falsy(in8, "personalRating=7 should NOT match 8+")
-            assert.truthy(in6, "personalRating=7 should match 6+")
+            assert_ids({1}, r8, "personal rating 8+ excludes seven")
+            assert_ids({4}, r6, "personal rating 6+ exact bucket membership")
         end)
 
         it("0-rated book (no rating) lands in Unrated bucket", function()
@@ -683,18 +731,8 @@ describe("view", function()
                 personal_rating = { ["Unrated"] = true }
             }}
             local result = view.applyFilters(books, vs)
-            -- Book 2, 3, 5, 6, 7, 8, 9, 10 have no personalRating
-            local found_no_rating = false
-            for _, b in ipairs(result) do
-                if b.id == 2 then found_no_rating = true end
-            end
-            assert.truthy(found_no_rating, "book with no personalRating should be in Unrated")
-            -- Book 1 (personalRating=9) should NOT be Unrated
-            local found_rated = false
-            for _, b in ipairs(result) do
-                if b.id == 1 then found_rated = true end
-            end
-            assert.falsy(found_rated, "book with personalRating=9 should not be Unrated")
+            assert_ids({2, 3, 5, 6, 7, 8, 9, 10}, result,
+                "Unrated exact bucket membership")
         end)
     end)
 
@@ -748,7 +786,7 @@ describe("view", function()
         it("counts individual selected values", function()
             local vs = { combine = "AND", filters = {
                 readStatus = { READ = true, READING = true },
-                author     = { ["Frank Herbert"] = true },
+                author     = { ["Rowan Keel"] = true },
             }}
             assert.equals(3, view.activeFilterCount(vs))
         end)

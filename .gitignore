@@ -22,9 +22,22 @@ Thumbs.db
 
 # Test harness local artifacts (see tests/.gitignore for fixtures/recorded)
 tests/.busted-cache/
+__pycache__/
+*.py[cod]
+node_modules/
 
 # Release build staging produced by scripts/release.sh
 /build/
 /dist/
 *.koplugin.tar.gz
 *.sha256
+
+# Local-only licensed EPUB fixtures and derived samples. These must never be
+# committed; CI uses the copyright-safe synthetic counterparts instead.
+/tests/fixtures/recorded/
+/tests/fixtures/private/
+
+# Private provider refresh plans/evidence. Normal tests replay the ignored cache.
+/tests/compatibility/private/
+*.metadata-refresh-plan.json
+*.metadata-selection-evidence.json

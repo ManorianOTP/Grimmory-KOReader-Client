@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "description": "Stable semantic outcomes required from each executable full-Grimmory browser journey. Each reviewed Playwright body is sealed with a comment-insensitive executable digest, so a title, source marker, dead comment, or no-op body cannot stand in for the journey. Runtime verifiers own the values.",
+  "journeys": {
+    "logs in using the same form as a real user": {
+      "coverage": "none",
+      "executableBodySha256": "5467de3f8d4a4ddc36e280f17c36c93849943bda256bbc5d11301dab76eb112f",
+      "requiredOutcomes": ["visible-login-submit", "authenticated-library-visible"]
+    },
+    "renders cached metadata on Dashboard cards and honest empty scrollers": {
+      "coverage": "all-runtime-books",
+      "executableBodySha256": "f863af3a7dd75c40de77aed2fd0748e4042a636146a14e60a6c86741638ab53f",
+      "requiredOutcomes": ["exact-dashboard-scroller-membership", "exact-card-metadata", "legitimate-empty-scrollers"]
+    },
+    "renders cached metadata in distinct Series, Author, and Metadata Manager views": {
+      "coverage": "all-runtime-books",
+      "executableBodySha256": "f413ffe91d1c6aefa959e29abad21f8b4e83ad1c3451b2c4896e686173b2001a",
+      "requiredOutcomes": ["exact-series-membership", "exact-author-membership", "exact-metadata-manager-values"]
+    },
+    "renders cached metadata on the library grid, table, and book detail": {
+      "coverage": "all-runtime-books",
+      "executableBodySha256": "64ccf53a72e4cbb2243db59ffb840d6ecf9913fd990ee2c1afa05bbf359de86f",
+      "requiredOutcomes": ["exact-grid-identity", "exact-table-metadata", "exact-detail-metadata", "exact-search-result-set", "offline-provider-provenance"]
+    },
+    "proves exact visible Go target containment for synthetic and private EPUBs": {
+      "coverage": "all-runtime-books",
+      "executableBodySha256": "53b685033e71b6b9598ead5914dea293df915514f4becc5abdb0278abe844c28",
+      "requiredOutcomes": ["visible-go-action", "resolver-anchor-in-page-snap-cell", "exact-post-get-progress"]
+    },
+    "opens, reads, and saves real document progress for synthetic and private EPUBs": {
+      "coverage": "all-runtime-books",
+      "executableBodySha256": "b41656f67fe57b940e8eb52f80f8cf41cdd0db73f15f28cefbd400bf14a52994",
+      "requiredOutcomes": ["visible-reader-movement", "distinct-document-cfi", "exact-persisted-progress"]
+    },
+    "creates and deletes highlights through the rendered web reader": {
+      "coverage": "all-runtime-books",
+      "executableBodySha256": "a0e832877c3ca40eb11a094a66c1813ed23e864f8fb508df92aba04b758e2ac2",
+      "requiredOutcomes": ["physical-selection", "exact-resolved-range-text", "persisted-highlight", "post-delete-absence"]
+    },
+    "creates, edits, and deletes notes through the rendered web reader": {
+      "coverage": "all-runtime-books",
+      "executableBodySha256": "63cfaeb23d191952ad129e377f04172a483de6f70256dec24cd2487849e91fda",
+      "requiredOutcomes": ["physical-selection", "exact-resolved-note-range", "persisted-note-edit", "post-delete-absence"]
+    },
+    "records a real user reading session for synthetic and private EPUBs": {
+      "coverage": "all-runtime-books",
+      "executableBodySha256": "25a7e8338afc1e890bec132e819e7aba4d842c30fd8c2ee9bfdb4def40e572ec",
+      "requiredOutcomes": ["exact-opening-persisted-session-start", "exact-opening-response-time-bound", "visible-go-movement-after-session-start", "exact-complete-posted-session-dto", "exact-complete-listed-session-dto", "exact-datetime-zero-post-to-list-normalization", "stationary-real-duration-before-single-end-navigation", "exact-visible-persisted-end-navigation"]
+    },
+    "web-to-koreader-producer leaves web-origin checkpoints for the isolated KOReader consumer": {
+      "coverage": "all-runtime-books",
+      "executableBodySha256": "4285720ee9c52da3d7ca509cd8c69003bcdc5b7137e621dd6d561681de9306cf",
+      "requiredOutcomes": ["physical-selection", "exact-foliate-range", "producer-state-emitted-for-independent-live-readback"]
+    },
+    "koreader-to-web-consumer resolves the complete device-origin range before visible cleanup": {
+      "coverage": "all-runtime-books",
+      "executableBodySha256": "7b149b38bf50dafa69578dd99433e1e4e0945293e5d10f7342879ca813147f73",
+      "requiredOutcomes": ["genuine-koreader-highlight-uploaded-through-production-hooks", "fresh-koreader-adopted-exact-device-annotation", "live-server-text-equals-complete-koreader-selection", "visible-sidebar-row-has-exact-whole-text-identity", "device-cfi-resolves-to-noncollapsed-foliate-dom-range", "foliate-range-text-equals-complete-koreader-and-server-text", "all-epub-selection-crosses-inline-element-boundary", "all-epub-selection-stays-in-one-leaf-block", "selection-has-no-control-separators", "cleanup-occurs-only-after-three-way-text-equality", "server-empty-after-visible-browser-cleanup", "synthetic-plus-eight-real-epubs-covered-exactly-once"]
+    },
+    "documents pinned v3.3.1 upstream capability boundaries": {
+      "coverage": "none",
+      "executableBodySha256": "30bf1d344561abafe6091332413fcf9e08191964f73a9b283eca82ee8c640443",
+      "requiredOutcomes": ["pinned-server-release-3.3.1-confirmed"]
+    }
+  }
+}

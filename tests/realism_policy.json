@@ -1,0 +1,282 @@
+{
+  "schemaVersion": 2,
+  "description": "Every Lua, JavaScript, Python, and visual case must resolve to exactly one realism class. Real-coverage validators use versioned named outcome contracts, never source substrings. Private paths, titles, covers, and book hashes remain in ignored build output.",
+  "classes": {
+    "real-epub-behavior": {
+      "requiresValidator": true,
+      "description": "The companion opens or downloads the selected real EPUB and asserts document-derived behavior."
+    },
+    "real-metadata-layout": {
+      "requiresValidator": true,
+      "description": "The companion renders normalized embedded metadata or covers extracted from a real EPUB."
+    },
+    "fixture-independent-control": {
+      "requiresRationale": true,
+      "description": "The control is book-independent and an EPUB cannot affect the exercised path."
+    },
+    "pure-logic-not-epub-dependent": {
+      "requiresRationale": true,
+      "description": "The case deliberately isolates a pure algorithm, persistence rule, or boundary contract."
+    },
+    "synthetic-pathology-with-real-companion": {
+      "requiresValidator": true,
+      "requiresRationale": true,
+      "description": "A minimal fixture pins a pathology while a real ReaderUI companion guards messy EPUB behavior."
+    },
+    "real-server-contract": {
+      "requiresValidator": true,
+      "description": "The contract is paired with the pinned real Grimmory compatibility lane."
+    },
+    "non-epub-format-contract": {
+      "requiresRationale": true,
+      "description": "The behavior is specific to PDF/CBX and cannot be validated by the eight EPUB assets."
+    }
+  },
+  "validators": {
+    "private-visual-companion-runner": {
+      "kind": "visual-outcome-contract",
+      "contract": "tests/emulator/real_epub_companions.json"
+    },
+    "reader-sync-round-trip": {
+      "kind": "visual-outcome-contract",
+      "contract": "tests/emulator/real_epub_companions.json",
+      "scenarios": ["reader_sync_conflict"]
+    },
+    "pinned-real-grimmory-lane": {
+      "kind": "full-server-outcome-contract",
+      "contract": "tests/compatibility/full_server_outcome_contracts.json",
+      "producer": "tests/compatibility/web_reader_journeys.spec.js"
+    }
+  },
+  "externalRules": [
+    {
+      "id": "full-server-browser-journeys",
+      "framework": "javascript",
+      "files": ["tests/compatibility/web_reader_journeys.spec.js"],
+      "expectedCases": 12,
+      "caseSetSha256": "4b3d0b7d39a1f87bddb54d173737ea45584cfaf5d81206f156bfebf56a8911dc",
+      "class": "real-server-contract",
+      "validator": "pinned-real-grimmory-lane"
+    },
+    {
+      "id": "browser-oracle-unit-tests",
+      "framework": "javascript",
+      "files": [
+        "tests/compatibility/browser_helpers.test.js",
+        "tests/compatibility/verify-web-reader-checkpoints.test.js",
+        "tests/compatibility/metadata_exactness.test.js"
+      ],
+      "expectedCases": 22,
+      "caseSetSha256": "56ac6d5e8cddce5641ee805d853dd805773cf8d4bc95a9e8adcc369d32176e18",
+      "class": "pure-logic-not-epub-dependent",
+      "rationale": "These fast Node tests isolate browser-oracle arithmetic, exact metadata/search projection, and checkpoint rejection; live Grimmory and real EPUB behavior remain in the full-server browser journeys."
+    },
+    {
+      "id": "python-harness-unit-tests",
+      "framework": "python",
+      "files": [
+        "tests/emulator/test_compatibility_suite.py",
+        "tests/emulator/test_grimmory_fixture_server.py",
+        "tests/emulator/test_grimmory_metadata_cache.py",
+        "tests/emulator/test_grimmory_real_stack.py",
+        "tests/emulator/test_koreader_acceptance_tools.py",
+        "tests/emulator/test_prepare_grimmory_visual_library.py",
+        "tests/emulator/test_private_epub_sources.py",
+        "tests/emulator/test_real_epub_companions.py",
+        "tests/emulator/test_server_contract_parity.py",
+        "tests/visual/test_realism_policy.py",
+        "tests/visual/test_visual_regression.py"
+      ],
+      "expectedCases": 120,
+      "caseSetSha256": "c043beb7292e3057f45024d4f485231d847795288819fb72a323b081a735deb4",
+      "class": "pure-logic-not-epub-dependent",
+      "rationale": "These Python cases validate deterministic fixture, lifecycle, policy, report, and oracle tooling; live user outcomes remain owned by their versioned runtime contracts."
+    }
+  ],
+  "luaRules": [
+    {
+      "id": "acceptance-metadata-exactness-unit",
+      "files": ["tests/acceptance_exactness_spec.lua"],
+      "expectedCases": 6,
+      "caseSetSha256": "e5c93f2b2d0fe8faf701142c8b9b301ee42e92860d55347fdb99ef708e8f2ba3",
+      "class": "pure-logic-not-epub-dependent",
+      "rationale": "These cases isolate strict DTO, displayed-description, result-set, card-association, live-DTO genre projection, and same-block inline-selection oracles; the full server and ReaderUI acceptance lanes consume the same exact contracts with real runtime books."
+    },
+    {
+      "id": "annotation-planning-unit",
+      "files": ["tests/annotations_spec.lua"],
+      "expectedCases": 11,
+      "caseSetSha256": "a86cd4f8e9281da703f020cc0013a70399b3a0d1091e822b06c9157c487afe74",
+      "class": "pure-logic-not-epub-dependent",
+      "rationale": "These cases isolate annotation field conversion and three-way planning behind an explicit CFI interface; ReaderUI annotation journeys are separate integration validators."
+    },
+    {
+      "id": "api-wire-contract-unit",
+      "files": ["tests/api_spec.lua"],
+      "expectedCases": 31,
+      "caseSetSha256": "8d66944c4c684ad322b87d0db90ffda46e9ce556690836b5cadd579b3a2bbbcc",
+      "class": "pure-logic-not-epub-dependent",
+      "rationale": "These cases pin URL normalization, HTTP framing, DTO parsing, error typing, and byte streaming; they do not claim that canned bytes form a readable EPUB."
+    },
+    {
+      "id": "async-queue-unit",
+      "files": ["tests/async_spec.lua"],
+      "expectedCases": 12,
+      "caseSetSha256": "6bfa8c8417bb1ab87be0efcb3116b623e5d888fd004d71aebe7cb5ed9dc0d78f",
+      "class": "pure-logic-not-epub-dependent",
+      "rationale": "The FIFO executor, cancellation, error delivery, and JSON sanitization paths do not inspect books or documents."
+    },
+    {
+      "id": "cfi-pathologies",
+      "files": ["tests/cfi_spec.lua"],
+      "expectedCases": 21,
+      "caseSetSha256": "311ead7ce5fa516fcd655cb798d17ba47dcb1602426e69e913e1206dda14fde5",
+      "class": "synthetic-pathology-with-real-companion",
+      "validator": "reader-sync-round-trip",
+      "rationale": "Minimal XML fixtures make individual CFI failures diagnosable; the real ReaderUI journey generates and consumes genuine CFIs across the private EPUB matrix."
+    },
+    {
+      "id": "source-safety-unit",
+      "files": ["tests/connection_sync_ui_spec.lua"],
+      "expectedCases": 1,
+      "caseSetSha256": "27ed97cdd0255e20f1b1364a3a0adae4fec42668af93591991c39d6a6b027eb8",
+      "class": "pure-logic-not-epub-dependent",
+      "rationale": "This is a source-level gettext shadowing regression and no EPUB data enters the checked code path."
+    },
+    {
+      "id": "download-registry-unit",
+      "files": ["tests/downloads_spec.lua"],
+      "expectedCases": 11,
+      "caseSetSha256": "a742695a957c8e2aac7aa57fe0fc2d6f163dd9b8db8cb34b47f4734ed0cb9c79",
+      "class": "pure-logic-not-epub-dependent",
+      "rationale": "These cases pin destination sanitization and durable registry ownership; readable-byte download, hash, register, and open is a separate real-EPUB journey."
+    },
+    {
+      "id": "library-cache-unit",
+      "files": ["tests/library_cache_spec.lua"],
+      "expectedCases": 10,
+      "caseSetSha256": "bdc82ec0615c55784f4f7771cf9c633eee4a56208d81e4e74b1d1a2c31bb6ca0",
+      "class": "pure-logic-not-epub-dependent",
+      "rationale": "Account-scoped JSON persistence and legacy migration are independent of EPUB structure or reader behavior."
+    },
+    {
+      "id": "session-token-unit",
+      "files": ["tests/session_spec.lua"],
+      "expectedCases": 38,
+      "caseSetSha256": "16d20b208fac6e4568b504f059461b7d3099407dd67ca6961e45fc9692806a66",
+      "class": "pure-logic-not-epub-dependent",
+      "rationale": "Authentication dispatch, token rotation, account storage, and async result application are independent of book contents."
+    },
+    {
+      "id": "reading-session-state-unit",
+      "files": ["tests/sessions_state_spec.lua"],
+      "expectedCases": 7,
+      "caseSetSha256": "f6f181246ac6b1eab00c3bcad6bb1f0835d3cb5f8458645fbacd235bd7986c22",
+      "class": "pure-logic-not-epub-dependent",
+      "rationale": "Payload validation, duration thresholds, retry identity, and durable queue isolation are pure state rules; ReaderUI lifecycle capture is validated separately."
+    },
+    {
+      "id": "shelf-reconciliation-unit",
+      "files": ["tests/shelf_collections_spec.lua"],
+      "expectedCases": 11,
+      "caseSetSha256": "f8265deab6744762df3b900a32325c68408d2be49de7711c02e77e78c240153e",
+      "class": "pure-logic-not-epub-dependent",
+      "rationale": "The safety algorithm intentionally injects ReadCollection and realpath so ownership, idempotence, and manual-item preservation can be proven without mutating a user's collections."
+    },
+    {
+      "id": "sync-state-machine-unit",
+      "files": ["tests/sync_spec.lua"],
+      "expectedCases": 28,
+      "caseSetSha256": "4c8f4020bf9f449ef9bd2eeaecf6e03c2e6bcc5640e5a7937b89b15510d46eb0",
+      "excludeExpressions": [
+        "\"reads the cross-populated web EPUB field and routes it through our converter\"",
+        "\"triggers a pull and sets pulled=true after pull completes\"",
+        "\"does NOT push before pull completes\"",
+        "\"schedules a push after pull, and multiple calls debounce to one push\"",
+        "\"passes percentage points to KOReader when exact EPUB CFI navigation is unavailable\"",
+        "\"choice1 (Jump Ahead) sets pulled=true and clears awaiting_decision; choice2 (Sync Here) calls pushProgress\"",
+        "\"onCloseDocument does NOT push when pulled=false\"",
+        "\"onPageUpdate while wifi off enqueues without HTTP\"",
+        "\"three onPageUpdate calls collapse to one queue entry (latest-wins)\"",
+        "\"post-pull drain pushes queued current-book entry\"",
+        "\"PUTs exact selected-file \" .. case.name .. \" page progress\"",
+        "\"pulls exact \" .. case.name .. \" web-reader page progress\""
+      ],
+      "class": "pure-logic-not-epub-dependent",
+      "rationale": "The remaining cases isolate HTTP payload validation, account ownership, refresh behavior, durable queue races, and failure gates rather than document navigation."
+    },
+    {
+      "id": "sync-reader-behavior-companion",
+      "files": ["tests/sync_spec.lua"],
+      "expectedCases": 10,
+      "caseSetSha256": "2c7af0f9c1513ac502a198e79c82f27ceaca15980b31d381bcfbc8c62fd70597",
+      "expressions": [
+        "\"reads the cross-populated web EPUB field and routes it through our converter\"",
+        "\"triggers a pull and sets pulled=true after pull completes\"",
+        "\"does NOT push before pull completes\"",
+        "\"schedules a push after pull, and multiple calls debounce to one push\"",
+        "\"passes percentage points to KOReader when exact EPUB CFI navigation is unavailable\"",
+        "\"choice1 (Jump Ahead) sets pulled=true and clears awaiting_decision; choice2 (Sync Here) calls pushProgress\"",
+        "\"onCloseDocument does NOT push when pulled=false\"",
+        "\"onPageUpdate while wifi off enqueues without HTTP\"",
+        "\"three onPageUpdate calls collapse to one queue entry (latest-wins)\"",
+        "\"post-pull drain pushes queued current-book entry\""
+      ],
+      "class": "synthetic-pathology-with-real-companion",
+      "validator": "reader-sync-round-trip",
+      "rationale": "Fake ReaderUI cases make timing and gates deterministic; the companion opens real multi-document EPUBs and validates document-derived pull, jump, push, and clean repeat-sync behavior."
+    },
+    {
+      "id": "sync-non-epub-formats",
+      "files": ["tests/sync_spec.lua"],
+      "expectedCases": 2,
+      "caseSetSha256": "1bd7235b511d87fd682703eda1f997b4967f6e5ebb673de44f5696a447ebf4dd",
+      "expressions": [
+        "\"PUTs exact selected-file \" .. case.name .. \" page progress\"",
+        "\"pulls exact \" .. case.name .. \" web-reader page progress\""
+      ],
+      "class": "non-epub-format-contract",
+      "rationale": "These parameterized cases cover PDF and CBX page positions; an EPUB companion cannot validate their page-based reader engines."
+    },
+    {
+      "id": "sync-status-model-unit",
+      "files": ["tests/sync_status_spec.lua"],
+      "expectedCases": 9,
+      "caseSetSha256": "abe7e66bfe8758b8499d4d872d5a2c729a97d9a7dbae0e74c174180b9cf0a66a",
+      "class": "pure-logic-not-epub-dependent",
+      "rationale": "Badge geometry and aggregation of durable progress, annotation, and session state are presentation-model rules independent of document parsing."
+    },
+    {
+      "id": "tailscale-unit-and-local-pipeline",
+      "files": ["tests/tailscale_spec.lua"],
+      "expectedCases": 41,
+      "caseSetSha256": "753de7a7462443185b60481801a2ef9ee8b207f291b50f7ecd39542d01492f51",
+      "class": "pure-logic-not-epub-dependent",
+      "rationale": "Package extraction and daemon command orchestration are network-platform behavior and never inspect a book."
+    },
+    {
+      "id": "updater-unit-and-local-pipeline",
+      "files": ["tests/updater_spec.lua"],
+      "expectedCases": 27,
+      "caseSetSha256": "20c4ed8d968e8e425d831c7e69a3666dd76f6de5a7adc83c4417ae6bf3fa29ba",
+      "class": "pure-logic-not-epub-dependent",
+      "rationale": "Archive validation, checksum enforcement, atomic swap, rollback, and uninstall behavior are independent of EPUB assets."
+    },
+    {
+      "id": "view-model-unit",
+      "files": ["tests/view_spec.lua"],
+      "expectedCases": 45,
+      "caseSetSha256": "a87edb4da7a094e2a0d2fb2f8ff54ad27ab804a25de8c5880beaf62898d400ff",
+      "class": "pure-logic-not-epub-dependent",
+      "rationale": "Sort, filter, facet, bucket, and registry functions operate on normalized DTO values; real embedded metadata layout is covered by the private visual companion class."
+    }
+  ],
+  "visual": {
+    "catalog": "tests/emulator/visual_driver.koplugin/visual_scenarios.lua",
+    "mapping": "tests/emulator/real_epub_companions.json",
+    "classValidators": {
+      "real-epub-behavior": "private-visual-companion-runner",
+      "real-metadata-layout": "private-visual-companion-runner"
+    }
+  }
+}

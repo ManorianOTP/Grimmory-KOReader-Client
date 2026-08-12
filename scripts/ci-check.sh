@@ -5,6 +5,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 scripts/test.sh
+python3 -B scripts/check-test-realism.py
+python3 -B -m unittest discover -s tests/visual -p 'test_*.py'
+python3 -B -m unittest discover -s tests/emulator -p 'test_*.py'
+node --test \
+    tests/compatibility/browser_helpers.test.js \
+    tests/compatibility/verify-web-reader-checkpoints.test.js
 
 BYTECODE_DIR="$(mktemp -d)"
 trap 'rm -rf "$BYTECODE_DIR"' EXIT

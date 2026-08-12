@@ -72,6 +72,27 @@ function GrimmoryApi.normalizeServerUrl(s)
     return (s:gsub("/+$", ""))
 end
 
+-- KOReader's JSON decoder represents an explicit JSON `null` as a callable
+-- sentinel. Grimmory legitimately returns null for optional DTO fields, but
+-- the rest of the plugin treats an absent value as Lua nil. Remove those
+-- sentinels at the API boundary, including nested metadata/file records, so a
+-- null timestamp cannot reach sorting or rendering code as a function value.
+local function stripJsonNullSentinels(value, seen)
+    if type(value) ~= "table" then return value end
+    seen = seen or {}
+    if seen[value] then return value end
+    seen[value] = true
+
+    for key, child in pairs(value) do
+        if type(child) == "function" then
+            value[key] = nil
+        elseif type(child) == "table" then
+            stripJsonNullSentinels(child, seen)
+        end
+    end
+    return value
+end
+
 --- Normalize Grimmory's current Book DTO into the flat convenience fields
 -- consumed by the KOReader UI. Since Grimmory v3, file-specific properties
 -- live under primaryFile while cover versioning lives under metadata.
@@ -79,6 +100,7 @@ end
 -- on the same shape as top-level library results.
 function GrimmoryApi.normalizeBookFile(file, defaults)
     if type(file) ~= "table" then return file end
+    stripJsonNullSentinels(file)
     defaults = defaults or {}
 
     -- Jackson serializes Java's `isBook` bean property as `book` in the
@@ -111,6 +133,7 @@ end
 
 function GrimmoryApi.normalizeBook(book)
     if type(book) ~= "table" then return book end
+    stripJsonNullSentinels(book)
 
     local primary = type(book.primaryFile) == "table"
         and GrimmoryApi.normalizeBookFile(book.primaryFile, {
@@ -189,6 +212,25 @@ function GrimmoryApi.normalizeBook(book)
     return book
 end
 
+--- Merge a full book-detail DTO over its intentionally stripped list DTO.
+-- Empty arrays and placeholder values from the list response are not evidence
+-- that the rich value is absent: the detail response is authoritative for
+-- every field it carries. Preserve client-only metadata keys (for example
+-- `_enriched`) simply by leaving keys absent from the detail DTO untouched.
+function GrimmoryApi.mergeBookDetail(book, full)
+    if type(book) ~= "table" or type(full) ~= "table" then return book end
+    stripJsonNullSentinels(full)
+    for key, value in pairs(full) do
+        if key ~= "metadata" then book[key] = value end
+    end
+    local metadata = type(book.metadata) == "table" and book.metadata or {}
+    if type(full.metadata) == "table" then
+        for key, value in pairs(full.metadata) do metadata[key] = value end
+    end
+    book.metadata = metadata
+    return GrimmoryApi.normalizeBook(book)
+end
+
 local function normalizeBookList(data)
     if type(data) ~= "table" then return data end
     local books = type(data.content) == "table" and data.content or data
@@ -221,15 +263,42 @@ local function collectPagedBooks(api, server_url, token, endpoint, first)
     end
     local meta = paginationMetadata(first)
     local total_pages = meta and tonumber(meta.totalPages)
+    local total_elements = meta and tonumber(meta.totalElements)
     local first_number = meta and tonumber(meta.number) or 0
     if not total_pages then
         return nil, "paginated books response omitted totalPages; refusing partial library"
+    end
+    if not total_elements then
+        return nil, "paginated books response omitted totalElements; refusing unverifiable library"
+    end
+    if total_pages < 0 or total_pages % 1 ~= 0
+            or total_elements < 0 or total_elements % 1 ~= 0 then
+        return nil, "paginated books response has invalid totals"
+    end
+    if (total_pages == 0) ~= (total_elements == 0) then
+        return nil, "paginated books response has inconsistent empty totals"
     end
     if first_number ~= 0 then
         return nil, "books first page number mismatch: expected 0"
     end
 
     local books = normalizeBookList(first)
+    local seen_ids = {}
+    local function record_page(page_books, page)
+        for _, book in ipairs(page_books) do
+            if type(book) ~= "table" or book.id == nil then
+                return nil, "books page " .. tostring(page) .. " contains a book without id"
+            end
+            local id = tostring(book.id)
+            if seen_ids[id] then
+                return nil, "books pagination repeated book id " .. id
+            end
+            seen_ids[id] = true
+        end
+        return true
+    end
+    local recorded, record_err = record_page(books, 0)
+    if not recorded then return nil, record_err end
     for page = first_number + 1, total_pages - 1 do
         local data, err = api:get(pagedUrl(server_url, endpoint, page), token)
         if not data then return nil, err end
@@ -237,12 +306,21 @@ local function collectPagedBooks(api, server_url, token, endpoint, first)
             return nil, "invalid books page " .. tostring(page)
         end
         local page_meta = paginationMetadata(data)
-        if page_meta and tonumber(page_meta.number)
-                and tonumber(page_meta.number) ~= page then
+        if not page_meta or tonumber(page_meta.number) ~= page then
             return nil, "books page number mismatch: expected " .. tostring(page)
         end
+        if tonumber(page_meta.totalPages) ~= total_pages
+                or tonumber(page_meta.totalElements) ~= total_elements then
+            return nil, "books pagination totals changed on page " .. tostring(page)
+        end
         local page_books = normalizeBookList(data)
+        local page_ok, page_err = record_page(page_books, page)
+        if not page_ok then return nil, page_err end
         for _, book in ipairs(page_books) do table.insert(books, book) end
+    end
+    if #books ~= total_elements then
+        return nil, "books pagination count mismatch: expected "
+            .. tostring(total_elements) .. ", got " .. tostring(#books)
     end
     return books, nil
 end

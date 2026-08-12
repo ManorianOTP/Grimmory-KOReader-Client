@@ -10,10 +10,27 @@
 ]]
 local spec_helper = require("spec_helper")
 
+local CLI_BYTES = "#!/bin/sh\necho tailscale-cli\n"
+local DAEMON_BYTES = "#!/bin/sh\necho tailscaled\n"
+
 local function write_file(path, content)
     local f = assert(io.open(path, "wb"))
     f:write(content)
     f:close()
+end
+
+local function read_file(path)
+    local f = assert(io.open(path, "rb"))
+    local content = f:read("*a")
+    f:close()
+    return content
+end
+
+local function sha256_file(path)
+    local p = assert(io.popen("sha256sum '" .. path .. "'"))
+    local out = p:read("*a")
+    p:close()
+    return assert(out:match("^([0-9a-f]+)"))
 end
 
 -- Scripted exec: first matching pattern wins; every command is recorded.
@@ -72,11 +89,9 @@ describe("Tailscale", function()
         local inner = opts.inner_dir or ("tailscale_" .. version .. "_" .. arch)
         local pkg_dir = spec_helper._tmp_dir .. "/pkg"
         os.execute("mkdir -p '" .. pkg_dir .. "/" .. inner .. "'")
-        write_file(pkg_dir .. "/" .. inner .. "/tailscale",
-            "#!/bin/sh\necho tailscale-cli\n")
+        write_file(pkg_dir .. "/" .. inner .. "/tailscale", CLI_BYTES)
         if not opts.omit_daemon then
-            write_file(pkg_dir .. "/" .. inner .. "/tailscaled",
-                "#!/bin/sh\necho tailscaled\n")
+            write_file(pkg_dir .. "/" .. inner .. "/tailscaled", DAEMON_BYTES)
         end
         local tgz_name = "tailscale_" .. version .. "_" .. arch .. ".tgz"
         local tgz = pkg_dir .. "/" .. tgz_name
@@ -90,6 +105,14 @@ describe("Tailscale", function()
     local function ts_manifest(version, tgz_name)
         return '{"Version":"' .. version .. '","Tarballs":{"'
             .. detected_arch() .. '":"' .. tgz_name .. '"}}'
+    end
+
+
+    local function checksum_route(tgz, tgz_name)
+        return {
+            path = "/stable/" .. tgz_name .. ".sha256",
+            body = sha256_file(tgz) .. "  " .. tgz_name .. "\n",
+        }
     end
 
     local function make_ts(overrides)
@@ -109,12 +132,320 @@ describe("Tailscale", function()
         return Tailscale.new(opts)
     end
 
+    -- A strict install double: every production shell command must match one
+    -- exact operation, filesystem effects are implemented directly in Lua,
+    -- and unsafe extraction is refused even if the installer were to request
+    -- it. This keeps the negative security tests independent of host tar.
+    local function strict_install_harness(opts)
+        opts = opts or {}
+        local lfs = require("lfs")
+        local root = spec_helper._tmp_dir .. "/strict"
+        local tmp_root = root .. "/install_tmp"
+        local bin_dir = root .. "/bin"
+        local version, arch = "1.80.0", "arm"
+        local extract_name = "tailscale_" .. version .. "_" .. arch
+        local tgz_name = extract_name .. ".tgz"
+        local tmp_tgz = tmp_root .. "/" .. tgz_name
+        local extract_dir = tmp_root .. "/" .. extract_name
+        local cli_src, daemon_src = extract_dir .. "/tailscale", extract_dir .. "/tailscaled"
+        local cli_stage, daemon_stage = tmp_root .. "/tailscale.verified",
+            tmp_root .. "/tailscaled.verified"
+        local cli_live, daemon_live = bin_dir .. "/tailscale", bin_dir .. "/tailscaled"
+        local cli_backup, daemon_backup = tmp_root .. "/tailscale.previous",
+            tmp_root .. "/tailscaled.previous"
+        local tgz_bytes = opts.tgz_bytes or "strict fake tgz bytes"
+        local safe_listing = table.concat({
+            "drwxr-xr-x root/root 0 2026-01-01 00:00 " .. extract_name .. "/",
+            "-rwxr-xr-x root/root 29 2026-01-01 00:00 " .. extract_name .. "/tailscale",
+            "-rwxr-xr-x root/root 25 2026-01-01 00:00 " .. extract_name .. "/tailscaled",
+        }, "\n")
+        local listing = opts.listing or safe_listing
+        local state = { calls = {}, unexpected = {}, extract_attempted = false,
+            fake_rejections = 0 }
+
+        local function q(path) return "'" .. path .. "'" end
+        local function ensure_dir(path)
+            local current = path:sub(1, 1) == "/" and "/" or ""
+            for part in path:gmatch("[^/]+") do
+                current = current == "/" and (current .. part)
+                    or (current == "" and part or current .. "/" .. part)
+                lfs.mkdir(current)
+            end
+        end
+        local function remove_tree(path)
+            local attr = lfs.symlinkattributes(path)
+            if not attr then return end
+            if attr.mode == "directory" then
+                for name in lfs.dir(path) do
+                    if name ~= "." and name ~= ".." then
+                        remove_tree(path .. "/" .. name)
+                    end
+                end
+                os.remove(path)
+            else
+                os.remove(path)
+            end
+        end
+        local function copy_file(src, dst, corrupt)
+            local bytes = read_file(src)
+            write_file(dst, bytes .. (corrupt and "!" or ""))
+        end
+        if opts.prior_cli_bytes ~= nil or opts.prior_daemon_bytes ~= nil then
+            ensure_dir(bin_dir)
+            if opts.prior_cli_bytes ~= nil then write_file(cli_live, opts.prior_cli_bytes) end
+            if opts.prior_daemon_bytes ~= nil then
+                write_file(daemon_live, opts.prior_daemon_bytes)
+            end
+        end
+        local safe_to_extract = listing == safe_listing
+
+        local exact = {
+            cleanup = "rm -rf " .. q(tmp_root),
+            mkdir_tmp = "mkdir -p " .. q(tmp_root),
+            size = "wc -c < " .. q(tmp_tgz),
+            list = "tar tvzf " .. q(tmp_tgz),
+            extract = "cd " .. q(tmp_root) .. " && tar xzf " .. q(tmp_tgz),
+            cp_cli = "cp " .. q(cli_src) .. " " .. q(cli_stage),
+            cp_daemon = "cp " .. q(daemon_src) .. " " .. q(daemon_stage),
+            chmod_cli = "chmod +x " .. q(cli_stage),
+            chmod_daemon = "chmod +x " .. q(daemon_stage),
+            mkdir_bin = "mkdir -p " .. q(bin_dir),
+            mv_cli = "mv " .. q(cli_stage) .. " " .. q(cli_live),
+            mv_daemon = "mv " .. q(daemon_stage) .. " " .. q(daemon_live),
+            test_cli = "test -e " .. q(cli_live),
+            test_daemon = "test -e " .. q(daemon_live),
+            backup_cli = "mv " .. q(cli_live) .. " " .. q(cli_backup),
+            backup_daemon = "mv " .. q(daemon_live) .. " " .. q(daemon_backup),
+            remove_cli = "rm -f " .. q(cli_live),
+            remove_daemon = "rm -f " .. q(daemon_live),
+            restore_cli = "mv " .. q(cli_backup) .. " " .. q(cli_live),
+            restore_daemon = "mv " .. q(daemon_backup) .. " " .. q(daemon_live),
+        }
+
+        local allowed_hash_paths = {
+            [tmp_tgz] = true, [cli_src] = true, [daemon_src] = true,
+            [cli_stage] = true, [daemon_stage] = true,
+            [cli_live] = true, [daemon_live] = true,
+        }
+        local exec = function(cmd)
+            table.insert(state.calls, cmd)
+            if cmd == "uname -m" then return "armv7l", 0 end
+            if cmd == exact.cleanup then remove_tree(tmp_root); return "", 0 end
+            if cmd == exact.mkdir_tmp then ensure_dir(tmp_root); return "", 0 end
+            if cmd == exact.size then return tostring(#read_file(tmp_tgz)), 0 end
+            local hash_path = cmd:match("^sha256sum '([^']+)'$")
+            if hash_path then
+                if not allowed_hash_paths[hash_path] or not lfs.attributes(hash_path) then
+                    state.fake_rejections = state.fake_rejections + 1
+                    return "strict fake rejected hash path", 96
+                end
+                return sha256_file(hash_path) .. "  " .. hash_path, 0
+            end
+            if cmd == exact.list then return listing, 0 end
+            if cmd == exact.extract then
+                state.extract_attempted = true
+                if not safe_to_extract then
+                    state.fake_rejections = state.fake_rejections + 1
+                    return "strict fake rejected unsafe extraction", 95
+                end
+                ensure_dir(extract_dir)
+                write_file(cli_src, opts.cli_bytes or CLI_BYTES)
+                write_file(daemon_src, opts.daemon_bytes or DAEMON_BYTES)
+                return "", 0
+            end
+            if cmd == exact.cp_cli then
+                copy_file(cli_src, cli_stage, opts.corrupt_cli_copy)
+                return "", 0
+            end
+            if cmd == exact.cp_daemon then copy_file(daemon_src, daemon_stage); return "", 0 end
+            if cmd == exact.chmod_cli or cmd == exact.chmod_daemon then return "", 0 end
+            if cmd == exact.mkdir_bin then ensure_dir(bin_dir); return "", 0 end
+            if cmd == exact.test_cli then
+                return "", lfs.symlinkattributes(cli_live) and 0 or 1
+            end
+            if cmd == exact.test_daemon then
+                return "", lfs.symlinkattributes(daemon_live) and 0 or 1
+            end
+            if cmd == exact.backup_cli then
+                return "", os.rename(cli_live, cli_backup) and 0 or 1
+            end
+            if cmd == exact.backup_daemon then
+                return "", os.rename(daemon_live, daemon_backup) and 0 or 1
+            end
+            if cmd == exact.remove_cli then os.remove(cli_live); return "", 0 end
+            if cmd == exact.remove_daemon then os.remove(daemon_live); return "", 0 end
+            if cmd == exact.restore_cli then
+                return "", os.rename(cli_backup, cli_live) and 0 or 1
+            end
+            if cmd == exact.restore_daemon then
+                return "", os.rename(daemon_backup, daemon_live) and 0 or 1
+            end
+            if cmd == exact.mv_cli then
+                local ok = os.rename(cli_stage, cli_live)
+                if ok and opts.corrupt_final_cli then
+                    write_file(cli_live, read_file(cli_live) .. "!")
+                end
+                return "", ok and 0 or 1
+            end
+            if cmd == exact.mv_daemon then
+                if opts.fail_daemon_publish then return "injected second move failure", 88 end
+                return "", os.rename(daemon_stage, daemon_live) and 0 or 1
+            end
+            table.insert(state.unexpected, cmd)
+            state.fake_rejections = state.fake_rejections + 1
+            return "strict fake rejected unexpected command", 97
+        end
+
+        local base = "https://strict.invalid/stable/"
+        local manifest_url = base .. "manifest.json"
+        local checksum = opts.checksum or sha256_file((function()
+            ensure_dir(root)
+            local oracle = root .. "/tgz-oracle"
+            write_file(oracle, tgz_bytes)
+            return oracle
+        end)())
+        local request = function(req)
+            local body, code
+            if req.url == manifest_url then
+                body, code = ts_manifest(version, opts.tgz_name or tgz_name), 200
+            elseif req.url == base .. tgz_name then
+                body, code = tgz_bytes, 200
+            elseif req.url == base .. tgz_name .. ".sha256" then
+                body, code = checksum .. "  " .. tgz_name .. "\n", 200
+            else
+                body, code = "not found", 404
+            end
+            if req.sink then req.sink(body); req.sink(nil) end
+            return code == 200 and 1 or nil, code
+        end
+        local ts = Tailscale.new{
+            exec = exec,
+            request = request,
+            pkgs_manifest_url = manifest_url,
+            pkgs_base = base,
+            bin_dir = bin_dir,
+            tmp_root = tmp_root,
+            min_tarball_bytes = 1,
+        }
+        return ts, state, {
+            cli = cli_live, daemon = daemon_live, tmp_root = tmp_root,
+            listing = safe_listing,
+        }
+    end
+
+    describe("install security oracle (strict shell/filesystem fake)", function()
+        it("installs the exact authenticated binary bytes and nothing unexpected", function()
+            local ts, state, paths = strict_install_harness()
+            local version, err = ts:install()
+            assert.is_nil(err)
+            assert.are.equal("1.80.0", version)
+            assert.are.equal(CLI_BYTES, read_file(paths.cli))
+            assert.are.equal(DAEMON_BYTES, read_file(paths.daemon))
+            assert.are.same({}, state.unexpected)
+            assert.are.equal(0, state.fake_rejections)
+        end)
+
+        for _, attack in ipairs({
+            { label = "traversal", line = "-rwxr-xr-x root/root 1 2026-01-01 00:00 tailscale_1.80.0_arm/../../escape" },
+            { label = "symlink escape", line = "lrwxrwxrwx root/root 0 2026-01-01 00:00 tailscale_1.80.0_arm/tailscale -> ../../outside" },
+            { label = "hardlink escape", line = "hrwxr-xr-x root/root 0 2026-01-01 00:00 tailscale_1.80.0_arm/tailscaled link to ../../outside" },
+            { label = "unexpected member", line = "-rwxr-xr-x root/root 1 2026-01-01 00:00 tailscale_1.80.0_arm/postinstall.sh" },
+        }) do
+            it("rejects " .. attack.label .. " before extraction", function()
+                local ts, state, paths = strict_install_harness({ listing = attack.line })
+                local version, err = ts:install()
+                assert.is_nil(version)
+                assert.matches("Unsafe Tailscale archive", err)
+                assert.is_false(state.extract_attempted)
+                assert.is_nil(io.open(paths.cli, "rb"))
+                assert.are.same({}, state.unexpected)
+            end)
+        end
+
+        it("rejects wrong archive bytes against the published hash", function()
+            local ts, state = strict_install_harness({ checksum = string.rep("0", 64) })
+            local version, err = ts:install()
+            assert.is_nil(version)
+            assert.matches("checksum mismatch", err)
+            assert.is_false(state.extract_attempted)
+            assert.are.same({}, state.unexpected)
+        end)
+
+        it("rejects a corrupted staged binary before publishing either file", function()
+            local ts, state, paths = strict_install_harness({ corrupt_cli_copy = true })
+            local version, err = ts:install()
+            assert.is_nil(version)
+            assert.matches("copy verification failed", err)
+            assert.is_true(state.extract_attempted)
+            assert.is_nil(io.open(paths.cli, "rb"))
+            assert.is_nil(io.open(paths.daemon, "rb"))
+            assert.are.same({}, state.unexpected)
+        end)
+
+        it("removes both live files when a fresh install's second publish move fails", function()
+            local ts, state, paths = strict_install_harness({ fail_daemon_publish = true })
+            local version, err = ts:install()
+            assert.is_nil(version)
+            assert.matches("injected second move failure", err)
+            assert.is_nil(io.open(paths.cli, "rb"))
+            assert.is_nil(io.open(paths.daemon, "rb"))
+            assert.are.same({}, state.unexpected)
+        end)
+
+        it("restores the exact prior pair when the second publish move fails", function()
+            local old_cli = "old-cli-exact-bytes\0\1"
+            local old_daemon = "old-daemon-exact-bytes\2\3"
+            local ts, state, paths = strict_install_harness({
+                prior_cli_bytes = old_cli,
+                prior_daemon_bytes = old_daemon,
+                fail_daemon_publish = true,
+            })
+            local lfs = require("lfs")
+            local cli_mode = lfs.attributes(paths.cli, "permissions")
+            local daemon_mode = lfs.attributes(paths.daemon, "permissions")
+            local version, err = ts:install()
+            assert.is_nil(version)
+            assert.matches("injected second move failure", err)
+            assert.are.equal(old_cli, read_file(paths.cli))
+            assert.are.equal(old_daemon, read_file(paths.daemon))
+            assert.are.equal(cli_mode, lfs.attributes(paths.cli, "permissions"))
+            assert.are.equal(daemon_mode, lfs.attributes(paths.daemon, "permissions"))
+            assert.are.same({}, state.unexpected)
+        end)
+
+        it("restores the exact prior pair after final-byte corruption", function()
+            local old_cli = "previous-cli"
+            local old_daemon = "previous-daemon"
+            local ts, state, paths = strict_install_harness({
+                prior_cli_bytes = old_cli,
+                prior_daemon_bytes = old_daemon,
+                corrupt_final_cli = true,
+            })
+            local version, err = ts:install()
+            assert.is_nil(version)
+            assert.matches("Installed Tailscale binary verification failed", err)
+            assert.are.equal(old_cli, read_file(paths.cli))
+            assert.are.equal(old_daemon, read_file(paths.daemon))
+            assert.are.same({}, state.unexpected)
+        end)
+
+        it("rejects a manifest filename that does not exactly match version and arch", function()
+            local ts, state = strict_install_harness({ tgz_name = "../../evil.tgz" })
+            local version, err = ts:install()
+            assert.is_nil(version)
+            assert.matches("unsafe package name", err)
+            assert.is_false(state.extract_attempted)
+            assert.are.same({}, state.unexpected)
+        end)
+    end)
+
     describe("install pipeline (real shell + local HTTP)", function()
         it("downloads, extracts, installs, and marks both binaries executable", function()
             local tgz, tgz_name = build_tarball("1.80.0")
             http_handle = spec_helper.start_http_fixture({
                 { path = "/stable/manifest.json", body = ts_manifest("1.80.0", tgz_name) },
                 { path = "/stable/" .. tgz_name, body_file = tgz },
+                checksum_route(tgz, tgz_name),
             })
             local ts = make_ts()
             assert.is_false(ts:isInstalled())
@@ -125,6 +456,8 @@ describe("Tailscale", function()
             assert.is_nil(err)
             assert.are.equal("1.80.0", version)
             assert.is_true(ts:isInstalled())
+            assert.are.equal(CLI_BYTES, read_file(ts.cmd))
+            assert.are.equal(DAEMON_BYTES, read_file(ts.daemon_cmd))
             -- chmod +x really ran: the installed shell scripts execute
             assert.are.equal(0, os.execute("'" .. ts.cmd .. "' > /dev/null 2>&1"))
             assert.are.equal(0, os.execute("'" .. ts.daemon_cmd .. "' > /dev/null 2>&1"))
@@ -139,6 +472,7 @@ describe("Tailscale", function()
             http_handle = spec_helper.start_http_fixture({
                 { path = "/stable/manifest.json", body = ts_manifest("1.80.0", tgz_name) },
                 { path = "/stable/" .. tgz_name, body_file = tgz },
+                checksum_route(tgz, tgz_name),
             })
             local real = require("socket.http").request
             local tgz_attempts = 0
@@ -212,6 +546,7 @@ describe("Tailscale", function()
             http_handle = spec_helper.start_http_fixture({
                 { path = "/stable/manifest.json", body = ts_manifest("1.80.0", tgz_name) },
                 { path = "/stable/" .. tgz_name, body_file = tgz },
+                checksum_route(tgz, tgz_name),
             })
             local ts = make_ts({ min_tarball_bytes = 10 * 1048576 })
             local version, err = ts:install()
@@ -225,11 +560,12 @@ describe("Tailscale", function()
             http_handle = spec_helper.start_http_fixture({
                 { path = "/stable/manifest.json", body = ts_manifest("1.80.0", tgz_name) },
                 { path = "/stable/" .. tgz_name, body_file = tgz },
+                checksum_route(tgz, tgz_name),
             })
             local ts = make_ts()
             local version, err = ts:install()
             assert.is_nil(version)
-            assert.matches("does not contain expected binaries", err)
+            assert.matches("Unsafe Tailscale archive", err)
             assert.are_not.equal(0, os.execute("test -d '" .. ts.tmp_root .. "'"))
         end)
 
@@ -238,11 +574,12 @@ describe("Tailscale", function()
             http_handle = spec_helper.start_http_fixture({
                 { path = "/stable/manifest.json", body = ts_manifest("1.80.0", tgz_name) },
                 { path = "/stable/" .. tgz_name, body_file = tgz },
+                checksum_route(tgz, tgz_name),
             })
             local ts = make_ts()
             local version, err = ts:install()
             assert.is_nil(version)
-            assert.matches("tailscaled", err)
+            assert.matches("both expected binaries", err)
             assert.is_false(ts:isInstalled())
         end)
     end)

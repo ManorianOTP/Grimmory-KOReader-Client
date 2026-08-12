@@ -1,0 +1,18 @@
+{
+  "name": "grimmory-full-server-browser-tests",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Real-user browser journeys against the pinned full Grimmory server",
+  "scripts": {
+    "test": "playwright test",
+    "test:full-server": "node run-web-reader.js",
+    "test:helpers": "node --test browser_helpers.test.js",
+    "test:verifier": "node --test verify-web-reader-checkpoints.test.js",
+    "verify:checkpoints": "node verify-web-reader-checkpoints.js",
+    "metadata:refresh": "node run-metadata-refresh.js",
+    "install-browser": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
+  }
+}

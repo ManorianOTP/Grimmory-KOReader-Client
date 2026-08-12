@@ -212,10 +212,6 @@ end
 -- tokens into the flat active triple. Returns the target identity table, or
 -- nil if no such account is stored.
 function Session:switchTo(server_url, username)
-    local active = self:activeAccount()
-    if active and not sameAccount(active, server_url, username) then
-        self:rememberActive(active.server_url, active.username)
-    end
     local accounts = self:_accounts()
     local target
     for i = 1, #accounts do
@@ -225,6 +221,22 @@ function Session:switchTo(server_url, username)
         end
     end
     if not target then return nil end
+    -- Validate the target before snapshotting/flushing anything. A stale UI
+    -- selection or typo must be a true no-op, not an unrelated persistence
+    -- mutation of the currently active account.
+    local active = self:activeAccount()
+    if active and not sameAccount(active, server_url, username) then
+        self:rememberActive(active.server_url, active.username)
+        -- rememberActive may replace the settings table; resolve the target
+        -- again so we load the freshly persisted entry.
+        accounts = self:_accounts()
+        for i = 1, #accounts do
+            if sameAccount(accounts[i], server_url, username) then
+                target = accounts[i]
+                break
+            end
+        end
+    end
     self:loadTokens(target.token, target.refresh_token, target.token_time)
     self.settings:saveSetting("active_account",
         { server_url = server_url, username = username })

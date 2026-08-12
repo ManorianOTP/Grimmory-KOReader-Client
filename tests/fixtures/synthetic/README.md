@@ -8,10 +8,11 @@ pitfall. These are the regression gate for cfi.lua. (ref: DL-003)
 | Directory | Pitfall |
 |-----------|---------|
 | `minimal/` | Happy-path round-trip baseline |
-| `whitespace/` | SLAXML `stripWhitespace=true`: indentation whitespace between elements must not shift child indices |
+| `whitespace/` | Indentation-only DOM text must not shift child indices while meaningful inline boundary spaces remain intact |
 | `body_index/` | Body CFI step is computed by walking `<html>` children; body is not always index 2 |
 | `text_node/` | Reverse sync (CFI -> XPointer) must emit `/text()[1]` before the char offset |
-| `utf16_surrogate/` | epub.js CFI char offsets count UTF-16 code units; 4-byte UTF-8 chars span 2 units |
+| `utf16_surrogate/` | CREngine XPointer offsets count `lChar32` Unicode scalars; an astral scalar maps to 2 epub.js UTF-16 units |
+| `unicode_offsets/` | Literal Kindle smart-punctuation failures plus emoji, decomposed combining marks, and flattened inline Unicode offsets |
 | `mixed_siblings/` | Mixed text+element siblings: only element siblings count toward CFI step index |
 | `self_closing_anchor/` | Empty page-landmark anchors remain element siblings during CFI/XPointer translation |
 | `multi_docfragment/` | Multi-chapter EPUB where spine index > 1 requires correct SYNTHETIC element count |

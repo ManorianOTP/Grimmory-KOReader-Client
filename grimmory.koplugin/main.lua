@@ -43,6 +43,9 @@ local Session = require("session")
 local Tailscale = require("tailscale")
 local Async = require("async")
 local Updater = require("updater")
+local ShelfCollections = require("shelf_collections")
+local OverlapGroup = require("ui/widget/overlapgroup")
+local SyncStatus = require("sync_status")
 
 -- Absolute path to this plugin's directory, for loading bundled assets
 -- (icons/*.svg). Derived from this chunk's source so it works wherever the
@@ -152,6 +155,9 @@ function Grimmory:init()
         self.server_url = active.server_url
         self.username = active.username
     end
+    self.shelf_collections = ShelfCollections.new{}
+    self.sync_shelf_collections = self.settings:readSetting(
+        "sync_shelf_collections", true) ~= false
 
     if self.settings:readSetting("tailscale_autostart") == true
             and not tailscale_autostart_attempted then
@@ -170,7 +176,9 @@ function Grimmory:addToMainMenu(menu_items)
         sorting_hint = "tools",
         sub_item_table = {
             {
-                text = _("Login"),
+                text_func = function()
+                    return self.session:isLoggedIn() and _("Add account") or _("Login")
+                end,
                 callback = function() self:showLoginDialog() end,
             },
             {
@@ -219,6 +227,13 @@ function Grimmory:addToMainMenu(menu_items)
                     {
                         text = _("Status"),
                         callback = function() self:showTailscaleStatus() end,
+                    },
+                    {
+                        text = _("Install Tailscale"),
+                        enabled_func = function()
+                            return not self.tailscale:isInstalled()
+                        end,
+                        callback = function() self:tailscaleInstall() end,
                     },
                     {
                         text = _("Connect"),
@@ -603,48 +618,67 @@ function Grimmory:showLoginDialog()
         return (self._login_set_default and "☑ " or "☐ ") .. _("Set as default")
     end
 
+    local default_button = {
+        text = default_label(),
+        id = "set_default",
+        callback = function()
+            self._login_set_default = not self._login_set_default
+            -- Refresh the button label in place. Guarded so a
+            -- KOReader without getButtonById still toggles state
+            -- (only the checkmark redraw would be skipped).
+            local bt = self.login_dialog.button_table
+            local btn = bt and bt.getButtonById and bt:getButtonById("set_default")
+            if btn and btn.setText then
+                pcall(function() btn:setText(default_label(), btn.width) end)
+                UIManager:setDirty(self.login_dialog, "ui")
+            end
+        end,
+    }
+    local cancel_button = {
+        text = _("Cancel"), id = "close",
+        callback = function() UIManager:close(self.login_dialog) end,
+    }
+    local login_button = {
+        text = _("Login"), is_enter_default = true,
+        callback = function()
+            local f = self.login_dialog:getFields()
+            local remember = self._login_set_default
+            UIManager:close(self.login_dialog)
+            self:doLogin(f[1], f[2], f[3], remember)
+        end,
+    }
+
+    -- MultiInputDialog does not scroll its action rows. With KOReader's
+    -- landscape keyboard visible, two button rows extend below the available
+    -- dialog area and make Cancel/Login unreachable. All three labels fit on
+    -- one landscape row, which keeps the complete form above the keyboard;
+    -- portrait retains the roomier two-row arrangement.
+    local landscape = Screen:getWidth() > Screen:getHeight()
+    local buttons
+    if landscape then
+        buttons = { { default_button, cancel_button, login_button } }
+    else
+        buttons = { { default_button }, { cancel_button, login_button } }
+    end
+    local fields = {
+        { text = self.server_url, hint = _("Server URL (e.g. 192.168.1.50:6060)") },
+        { text = self.username, hint = _("Username") },
+        { text = "", hint = _("Password"), text_type = "password" },
+    }
+    if landscape then
+        -- Removing only the fields' decorative inset saves enough vertical
+        -- space for the action row while retaining their full touch targets,
+        -- borders and the password-visibility control.
+        for _, field in ipairs(fields) do
+            field.padding = 2
+            field.margin = 2
+        end
+    end
+
     self.login_dialog = MultiInputDialog:new{
         title = _("Grimmory Login"),
-        fields = {
-            { text = self.server_url, hint = _("Server URL (e.g. 192.168.1.50:6060)") },
-            { text = self.username, hint = _("Username") },
-            { text = "", hint = _("Password"), text_type = "password" },
-        },
-        buttons = {
-            {
-                {
-                    text = default_label(),
-                    id = "set_default",
-                    callback = function()
-                        self._login_set_default = not self._login_set_default
-                        -- Refresh the button label in place. Guarded so a
-                        -- KOReader without getButtonById still toggles state
-                        -- (only the checkmark redraw would be skipped).
-                        local bt = self.login_dialog.button_table
-                        local btn = bt and bt.getButtonById and bt:getButtonById("set_default")
-                        if btn and btn.setText then
-                            pcall(function() btn:setText(default_label(), btn.width) end)
-                            UIManager:setDirty(self.login_dialog, "ui")
-                        end
-                    end,
-                },
-            },
-            {
-                {
-                    text = _("Cancel"), id = "close",
-                    callback = function() UIManager:close(self.login_dialog) end,
-                },
-                {
-                    text = _("Login"), is_enter_default = true,
-                    callback = function()
-                        local f = self.login_dialog:getFields()
-                        local remember = self._login_set_default
-                        UIManager:close(self.login_dialog)
-                        self:doLogin(f[1], f[2], f[3], remember)
-                    end,
-                },
-            },
-        },
+        fields = fields,
+        buttons = buttons,
     }
     UIManager:show(self.login_dialog)
     self.login_dialog:onShowKeyboard()
@@ -886,7 +920,7 @@ function Grimmory:confirmUninstall()
             .. "and the Tailscale install)?"),
         choice1_text = _("Keep settings"),
         choice1_callback = function() self:_doUninstall(false) end,
-        choice2_text = _("Erase everything"),
+        choice2_text = _("Erase all"),
         choice2_callback = function() self:_doUninstall(true) end,
     })
 end
@@ -1004,6 +1038,18 @@ function Grimmory:loadSnapshot()
     return LibraryCache.load(self.username, self.server_url)
 end
 
+function Grimmory:reconcileShelfCollections(books, shelves)
+    if not self.sync_shelf_collections or not self.shelf_collections
+            or not self._library_fetched_online then return end
+    local files = self.downloads:localFilesByBook(self.server_url)
+    local result, err = self.shelf_collections:reconcile(self.server_url,
+        self.username, shelves or {}, books or {}, files)
+    if not result then
+        logger.warn("Grimmory: shelf collection sync failed:", tostring(err))
+    end
+    return result, err
+end
+
 -- Bucket books into shelves / unshelved. Shared by the online and offline
 -- render paths so the dashboard groupings are identical either way. Numeric
 -- loops keep `_` bound to gettext (never shadow it near _("…") strings).
@@ -1048,6 +1094,7 @@ end
 
 -- Render the dashboard from a cached snapshot, read-only (no network).
 function Grimmory:renderOfflineLibrary(snap)
+    self._library_fetched_online = false
     self.offline_mode = true
     self._snapshot_fetched_at = snap.fetched_at
     self.cached_books = snap.books
@@ -1080,8 +1127,8 @@ function Grimmory:browseLibrary()
     -- automatically; declining continues in the offline cache.
     if not NetworkMgr:isWifiOn() then
         UIManager:show(ConfirmBox:new{
-            text = _("WiFi is off. Turn it on to load the latest library?"),
-            ok_text = _("Turn on WiFi"),
+            text = _("Wi-Fi is off. Turn it on to load the latest library?"),
+            ok_text = _("Turn on Wi-Fi"),
             ok_callback = function()
                 NetworkMgr:turnOnWifi(function()
                     self:fetchAndShowLibrary(snap)
@@ -1094,7 +1141,7 @@ function Grimmory:browseLibrary()
                     self:renderOfflineLibrary(snap)
                 else
                     UIManager:show(InfoMessage:new{
-                        text = _("No cached library available offline. Turn on WiFi to load it."),
+                        text = _("No cached library available offline. Turn on Wi-Fi to load it."),
                     })
                 end
             end,
@@ -1205,6 +1252,7 @@ function Grimmory:fetchAndShowLibrary(snap)
 
         local libraries = payload.results[3].result
         self.cached_libraries = (type(libraries) == "table") and libraries or {}
+        self._library_fetched_online = true
 
         -- Version discovery is deliberately non-blocking for compatibility:
         -- an older server may not have /version, while a transient
@@ -1219,6 +1267,7 @@ function Grimmory:fetchAndShowLibrary(snap)
         self:saveSnapshot(books, self.cached_shelves, self.cached_libraries)
 
         self:indexShelves(books)
+        self:reconcileShelfCollections(books, self.cached_shelves)
 
         -- Ensure cover cache directory exists
         self.cover_cache_dir = DataStorage:getDataDir() .. "/cache/grimmory"
@@ -1230,13 +1279,272 @@ end
 
 -- ─── UI helpers ──────────────────────────────────────────────────────
 
+function Grimmory:pendingSyncBooks()
+    local service = self.ui and self.ui.grimmory_sync
+    if service and service.pendingBooks then
+        local ok, books = pcall(service.pendingBooks, service)
+        if ok and type(books) == "table" then return books end
+    end
+    return SyncStatus.pendingBooks()
+end
+
+function Grimmory:pendingSyncCount()
+    return #self:pendingSyncBooks()
+end
+
+function Grimmory:_newWifiBadge(model)
+    -- Two glyphs (the capped "9+") need a slightly smaller face than a
+    -- single digit.  Otherwise KOReader expands the centred text past the
+    -- requested square and paints the background as a pill instead of a dot.
+    local badge_font_size = #model.text > 1 and 6 or 8
+    local outline = math.max(1, Screen:scaleBySize(1))
+    local inner_diameter = math.max(1, model.diameter - outline * 2)
+    return FrameContainer:new{
+        overlap_offset = { model.x, model.y },
+        width = model.diameter,
+        height = model.diameter,
+        bordersize = 0,
+        radius = math.floor(model.diameter / 2),
+        padding = outline,
+        background = Blitbuffer.COLOR_WHITE,
+        FrameContainer:new{
+            width = inner_diameter,
+            height = inner_diameter,
+            bordersize = 0,
+            radius = math.floor(inner_diameter / 2),
+            padding = 0,
+            background = Blitbuffer.COLOR_BLACK,
+            CenterContainer:new{
+                dimen = Geom:new{ w = inner_diameter, h = inner_diameter },
+                TextWidget:new{
+                    text = model.text,
+                    face = Font:getFace("cfont", badge_font_size),
+                    bold = true,
+                    fgcolor = Blitbuffer.COLOR_WHITE,
+                },
+            },
+        },
+    }
+end
+
+function Grimmory:updateWifiBadge(pending_count)
+    local button = self.wifi_button
+    if not button or not button.icon_group then return end
+    local model = SyncStatus.badgeModel(
+        pending_count == nil and self:pendingSyncCount() or pending_count,
+        button.icon_size)
+    local next_text = model and model.text or nil
+    if button.badge_text == next_text then return end
+    if button.badge then
+        for index = #button.icon_group, 1, -1 do
+            if button.icon_group[index] == button.badge then
+                table.remove(button.icon_group, index)
+                break
+            end
+        end
+        if button.badge.free then button.badge:free() end
+        button.badge = nil
+    end
+    if model then
+        button.badge = self:_newWifiBadge(model)
+        table.insert(button.icon_group, button.badge)
+    end
+    button.badge_text = next_text
+    UIManager:setDirty(button, "ui")
+end
+
+function Grimmory:_bindSyncStatusListener()
+    local service = self.ui and self.ui.grimmory_sync
+    if not service or not service.setStatusListener then return end
+    if self._bound_sync_service == service then return end
+    if self._bound_sync_service and self._bound_sync_service.setStatusListener then
+        self._bound_sync_service:setStatusListener(nil)
+    end
+    self._bound_sync_service = service
+    service:setStatusListener(function()
+        if self.wifi_button then self:updateWifiBadge() end
+    end)
+end
+
+function Grimmory:_setSyncOption(setting, value)
+    self.settings:saveSetting(setting, value)
+    self.settings:flush()
+    if setting == "sync_shelf_collections" then
+        self.sync_shelf_collections = value
+        if value then
+            self:reconcileShelfCollections(self.cached_books, self.cached_shelves)
+        end
+    end
+    local service = self.ui and self.ui.grimmory_sync
+    if service then
+        if setting == "sync_annotations" then service.sync_annotations = value end
+        if setting == "sync_reading_sessions" then
+            service.sync_reading_sessions = value
+        end
+    end
+end
+
+function Grimmory:tryGoOnline()
+    local connected = function()
+        -- A Wi-Fi association is not proof the configured LAN/tailnet server
+        -- is reachable. fetchAndShowLibrary performs the real Grimmory probe
+        -- and only then clears offline_mode.
+        self:fetchAndShowLibrary(self:loadSnapshot())
+    end
+    if NetworkMgr.turnOnWifiAndWaitForConnection then
+        NetworkMgr:turnOnWifiAndWaitForConnection(connected)
+    elseif not NetworkMgr:isWifiOn() then
+        NetworkMgr:turnOnWifi(connected)
+    else
+        connected()
+    end
+end
+
+function Grimmory:syncAllNow()
+    local service = self.ui and self.ui.grimmory_sync
+    if not service or not service.syncAllNow then
+        UIManager:show(InfoMessage:new{
+            text = _("The paired Grimmory Sync plugin is not available."),
+        })
+        return
+    end
+    service:syncAllNow(function(ok, err)
+        UIManager:show(InfoMessage:new{
+            text = ok and _("Sync started.")
+                or T(_("Could not start sync: %1"), tostring(err)),
+        })
+    end)
+end
+
+local function percentLabel(value)
+    value = tonumber(value)
+    return value and string.format("%.1f%%", value) or _("unknown")
+end
+
+local function positionLabel(value)
+    if value == nil or tostring(value) == "" then return _("unknown") end
+    return tostring(value)
+end
+
+function Grimmory:showConnectionSyncMenu()
+    if self.connection_sync_widget then
+        UIManager:close(self.connection_sync_widget)
+    end
+    local pending = self:pendingSyncBooks()
+    self:updateWifiBadge(#pending)
+    local wifi_on = NetworkMgr:isWifiOn()
+    local item_table = {
+        {
+            text = wifi_on and _("Wi-Fi is on — test Grimmory")
+                or _("Try to go online (turn Wi-Fi on)"),
+            mandatory = self.offline_mode and _("offline") or _("online"),
+            action = "connect",
+        },
+        {
+            text = T(_("Sync all now (%1)"), #pending),
+            action = "sync",
+        },
+        {
+            text = _("Sync EPUB highlights and notes"),
+            mandatory = self.settings:readSetting("sync_annotations", false)
+                and _("on") or _("off"),
+            action = "toggle_annotations",
+        },
+        {
+            text = _("Sync reading sessions"),
+            mandatory = self.settings:readSetting("sync_reading_sessions", false)
+                and _("on") or _("off"),
+            action = "toggle_sessions",
+        },
+        {
+            text = _("Mirror shelves into KOReader collections"),
+            mandatory = self.settings:readSetting("sync_shelf_collections", true)
+                ~= false and _("on") or _("off"),
+            action = "toggle_collections",
+        },
+    }
+    for pending_index = 1, #pending do
+        local book = pending[pending_index]
+        local feature_names = {}
+        local feature_order = { "progress", "annotations", "sessions" }
+        for feature_index = 1, #feature_order do
+            local feature = feature_order[feature_index]
+            if book.features and book.features[feature] then
+                feature_names[#feature_names + 1] = feature
+            end
+        end
+        item_table[#item_table + 1] = {
+            text = (book.active == false and "○ " or "● ") .. tostring(book.title),
+            mandatory = T(_("Device %1 · Server %2"),
+                percentLabel(book.device_percentage),
+                percentLabel(book.server_percentage)),
+            book = book,
+            feature_names = feature_names,
+        }
+    end
+
+    self.connection_sync_widget = InputContainer:new{
+        dimen = Geom:new{ w = Screen:getWidth(), h = Screen:getHeight() },
+    }
+    local menu = Menu:new{
+        show_parent = self.connection_sync_widget,
+        title = _("Connection & Sync"),
+        item_table = item_table,
+        width = Screen:getWidth(), height = Screen:getHeight(),
+        covers_fullscreen = true, is_borderless = true, is_popout = false,
+        onMenuChoice = function(menu_instance, item)
+            if item.action == "connect" then
+                UIManager:close(self.connection_sync_widget)
+                self:tryGoOnline()
+            elseif item.action == "sync" then
+                UIManager:close(self.connection_sync_widget)
+                self:syncAllNow()
+            elseif item.action == "toggle_annotations" then
+                self:_setSyncOption("sync_annotations",
+                    not self.settings:readSetting("sync_annotations", false))
+                self:showConnectionSyncMenu()
+            elseif item.action == "toggle_sessions" then
+                self:_setSyncOption("sync_reading_sessions",
+                    not self.settings:readSetting("sync_reading_sessions", false))
+                self:showConnectionSyncMenu()
+            elseif item.action == "toggle_collections" then
+                self:_setSyncOption("sync_shelf_collections",
+                    self.settings:readSetting("sync_shelf_collections", true) == false)
+                self:showConnectionSyncMenu()
+            elseif item.book then
+                local book = item.book
+                local extra = book.active == false
+                    and _("\n\nSwitch to this account to sync it.") or ""
+                UIManager:show(InfoMessage:new{
+                    text = tostring(book.title) .. "\n"
+                        .. T(_("Device progress: %1\nDevice position: %2\n"
+                            .. "Last known server progress: %3\n"
+                            .. "Last known server position: %4\nPending: %5"),
+                            percentLabel(book.device_percentage),
+                            positionLabel(book.device_position),
+                            percentLabel(book.server_percentage),
+                            positionLabel(book.server_position),
+                            table.concat(item.feature_names, ", ")) .. extra,
+                })
+            end
+        end,
+        close_callback = function()
+            UIManager:close(self.connection_sync_widget)
+            self.connection_sync_widget = nil
+        end,
+    }
+    table.insert(self.connection_sync_widget, menu)
+    UIManager:show(self.connection_sync_widget)
+end
+
 -- WiFi status indicator for the top bar: a wifi glyph that is crossed out in
 -- offline mode. Tapping it reports the connection state (and, when offline, the
 -- cached-library age). Built as a fixed-size tappable image so buildTopBar can
 -- give the search field the remaining width and never overflow screen_w.
 function Grimmory:buildWifiButton()
     local icon_sz = Screen:scaleBySize(24)
-    local name = self.offline_mode and "wifi_off" or "wifi"
+    local online = NetworkMgr:isWifiOn() and not self.offline_mode
+    local name = online and "wifi" or "wifi_off"
     local glyph
     local path = PLUGIN_DIR .. "icons/" .. name .. ".svg"
     if lfs.attributes(path, "mode") == "file" then
@@ -1252,17 +1560,26 @@ function Grimmory:buildWifiButton()
     if not glyph then
         -- Text fallback if the SVG asset is missing/unreadable.
         glyph = TextWidget:new{
-            text = self.offline_mode and "⚠" or "≈",
+            text = online and "≈" or "⚠",
             face = Font:getFace("cfont", 20),
         }
     end
+
+    local badge_model = SyncStatus.badgeModel(self:pendingSyncCount(), icon_sz)
+    local icon_group = OverlapGroup:new{
+        allow_mirroring = false,
+        dimen = Geom:new{ w = icon_sz, h = icon_sz },
+        glyph,
+    }
+    local badge = badge_model and self:_newWifiBadge(badge_model) or nil
+    if badge then table.insert(icon_group, badge) end
 
     local frame = FrameContainer:new{
         bordersize = 0,
         padding_h = Size.padding.large,
         padding_v = Size.padding.default,
         background = Blitbuffer.COLOR_WHITE,
-        glyph,
+        icon_group,
     }
 
     -- Tappable wrapper (same idiom as buildCoverCard): range references btn.dimen
@@ -1277,16 +1594,15 @@ function Grimmory:buildWifiButton()
         },
     }
     btn.onTap = function()
-        local text
-        if self.offline_mode then
-            text = T(_("Offline — showing cached library, last synced %1."),
-                self:formatRelativeTime(self._snapshot_fetched_at))
-        else
-            text = _("Online.")
-        end
-        UIManager:show(InfoMessage:new{ text = text })
+        self:showConnectionSyncMenu()
         return true
     end
+    btn.icon_group = icon_group
+    btn.icon_size = icon_sz
+    btn.badge = badge
+    btn.badge_text = badge_model and badge_model.text or nil
+    self.wifi_button = btn
+    self:_bindSyncStatusListener()
     return btn
 end
 
@@ -1511,8 +1827,11 @@ function Grimmory:buildCoverCard(book, card_w, on_tap)
         author_widget,
     }
 
-    local total_h = cover_h + Size.padding.small
-        + title_widget:getSize().h + author_widget:getSize().h
+    -- Use the laid-out group's real height. TextWidget may reserve a slightly
+    -- different line box after max-width truncation than the sum of the
+    -- nominal child heights; the hand calculation clipped the bottom half of
+    -- some author labels inside the tappable card.
+    local total_h = card_content:getSize().h
 
     -- Wrap in tappable InputContainer
     local card = InputContainer:new{
@@ -1540,15 +1859,16 @@ end
 -- @param books table: array of books to show
 -- @param max_cards number: max cards in the row
 -- @param on_tap function(book): called when a card is tapped
+-- @param layout_w number|nil: available width (defaults to the screen)
 -- @return widget: the row
-function Grimmory:buildCoverRow(books, max_cards, on_tap)
-    local screen_w = Screen:getWidth()
+function Grimmory:buildCoverRow(books, max_cards, on_tap, layout_w)
+    layout_w = layout_w or Screen:getWidth()
     local padding = Size.padding.large
     local gap = Size.padding.default
     local n = math.min(max_cards, #books)
     if n == 0 then return nil end
 
-    local card_w = math.floor((screen_w - padding * 2 - gap * (n - 1)) / n)
+    local card_w = math.floor((layout_w - padding * 2 - gap * (n - 1)) / n)
 
     local row = HorizontalGroup:new{ align = "top" }
     for i = 1, n do
@@ -1560,17 +1880,17 @@ function Grimmory:buildCoverRow(books, max_cards, on_tap)
     end
 
     return CenterContainer:new{
-        dimen = Geom:new{ w = screen_w, h = row:getSize().h },
+        dimen = Geom:new{ w = layout_w, h = row:getSize().h },
         row,
     }
 end
 
 --- Build a section header ("Continue Reading", "Recently Added", etc.)
-function Grimmory:buildSectionHeader(text)
-    local screen_w = Screen:getWidth()
+function Grimmory:buildSectionHeader(text, layout_w)
+    layout_w = layout_w or Screen:getWidth()
     local padding = Size.padding.large
     return FrameContainer:new{
-        width = screen_w,
+        width = layout_w,
         bordersize = 0,
         padding = padding,
         padding_top = Size.padding.large,
@@ -1620,10 +1940,12 @@ function Grimmory:showDashboard()
             self:closeAllViews()
         end
     )
+    local body_w = screen_w - ScrollableContainer:getScrollbarWidth()
 
-    -- Build content
+    -- Only the library body scrolls. Keeping the top bar outside the cropping
+    -- widget makes navigation and connection state available even on a short
+    -- landscape viewport.
     local content = VerticalGroup:new{ align = "left" }
-    table.insert(content, top_bar)
 
     -- Continue Reading: books with lastReadTime, most recent first
     local reading = {}
@@ -1637,8 +1959,8 @@ function Grimmory:showDashboard()
     end)
 
     if #reading > 0 then
-        table.insert(content, self:buildSectionHeader(_("Continue Reading")))
-        local row = self:buildCoverRow(reading, 3, on_tap_book)
+        table.insert(content, self:buildSectionHeader(_("Continue Reading"), body_w))
+        local row = self:buildCoverRow(reading, 3, on_tap_book, body_w)
         if row then table.insert(content, row) end
     end
 
@@ -1654,30 +1976,51 @@ function Grimmory:showDashboard()
     end)
 
     if #recent > 0 then
-        table.insert(content, self:buildSectionHeader(_("Recently Added")))
-        local row = self:buildCoverRow(recent, 3, on_tap_book)
+        table.insert(content, self:buildSectionHeader(_("Recently Added"), body_w))
+        local row = self:buildCoverRow(recent, 3, on_tap_book, body_w)
         if row then table.insert(content, row) end
     end
 
     -- Fallback if no reading history or recently added
     if #reading == 0 and #recent == 0 then
-        table.insert(content, self:buildSectionHeader(_("All Books")))
-        local row = self:buildCoverRow(books, 3, on_tap_book)
+        table.insert(content, self:buildSectionHeader(_("All Books"), body_w))
+        local row = self:buildCoverRow(books, 3, on_tap_book, body_w)
         if row then table.insert(content, row) end
     end
 
-    -- Full-screen frame
+    -- Create the parent before the scroller: ScrollableContainer uses
+    -- show_parent while building its gesture and dirty regions. Exposing the
+    -- scroller as cropping_widget matches KOReader's full-screen scroll views.
+    self.dashboard_widget = InputContainer:new{
+        dimen = Geom:new{ w = screen_w, h = screen_h },
+    }
+    local scroll_h = screen_h - top_bar:getSize().h
+    local scroll_inner = FrameContainer:new{
+        width = body_w,
+        bordersize = 0,
+        padding = 0,
+        background = Blitbuffer.COLOR_WHITE,
+        content,
+    }
+    local scroll = ScrollableContainer:new{
+        dimen = Geom:new{ w = screen_w, h = scroll_h },
+        show_parent = self.dashboard_widget,
+        scroll_inner,
+    }
+    self.dashboard_widget.cropping_widget = scroll
+
+    -- Full-screen frame with a fixed top bar and independently scrollable body.
     local frame = FrameContainer:new{
         width = screen_w,
         height = screen_h,
         background = Blitbuffer.COLOR_WHITE,
         bordersize = 0,
         padding = 0,
-        content,
-    }
-
-    self.dashboard_widget = InputContainer:new{
-        dimen = Geom:new{ w = screen_w, h = screen_h },
+        VerticalGroup:new{
+            align = "left",
+            top_bar,
+            scroll,
+        },
     }
     table.insert(self.dashboard_widget, frame)
 
@@ -1697,6 +2040,7 @@ end
 --- Close all active views (dashboard, book list, filters, detail).
 -- Called before navigating from the sidebar to avoid stale widgets.
 function Grimmory:closeAllViews()
+    self.wifi_button = nil
     if self.detail_widget then
         UIManager:close(self.detail_widget)
         self.detail_widget = nil
@@ -1746,7 +2090,9 @@ function Grimmory:showSidebar()
     local sidebar_w = math.floor(screen_w * 0.70)
     local dismiss_w = screen_w - sidebar_w
     local padding = Size.padding.large
-    local item_h = Screen:scaleBySize(40)
+    -- Reserve the scrollbar gutter up front so a tall sidebar never gains an
+    -- accidental horizontal scrollbar when the vertical one appears.
+    local content_w = sidebar_w - ScrollableContainer:getScrollbarWidth()
 
     local close_sidebar = function()
         if self.sidebar_widget then
@@ -1774,7 +2120,7 @@ function Grimmory:showSidebar()
     -- Helper: add a section header (bold, smaller font, not clickable)
     local function addHeader(text)
         local widget = FrameContainer:new{
-            width = sidebar_w,
+            width = content_w,
             bordersize = 0,
             padding_left = indent,
             padding_right = indent,
@@ -1800,7 +2146,7 @@ function Grimmory:showSidebar()
         local label_w = TextWidget:new{
             text = text,
             face = Font:getFace("cfont", 20),
-            max_width = sidebar_w - indent * 4 - icon_w:getSize().w,
+            max_width = content_w - indent * 4 - icon_w:getSize().w,
         }
 
         local left_part = HorizontalGroup:new{
@@ -1815,7 +2161,7 @@ function Grimmory:showSidebar()
                 text = tostring(count),
                 face = Font:getFace("cfont", 18),
             }
-            local spacer_w = sidebar_w - indent * 2
+            local spacer_w = content_w - indent * 2
                 - left_part:getSize().w - count_w:getSize().w
             if spacer_w < 0 then spacer_w = 0 end
 
@@ -1830,7 +2176,7 @@ function Grimmory:showSidebar()
         end
 
         local row_widget = FrameContainer:new{
-            width = sidebar_w,
+            width = content_w,
             bordersize = 0,
             padding_left = indent,
             padding_right = indent,
@@ -1854,9 +2200,9 @@ function Grimmory:showSidebar()
     -- Helper: add a thin separator line
     local function addSeparator()
         local sep = CenterContainer:new{
-            dimen = Geom:new{ w = sidebar_w, h = Size.padding.default },
+            dimen = Geom:new{ w = content_w, h = Size.padding.default },
             LineWidget:new{
-                dimen = Geom:new{ w = sidebar_w - indent * 2, h = 1 },
+                dimen = Geom:new{ w = content_w - indent * 2, h = 1 },
                 background = Blitbuffer.gray(0.85),
             },
         }
@@ -1935,18 +2281,32 @@ function Grimmory:showSidebar()
         end)
     end
 
-    -- Sidebar left panel
+    -- Build the root first so the scroller can use it as show_parent. The
+    -- right-hand side stays empty and transparent, preserving the dashboard
+    -- beneath it as the dismiss target.
+    self.sidebar_widget = InputContainer:new{
+        dimen = Geom:new{ w = screen_w, h = screen_h },
+    }
+    local sidebar_inner = FrameContainer:new{
+        width = content_w,
+        bordersize = 0,
+        padding = 0,
+        background = Blitbuffer.COLOR_WHITE,
+        sidebar_content,
+    }
+    local sidebar_scroll = ScrollableContainer:new{
+        dimen = Geom:new{ w = sidebar_w, h = screen_h },
+        show_parent = self.sidebar_widget,
+        sidebar_inner,
+    }
+    self.sidebar_widget.cropping_widget = sidebar_scroll
     local sidebar_panel = FrameContainer:new{
         width = sidebar_w,
         height = screen_h,
         background = Blitbuffer.COLOR_WHITE,
         bordersize = 0,
         padding = 0,
-        sidebar_content,
-    }
-
-    self.sidebar_widget = InputContainer:new{
-        dimen = Geom:new{ w = screen_w, h = screen_h },
+        sidebar_scroll,
     }
     table.insert(self.sidebar_widget, sidebar_panel)
 
@@ -1981,29 +2341,42 @@ function Grimmory:showSidebar()
 
     self.sidebar_widget.onTapSidebar = function(this, arg, ges)
         local tap_y = ges.pos.y
+        local scrolled = sidebar_scroll:getScrolledOffset()
+        local scroll_y = scrolled and scrolled.y or 0
+        -- Rows are recorded in content coordinates, while the gesture is in
+        -- viewport coordinates. Account for the KOReader scroll offset so a
+        -- tap after scrolling cannot activate the old row at that screen y.
+        local content_y = tap_y + scroll_y
         for _, item in ipairs(clickable_items) do
-            if tap_y >= item.y_offset and tap_y < item.y_offset + item.height then
+            if content_y >= item.y_offset
+                    and content_y < item.y_offset + item.height then
                 -- Invert this row directly in the framebuffer.
                 -- Do NOT call forceRePaint — it would re-render the
                 -- sidebar widgets on top and overwrite the inversion.
                 local inv_x = 0
-                local inv_y = item.y_offset
-                local inv_w = sidebar_w
-                local inv_h = item.height
+                local inv_y = math.max(0, item.y_offset - scroll_y)
+                local inv_bottom = math.min(screen_h,
+                    item.y_offset + item.height - scroll_y)
+                local inv_w = content_w
+                local inv_h = inv_bottom - inv_y
 
-                Screen.bb:invertRect(inv_x, inv_y, inv_w, inv_h)
-                UIManager:setDirty(nil, "fast", Geom:new{
-                    x = inv_x, y = inv_y, w = inv_w, h = inv_h,
-                })
+                if inv_h > 0 then
+                    Screen.bb:invertRect(inv_x, inv_y, inv_w, inv_h)
+                    UIManager:setDirty(nil, "fast", Geom:new{
+                        x = inv_x, y = inv_y, w = inv_w, h = inv_h,
+                    })
+                end
 
                 -- After a short delay (for the invert to be visible),
                 -- invert back and fire the callback.
                 local cb = item.callback
                 UIManager:scheduleIn(0.15, function()
-                    Screen.bb:invertRect(inv_x, inv_y, inv_w, inv_h)
-                    UIManager:setDirty(nil, "ui", Geom:new{
-                        x = inv_x, y = inv_y, w = inv_w, h = inv_h,
-                    })
+                    if inv_h > 0 then
+                        Screen.bb:invertRect(inv_x, inv_y, inv_w, inv_h)
+                        UIManager:setDirty(nil, "ui", Geom:new{
+                            x = inv_x, y = inv_y, w = inv_w, h = inv_h,
+                        })
+                    end
                     if cb then cb() end
                 end)
                 return true
@@ -2017,6 +2390,38 @@ function Grimmory:showSidebar()
 end
 
 -- ─── Book list ───────────────────────────────────────────────────────
+
+local function measuredTextWidth(text, face)
+    local widget = TextWidget:new{ text = text or "", face = face }
+    local width = widget:getWidth()
+    if widget.free then widget:free() end
+    return width
+end
+
+-- KOReader normally ellipsizes a single-line MenuItem after measuring its
+-- mandatory right column. A few long glyph runs can render slightly wider
+-- than that first measurement on SDL and Kindle font backends. Fit the model
+-- string ourselves with one extra padding reserve, while retaining the full
+-- title on book_data for detail/search behaviour.
+local function fitBookRowTitle(text, max_width, face)
+    text = tostring(text or "")
+    if max_width <= 0 then return "…" end
+    if measuredTextWidth(text, face) <= max_width then return text end
+    local ellipsis = "…"
+    local ellipsis_width = measuredTextWidth(ellipsis, face)
+    local low, high = 0, #text
+    while low < high do
+        local mid = math.ceil((low + high) / 2)
+        local prefix = util.fixUtf8(text:sub(1, mid), "")
+        if measuredTextWidth(prefix, face) + ellipsis_width <= max_width then
+            low = mid
+        else
+            high = mid - 1
+        end
+    end
+    local prefix = util.fixUtf8(text:sub(1, low), ""):gsub("%s+$", "")
+    return prefix .. ellipsis
+end
 
 function Grimmory:showBookList(base_set, title, back_callback)
     local screen_w = Screen:getWidth()
@@ -2124,6 +2529,13 @@ function Grimmory:showBookList(base_set, title, back_callback)
         show_parent = self.book_list_widget,
         title = menu_title,
         item_table = item_table,
+        -- Book rows always pair a title with a right-aligned read status.
+        -- KOReader's multiline MenuItem path may keep an over-wide first line
+        -- underneath that status in short landscape rows. The single-line
+        -- path measures the mandatory widget first, reserves its width, and
+        -- ellipsizes the title into the exact remainder.
+        single_line = true,
+        align_baselines = true,
         width = screen_w,
         height = menu_h,
         covers_fullscreen = false,
@@ -2146,6 +2558,30 @@ function Grimmory:showBookList(base_set, title, back_callback)
             end
         end,
     }
+
+    -- Menu calculates its row font from the final height and item count in
+    -- init(), so perform the conservative fit after construction and rebuild
+    -- only when a displayed title actually changes.
+    local title_face = Font:getFace("smallinfofont", book_menu.font_size)
+    local status_face = Font:getFace("infont",
+        book_menu.items_mandatory_font_size or (book_menu.font_size - 4))
+    local row_width = screen_w - 2 * Size.padding.fullscreen
+    local refit = false
+    for _, item in ipairs(item_table) do
+        if item.book_data then
+            local status_width = measuredTextWidth(item.mandatory or "", status_face)
+            local status_gap = item.mandatory and Size.span.horizontal_default or 0
+            local safe_width = row_width - status_width - status_gap
+                - 2 * Size.padding.fullscreen
+            local fitted = fitBookRowTitle(item.text, safe_width, title_face)
+            if fitted ~= item.text then
+                item.full_text = item.text
+                item.text = fitted
+                refit = true
+            end
+        end
+    end
+    if refit then book_menu:updateItems(nil, true) end
 
     -- Stack top bar + menu vertically
     local layout = VerticalGroup:new{
@@ -2602,6 +3038,9 @@ end
 
 function Grimmory:registerDownload(book, path, book_file)
     self.downloads:register(self.server_url, book, path, book_file)
+    if self._library_fetched_online and self.cached_books and self.cached_shelves then
+        self:reconcileShelfCollections(self.cached_books, self.cached_shelves)
+    end
 end
 
 function Grimmory:refreshDetailView(book)
@@ -2636,7 +3075,9 @@ function Grimmory:showDownloadFormatMenu(book)
         dimen = Geom:new{ w = Screen:getWidth(), h = Screen:getHeight() },
     }
     local items = {}
-    for _, file in ipairs(files) do
+    -- Keep the index named: `_` is the translation function in this file.
+    -- A numeric `_` loop variable would make the translated row labels crash.
+    for file_index, file in ipairs(files) do
         local local_path = self:getLocalPath(book, file)
         local size = file.fileSizeKb and string.format("%.1f MB", file.fileSizeKb / 1024) or ""
         items[#items + 1] = {
@@ -2808,7 +3249,7 @@ function Grimmory:_startBookDownload(book, book_file)
     end
 end
 
-function Grimmory:openBook(file_path)
+function Grimmory:openBook(file_path, after_open_callback)
     if self.detail_widget then
         UIManager:close(self.detail_widget)
         self.detail_widget = nil
@@ -2818,7 +3259,7 @@ function Grimmory:openBook(file_path)
         self.book_menu = nil
     end
     local ReaderUI = require("apps/reader/readerui")
-    ReaderUI:showReader(file_path)
+    ReaderUI:showReader(file_path, nil, nil, nil, after_open_callback)
 end
 
 -- ─── Book detail ─────────────────────────────────────────────────────
@@ -2876,19 +3317,11 @@ function Grimmory:showBookDetail(book)
             args = { book.id },
             apply = function(full)
                 if type(full) == "table" then
-                    -- List DTOs are intentionally stripped. Merge the native
-                    -- file collections, physical flag, and other root fields
-                    -- from the detail DTO as well as its metadata; otherwise
-                    -- alternative formats never reach the download chooser.
-                    for k, v in pairs(full) do
-                        if k ~= "metadata" then book[k] = v end
-                    end
-                    if type(full.metadata) == "table" then
-                        for k, v in pairs(full.metadata) do
-                            if meta[k] == nil then meta[k] = v end
-                        end
-                    end
-                    GrimmoryApi.normalizeBook(book)
+                    -- The list DTO is intentionally stripped. Detail values
+                    -- must replace even non-nil placeholders such as `{}`;
+                    -- otherwise real categories, reviews and other rich
+                    -- metadata disappear from the reader screen.
+                    GrimmoryApi.mergeBookDetail(book, full)
                     -- Mark enriched only on success, so a transient fetch
                     -- failure retries on the next open rather than permanently
                     -- hiding the blurb.
@@ -3467,16 +3900,26 @@ function Grimmory:showBookDetail(book)
             if i > 1 then gap(1) end
             add(tbox(head, 16, { bold = true }))
             if rv.spoiler == true and not self._detail_spoilers[i] then
-                add(tbox(T(_("[spoiler] %1"), rv.title or ""), 16))
+                -- A spoiler title can itself contain the spoiler. Keep both
+                -- title and body out of the widget tree until the reader opts
+                -- in, so they cannot leak visually or through clipping.
+                add(tbox(_("This review contains spoilers."), 16, { gray = 0.45 }))
+                add(VerticalSpan:new{ width = Size.padding.small })
                 local idx = i
                 add(Button:new{
                     text = _("Reveal"),
+                    radius = Size.radius.button,
+                    padding = Size.padding.button,
                     callback = function()
                         self._detail_spoilers[idx] = true
                         self:refreshDetailView(self._detail_book)
                     end,
                 })
             else
+                if type(rv.title) == "string" and rv.title ~= "" then
+                    add(tbox(rv.title, 16, { bold = true }))
+                    add(VerticalSpan:new{ width = Size.padding.small })
+                end
                 add(tbox(util.fixUtf8((rv.body or ""):sub(1, 300), ""), 16))
             end
         end

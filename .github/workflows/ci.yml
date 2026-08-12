@@ -12,7 +12,7 @@ jobs:
       - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y luajit luarocks python3
+          sudo apt-get install -y luajit luarocks python3 python3-pil
           sudo luarocks install busted
           sudo luarocks install dkjson
           sudo luarocks install luasocket
@@ -23,3 +23,28 @@ jobs:
         run: |
           version="$(sed -n -E 's/.*version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' grimmory.koplugin/_meta.lua)"
           scripts/release.sh "$version"
+
+  visual:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install visual-test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl python3 python3-pil xz-utils
+      - name: Cache pinned KOReader runtime
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/grimmory-koreader/downloads
+            ~/.cache/grimmory-koreader/runtimes
+          key: koreader-visual-${{ runner.os }}-${{ hashFiles('tests/emulator/koreader-emulator.env') }}
+      - name: Run KOReader visual tests
+        run: bash scripts/run-koreader-visual-tests.sh --output build/visual/ci
+      - name: Upload visual review report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: koreader-visual-report
+          path: build/visual/ci
+          if-no-files-found: warn

@@ -12,6 +12,7 @@ local spec_helper = {}
 local PLUGIN_PREFIXES = {
     "grimmory", "grimmory_sync", "cfi", "api", "view",
     "queue", "library_cache", "downloads", "session", "tailscale", "updater",
+    "sync_status", "shelf_collections", "state", "annotations", "sessions", "wire",
     "async", "logger", "luasettings", "datastorage",
     "json", "ltn12", "optmath", "gettext", "util",
 }
