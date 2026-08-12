@@ -1,8 +1,10 @@
--- Vendored copy of SLAXML v0.8
+-- Vendored from SLAXML v0.8
 -- Source: https://github.com/Phrogz/SLAXML
--- Commit: 47c72ee (2023-01-15)
+-- Tag commit: 8a3e0c90325aa6d84ad23a7c13bf77247cb7f94e (2018-10-23)
 -- License: MIT
--- No modifications from upstream except this provenance comment block.
+-- Local composition: upstream slaxml.lua plus the dom() builder from
+-- slaxdom.lua in one file (the serializer is not included), with this
+-- provenance comment block added.
 --[=====================================================================[
 v0.8 Copyright © 2013-2018 Gavin Kistner <!@phrogz.net>; MIT Licensed
 See http://github.com/Phrogz/SLAXML for details.

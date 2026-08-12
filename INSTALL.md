@@ -12,7 +12,9 @@ koreader/plugins/grimmory_sync.koplugin/
 
 On a Kindle that's `/mnt/us/koreader/plugins/`.
 
-Pick whichever method suits you. **Method A needs no command line.**
+The supported installation paths today are USB copy and, for advanced users,
+scp. **Method A needs no command line.** The KOReader community App Store does
+not currently offer this Grimmory client.
 
 ## Replacing the old BookLore plugins
 
@@ -41,8 +43,10 @@ choose to remove them after verifying the new installation.
 
 ## Method A — USB copy (recommended, no command line)
 
-1. Download this project (the green **Code ▸ Download ZIP** button on GitHub, or
-   a release ZIP) and unzip it on your computer.
+1. Download this project with the green **Code ▸ Download ZIP** button on
+   GitHub and unzip it on your computer. There is not yet a published Grimmory
+   release; the existing `v1.0.0` release belongs to the earlier BookLore
+   client and must not be installed as Grimmory.
 2. On the Kindle, **exit KOReader back to the normal Kindle home screen** — the
    USB drive only appears when KOReader isn't holding it.
 3. Connect the Kindle to your computer with a USB cable. It mounts as a drive.
@@ -56,16 +60,7 @@ That's it — go to [the README quick start](README.md#quick-start) to log in.
 
 ---
 
-## Method B — via the community AppStore plugin (on-device)
-
-This method becomes available only after the repository is public, tagged with
-the `koreader-plugin` topic, and has a published Grimmory release containing
-both plugin archives. Until then, use USB copy or scp. Once available, open
-**Tools ▸ App Store**, find Grimmory, and install it.
-
----
-
-## Method C — scp / Wi-Fi (advanced, for tinkerers)
+## Method B — scp / Wi-Fi (advanced, for tinkerers)
 
 If your jailbroken Kindle runs an SSH server (e.g. via USBNetwork / a network
 KUAL extension) you can push the plugins over Wi-Fi.

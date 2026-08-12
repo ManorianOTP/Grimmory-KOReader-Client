@@ -5,9 +5,23 @@ Kindle into a client for a self-hosted [Grimmory](https://github.com/grimmory-to
 library server: browse and download your books, and sync your reading position
 back to the server automatically.
 
+The project is primarily an integration and reliability exercise: it translates
+KOReader document positions into Grimmory/epub.js locations, preserves work
+while offline, resolves concurrent progress and annotation changes, and ships a
+reproducible emulator and compatibility-test harness around a constrained
+e-ink client.
+
 > Two plugins, one install:
 > - **`grimmory.koplugin`** — log in, browse/search/filter your library, download books, and (optionally) get on your network over Tailscale.
 > - **`grimmory_sync.koplugin`** — syncs progress and, when enabled, EPUB annotations and reading sessions.
+
+> **Release status:** Grimmory v2 is not published yet. The repository's
+> existing `v1.0.0` GitHub release is the legacy BookLore client; install the
+> current Grimmory plugin folders from source until a v2 release is published.
+
+![Synthetic KOReader library dashboard used by the visual regression suite](tests/visual/references/portrait/dashboard_real_library.png)
+
+*A deterministic, fictional library fixture—no private books or cover art.*
 
 ## Features
 
@@ -46,11 +60,15 @@ back to the server automatically.
   password (shared/household devices).
 - **Tailscale onboarding** — install and connect Tailscale from inside the app
   to reach a server that isn't on your local network. The installer verifies
-  the pinned archive and extracted executables and rejects unsafe archive paths,
-  links, unexpected members, or bytes that do not match their checksums.
+  the versioned archive selected by Tailscale's package manifest and the
+  extracted executables, and rejects unsafe archive paths, links, unexpected
+  members, or bytes that do not match their checksums. The selected Tailscale
+  version is not pinned in this repository.
 - **In-app updates** — after a public Grimmory release is available,
   **Grimmory ▸ Check for updates** downloads, checksum-verifies, and installs
-  the complete two-plugin release as one lockstep update.
+  the complete two-plugin release together. A transaction marker and retained
+  backups let startup recovery finish or roll back an interrupted replacement;
+  the operation is not described as filesystem-atomic.
 
 ## Prerequisites
 
@@ -73,8 +91,9 @@ You need all four of these before installing:
    USB drag-and-drop: copy the two `*.koplugin` folders into
    `koreader/plugins/` on the Kindle and restart KOReader.
 2. **Log in** — in KOReader: **Menu ▸ Grimmory ▸ Login**. Enter your server URL
-   (e.g. `192.168.1.50:6060` — `http://` is added for you) and your Grimmory
-   username and password.
+   and your Grimmory username and password. Prefer an HTTPS URL. A bare LAN
+   address such as `192.168.1.50:6060` is accepted and gets `http://` added,
+   but plain HTTP does not protect credentials or tokens from network observers.
 3. **Browse** — **Menu ▸ Grimmory ▸ Browse Library**. Tap a book to see details
    and download its primary file, or choose a format when the book has several.
    Open the downloaded book to read; your progress syncs automatically.
@@ -115,6 +134,27 @@ per-book pending list.
 See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for the common issues
 (login failures, "offline" library, Tailscale, update problems).
 
+For deployment assumptions and private vulnerability reporting, see
+[SECURITY.md](SECURITY.md).
+
+## Engineering evidence
+
+The public, deterministic gate currently comprises 339 passing Lua examples,
+120 Python harness/tooling tests, and 22 Node.js browser-oracle unit tests. The
+realism policy independently inventories 331 top-level Lua cases, all 47 visual
+scenarios, those 120 Python tests, and 34 JavaScript cases (the 22 public unit
+tests plus 12 private full-server Playwright journeys). These are deliberately
+reported as separate categories rather than one inflated total.
+
+The KOReader visual job captures every scenario in portrait and landscape and
+compares all 94 images exactly. Private companion lanes add eight locally owned
+EPUBs and a disposable Grimmory/MariaDB stack; their books, provider responses,
+paths, hashes, logs, and reports are ignored and are not required to run the
+meaningful public suite. Desktop KOReader cannot prove Kindle-only touch,
+suspend/wake, or e-ink refresh behaviour, so those remain physical-device
+release checks. See [tests/README.md](tests/README.md) and the
+[test-realism audit](tests/REALISM_AUDIT.md) for the boundaries and commands.
+
 ## For developers
 
 The off-device test harness is documented in [tests/README.md](tests/README.md).
@@ -128,10 +168,17 @@ Reference images can only be changed by the explicit workflow documented in
 The device-to-web annotation regression creates highlights through KOReader's
 real reader UI, then independently resolves the resulting CFI with Foliate and
 requires the complete DOM range to match KOReader and Grimmory byte-for-byte.
-It runs on the synthetic Unicode fixture and all eight configured real EPUBs.
-To build and validate exactly two release artifacts, run
+It runs on the synthetic Unicode fixture and all eight configured private
+EPUBs. The private release-audit lane was refreshed on 2026-08-13: its paired
+schema-v2 report passed all 136 real-EPUB captures, and the full-server lane
+passed its browser, KOReader, checkpoint, provenance, and parity gates. These
+private reports remain ignored build artifacts and should be regenerated from
+the release candidate before each publication.
+To build and validate exactly two release archives plus their generated
+release manifest, run
 `scripts/release.sh <version>`.
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the
+vendored SLAXML notice and artwork/trademark provenance.

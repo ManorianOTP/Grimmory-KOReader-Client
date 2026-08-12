@@ -26,3 +26,8 @@ pitfall. These are the regression gate for cfi.lua. (ref: DL-003)
 
 No zip step required: `tests/support/epub_reader.lua` reads the directory tree
 directly, bypassing the minizip FFI. (ref: DL-002)
+
+All prose in these fixtures was written specifically for this test suite. The
+short phrases under `unicode_offsets/` deliberately contain smart quotes, a
+curly apostrophe, emoji and a decomposed combining mark while retaining the
+offset lengths required by the regression cases.

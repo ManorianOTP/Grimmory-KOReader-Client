@@ -4,7 +4,7 @@
     Lets a non-technical Kindle owner update both plugins from inside KOReader
     over WiFi/Tailscale, no scp. Source of truth is a small JSON manifest on a
     stable URL (raw.githubusercontent — no GitHub API rate limit) that names the
-    latest version and, per plugin, a .tar.gz artifact URL + checksum.
+    latest version and, per plugin, a .tar.gz artifact URL + SHA-256 checksum.
 
     Standalone module — no KOReader widget dependencies — so the whole
     fetch -> verify -> extract -> swap -> reconcile pipeline is unit-testable off
@@ -15,8 +15,8 @@
     Side effects are injectable via the opts table to new():
       exec(cmd)        shell runner -> trimmed output, exit code
       request(req)     LTN12-style HTTP request -> result, status code
-      hash_file(path)  -> sha256 hex or nil (defaults to `sha256sum`; when a
-                         manifest checksum is present, nil is a hard failure)
+      hash_file(path)  -> sha256 hex or nil (defaults to `sha256sum`; a missing
+                         or unverifiable checksum is always a hard failure)
       plugins_root, staging_dir, tmp_root, manifest_url, min_artifact_bytes,
       managed_dirs
     Defaults target the real device; tests point the paths and URL at a temp
@@ -26,13 +26,13 @@
     THE SWAP (the dangerous bit). A plugin that rewrites its own live directory
     cannot reload itself mid-session — the change takes effect on the next
     KOReader start — so we never write in place. Each new tree is extracted to a
-    staging dir, then atomically renamed to a validated `<dir>.new` sibling. The
-    commit first retains every live tree as `<dir>.old`, installs the complete
-    pair, and removes the backups only after both installs succeed. grimmory_sync
-    is committed first and grimmory (the running plugin) last. reconcile(), run
-    at boot, finishes any interrupted swap: a
-    `<dir>.new` only ever exists after a fully downloaded+validated tree was
-    promoted, so installing it is always safe.
+    staging dir, then renamed to a validated `<dir>.new` sibling. Only after
+    BOTH trees are ready is a transaction marker published. The commit retains
+    every live tree as `<dir>.old`, installs the pair, verifies both versions,
+    then removes backups and the marker. grimmory_sync is committed first and
+    grimmory (the running plugin) last. reconcile(), run at boot, either finishes
+    a marked transaction or discards unmarked partial staging, so interruption
+    cannot settle into a version-skewed pair after recovery.
 ]]
 
 local logger = require("logger")
@@ -47,10 +47,12 @@ local DEFAULT_MANAGED_DIRS = { "grimmory_sync.koplugin", "grimmory.koplugin" }
 
 local DEFAULTS = {
     plugins_root = "/mnt/us/koreader/plugins",
-    manifest_url = "https://raw.githubusercontent.com/ManorianOTP/Grimmory-KOReader-Client/main/release/manifest.json",
+    manifest_url = "https://github.com/ManorianOTP/Grimmory-KOReader-Client/releases/latest/download/manifest.json",
     -- A plugin .tar.gz is tens of KB; < 256 bytes is an HTML error page.
     min_artifact_bytes = 256,
 }
+
+local TRANSACTION_MARKER = ".grimmory_update.ready"
 
 --- Run a shell command, capture stdout + exit code. (Same idiom as tailscale.)
 local function defaultExec(cmd)
@@ -77,7 +79,7 @@ function Updater.new(opts)
     end
     self.managed_dirs = opts.managed_dirs or DEFAULT_MANAGED_DIRS
     -- Staging must be a SIBLING of the plugin dirs so promote/commit renames
-    -- stay on one filesystem (atomic). Derive from plugins_root unless given,
+    -- stay on one filesystem. Derive from plugins_root unless given,
     -- so a non-default deploy path still stages correctly. Dot-prefixed +
     -- non-.koplugin so KOReader's plugin scanner ignores it.
     self.staging_dir = opts.staging_dir or (self.plugins_root .. "/.grimmory_update")
@@ -125,7 +127,7 @@ end
 function Updater.validateManifest(manifest, managed_dirs)
     managed_dirs = managed_dirs or DEFAULT_MANAGED_DIRS
     if type(manifest) ~= "table" then return nil, "could not parse update manifest" end
-    if type(manifest.version) ~= "string" then
+    if type(manifest.version) ~= "string" or manifest.version == "" then
         return nil, "update manifest missing version"
     end
     if type(manifest.plugins) ~= "table" or #manifest.plugins ~= #managed_dirs then
@@ -152,9 +154,11 @@ function Updater.validateManifest(manifest, managed_dirs)
             return nil, "update manifest contains duplicate plugin: " .. p.dir
         end
         seen[p.dir] = true
-        if p.sha256 ~= nil and p.sha256 ~= ""
-                and (type(p.sha256) ~= "string" or #p.sha256 ~= 64
-                    or p.sha256:find("[^0-9a-fA-F]")) then
+        if p.sha256 == nil or p.sha256 == "" then
+            return nil, "update manifest missing checksum for " .. p.dir
+        end
+        if type(p.sha256) ~= "string" or #p.sha256 ~= 64
+                or p.sha256:find("[^0-9a-fA-F]") then
             return nil, "update manifest has invalid checksum for " .. p.dir
         end
     end
@@ -183,6 +187,25 @@ local function readFile(path)
     local data = f:read("*a")
     f:close()
     return data
+end
+
+local function writeFile(path, data)
+    local f, err = io.open(path, "w")
+    if not f then return nil, err end
+    local ok, write_err = f:write(data)
+    f:close()
+    if not ok then return nil, write_err end
+    return true
+end
+
+local function markerPath(self)
+    return self.plugins_root .. "/" .. TRANSACTION_MARKER
+end
+
+local function transactionVersion(self)
+    local value = readFile(markerPath(self))
+    if not value then return nil end
+    return value:match("^%s*([^%s]+)%s*$")
 end
 
 --- Installed version of one plugin dir (e.g. "grimmory.koplugin"), or nil.
@@ -249,20 +272,36 @@ local function looksLikeGzip(path)
     return magic == "\031\139"  -- 0x1f 0x8b
 end
 
-local function archiveHasSafeRoot(self, path, expected_root)
-    local listing, code = self.exec("tar tzf " .. shq(path))
+local function archiveHasSafeMembers(self, path, expected_root)
+    -- Verbose tar output begins with the member type. Accept only directories
+    -- and regular files: symlinks, hardlinks, devices, fifos and sockets are
+    -- rejected before extraction.
+    local listing, code = self.exec("tar tvzf " .. shq(path))
     if code ~= 0 or type(listing) ~= "string" or listing == "" then
-        return false
+        return false, "could not list archive"
     end
-    for name in listing:gmatch("[^\r\n]+") do
-        name = name:gsub("^%./", "")
-        if name:sub(1, 1) == "/" then return false end
-        local first = name:match("^([^/]+)")
-        if first ~= expected_root then return false end
-        for part in name:gmatch("[^/]+") do
-            if part == ".." then return false end
+    local found = false
+    for line in listing:gmatch("[^\r\n]+") do
+        local member_type = line:sub(1, 1)
+        if member_type ~= "d" and member_type ~= "-" then
+            return false, "archive contains a link or special file"
         end
+        local name = line:match("(%S+)%s*$")
+        if not name then return false, "could not parse archive listing" end
+        name = name:gsub("^%./", "")
+        if name:sub(1, 1) == "/" or name:find("\\", 1, true) then
+            return false, "archive contains an unsafe path"
+        end
+        local first = name:match("^([^/]+)")
+        if first ~= expected_root then return false, "archive has the wrong root" end
+        for part in name:gmatch("[^/]+") do
+            if part == "." or part == ".." then
+                return false, "archive contains an unsafe path"
+            end
+        end
+        found = true
     end
+    if not found then return false, "archive is empty" end
     return true
 end
 
@@ -272,7 +311,7 @@ local function dirExists(self, path)
 end
 
 --- Download, verify, extract, and validate every plugin artifact named by the
--- manifest into the staging dir, then atomically promote each validated tree to
+-- manifest into the staging dir, then promote each validated tree to
 -- a `<dir>.new` sibling ready for commit. Returns true, or nil + error (and
 -- cleans up on every failure path).
 function Updater:stageUpdate(manifest)
@@ -281,6 +320,10 @@ function Updater:stageUpdate(manifest)
 
     local valid, manifest_err = Updater.validateManifest(manifest, self.managed_dirs)
     if not valid then return nil, manifest_err end
+
+    if transactionVersion(self) then
+        return nil, "an unfinished update must be recovered before staging another"
+    end
 
     local function fail(msg)
         self.exec("rm -rf " .. shq(staging))
@@ -291,6 +334,10 @@ function Updater:stageUpdate(manifest)
     end
 
     self.exec("rm -rf " .. shq(staging))
+    for i = 1, #self.managed_dirs do
+        self.exec("rm -rf " .. shq(self.plugins_root .. "/"
+            .. self.managed_dirs[i] .. ".new"))
+    end
     local _out, mk = self.exec("mkdir -p " .. shq(staging))
     if mk ~= 0 then return fail("cannot create staging dir: " .. shq(staging)) end
 
@@ -316,22 +363,24 @@ function Updater:stageUpdate(manifest)
         if not looksLikeGzip(part) then
             return fail("downloaded " .. p.dir .. " is not a valid archive")
         end
-        -- "" is truthy in Lua, so guard it explicitly: a manifest with a blank
-        -- checksum means "not provided", not "must equal empty".
-        if p.sha256 and p.sha256 ~= "" then
-            local got = self.hash_file(part)
-            if not got then
-                return fail("could not verify checksum for " .. p.dir)
-            end
-            if got:lower() ~= tostring(p.sha256):lower() then
-                return fail("checksum mismatch for " .. p.dir)
-            end
+        local got = self.hash_file(part)
+        if not got then
+            return fail("could not verify checksum for " .. p.dir)
+        end
+        if got:lower() ~= p.sha256:lower() then
+            return fail("checksum mismatch for " .. p.dir)
         end
 
-        os.rename(part, tgz)
+        local renamed, rename_err = os.rename(part, tgz)
+        if not renamed then
+            return fail("could not finalize archive for " .. p.dir .. ": "
+                .. tostring(rename_err))
+        end
 
-        if not archiveHasSafeRoot(self, tgz, p.dir) then
-            return fail("update archive for " .. p.dir .. " has unsafe paths or the wrong root")
+        local safe, archive_err = archiveHasSafeMembers(self, tgz, p.dir)
+        if not safe then
+            return fail("update archive for " .. p.dir .. " is unsafe: "
+                .. tostring(archive_err))
         end
 
         -- `cd <dir> && tar xzf` rather than `tar -C`: busybox tar on Kindle does
@@ -356,7 +405,7 @@ function Updater:stageUpdate(manifest)
     end
 
     -- Every tree downloaded + validated. Promote each to a `<dir>.new` sibling
-    -- with an atomic rename, so a crash never leaves a half-extracted .new.
+    -- with a sibling rename, so a crash never leaves a half-extracted .new.
     for i = 1, #manifest.plugins do
         local dir = manifest.plugins[i].dir
         local new_path = self.plugins_root .. "/" .. dir .. ".new"
@@ -365,21 +414,48 @@ function Updater:stageUpdate(manifest)
         if code ~= 0 then return fail("could not stage " .. dir) end
     end
 
+    -- Publishing the marker is the transaction boundary. Before this point,
+    -- reconcile discards any partial .new set. After it, every managed .new
+    -- tree exists and has already passed checksum, archive and version checks.
+    local marker_tmp = staging .. "/transaction.ready"
+    local wrote, write_err = writeFile(marker_tmp, manifest.version .. "\n")
+    if not wrote then return fail("could not write update marker: " .. tostring(write_err)) end
+    local _mout, marker_code = self.exec("mv " .. shq(marker_tmp) .. " "
+        .. shq(markerPath(self)))
+    if marker_code ~= 0 then return fail("could not publish update marker") end
+
     self.exec("rm -rf " .. shq(staging))
     return true
 end
 
 --- Commit promoted `<dir>.new` trees with the per-plugin rename dance, in
 -- managed_dirs order (sync first, self last). Returns true, or nil + error.
-function Updater:commitStaged()
+function Updater:commitStaged(expected_version)
     -- Preflight the complete pair before moving either live directory. This is
     -- what prevents a partial manifest or interrupted staging pass from being
     -- reported as a successful lockstep update.
+    local target_version = transactionVersion(self)
+    if not target_version then return nil, "staged update is missing its transaction marker" end
+    if expected_version and target_version ~= expected_version then
+        return nil, "staged update marker has version " .. target_version
+            .. ", expected " .. expected_version
+    end
+
+    local previous_version
     for i = 1, #self.managed_dirs do
         local dir = self.managed_dirs[i]
         if not dirExists(self, self.plugins_root .. "/" .. dir .. ".new") then
             return nil, "staged update missing " .. dir
         end
+        if self:getInstalledVersion(dir .. ".new") ~= target_version then
+            return nil, "staged update has wrong version for " .. dir
+        end
+        local current = self:getInstalledVersion(dir)
+        if not current then return nil, "installed plugin missing " .. dir end
+        if previous_version and current ~= previous_version then
+            return nil, "installed plugin pair is already version-skewed"
+        end
+        previous_version = current
     end
     local moved_old = {}
     local installed_new = {}
@@ -404,6 +480,14 @@ function Updater:commitStaged()
                 if code ~= 0 then restored = false end
             end
         end
+        if restored then
+            for i = 1, #self.managed_dirs do
+                if self:getInstalledVersion(self.managed_dirs[i]) ~= previous_version then
+                    restored = false
+                end
+            end
+        end
+        if restored then self.exec("rm -f " .. shq(markerPath(self))) end
         return nil, message .. (restored and "; previous plugin pair restored"
             or "; automatic rollback was incomplete")
     end
@@ -431,10 +515,28 @@ function Updater:commitStaged()
         installed_new[dir] = true
     end
 
+
+    for i = 1, #self.managed_dirs do
+        local dir = self.managed_dirs[i]
+        if self:getInstalledVersion(dir) ~= target_version then
+            return nil, "installed version verification failed for " .. dir
+                .. "; recovery marker retained"
+        end
+    end
+
     -- Both live trees are now installed. Only now discard their exact backups.
     for i = 1, #self.managed_dirs do
-        self.exec("rm -rf " .. shq(self.plugins_root .. "/"
-            .. self.managed_dirs[i] .. ".old"))
+        local dir = self.managed_dirs[i]
+        local _o, remove_code = self.exec("rm -rf " .. shq(self.plugins_root .. "/"
+            .. dir .. ".old"))
+        if remove_code ~= 0 then
+            return nil, "could not remove backup for " .. dir
+                .. "; recovery marker retained"
+        end
+    end
+    local _o, marker_code = self.exec("rm -f " .. shq(markerPath(self)))
+    if marker_code ~= 0 then
+        return nil, "could not clear update marker; startup recovery required"
     end
     return true
 end
@@ -444,7 +546,7 @@ end
 function Updater:performUpdate(manifest)
     local ok, err = self:stageUpdate(manifest)
     if not ok then return nil, err end
-    local cok, cerr = self:commitStaged()
+    local cok, cerr = self:commitStaged(manifest.version)
     if not cok then return nil, cerr end
     for i = 1, #self.managed_dirs do
         local dir = self.managed_dirs[i]
@@ -456,25 +558,101 @@ function Updater:performUpdate(manifest)
     return true, manifest.version
 end
 
---- Boot-time recovery for an interrupted swap. A `<dir>.new` is always a fully
--- validated tree, so install it; otherwise restore from `<dir>.old`; finally
--- clean up any leftover `<dir>.old`. Safe to call on every start.
+--- Boot-time recovery for an interrupted paired swap. An unmarked `.new` set
+-- was interrupted before every tree was ready and is discarded. A marked set
+-- is completed only when the target version exists in either live or `.new`
+-- for every managed plugin. Backups and the marker are removed last.
 function Updater:reconcile()
+    local target_version = transactionVersion(self)
+
+    local function rollbackBackups(reason)
+        local restored_any = false
+        for i = #self.managed_dirs, 1, -1 do
+            local dir = self.managed_dirs[i]
+            local live = self.plugins_root .. "/" .. dir
+            local old_path = live .. ".old"
+            if dirExists(self, old_path) then
+                if dirExists(self, live) then self.exec("rm -rf " .. shq(live)) end
+                local _o, code = self.exec("mv " .. shq(old_path) .. " " .. shq(live))
+                if code ~= 0 then return nil, "could not restore " .. dir end
+                restored_any = true
+            end
+        end
+        for i = 1, #self.managed_dirs do
+            self.exec("rm -rf " .. shq(self.plugins_root .. "/"
+                .. self.managed_dirs[i] .. ".new"))
+        end
+        local version
+        for i = 1, #self.managed_dirs do
+            local current = self:getInstalledVersion(self.managed_dirs[i])
+            if not current or (version and current ~= version) then
+                return nil, "recovery could not restore a matching plugin pair"
+            end
+            version = current
+        end
+        if target_version then self.exec("rm -f " .. shq(markerPath(self))) end
+        if restored_any then logger.warn("Grimmory: rolled back interrupted update", reason) end
+        return true
+    end
+
+    if not target_version then
+        return rollbackBackups("before transaction marker")
+    end
+
+    -- Every plugin must still have the target either live or ready in `.new`.
+    -- If not, use the retained old pair rather than completing only one side.
     for i = 1, #self.managed_dirs do
         local dir = self.managed_dirs[i]
         local live = self.plugins_root .. "/" .. dir
         local new_path = live .. ".new"
         local old_path = live .. ".old"
-        if dirExists(self, new_path) then
-            if dirExists(self, live) then self.exec("rm -rf " .. shq(live)) end
-            self.exec("mv " .. shq(new_path) .. " " .. shq(live))
-            logger.info("Grimmory: reconciled interrupted update for", dir)
-        elseif not dirExists(self, live) and dirExists(self, old_path) then
-            self.exec("mv " .. shq(old_path) .. " " .. shq(live))
-            logger.warn("Grimmory: rolled back interrupted update for", dir)
+        if self:getInstalledVersion(dir) ~= target_version
+                and self:getInstalledVersion(dir .. ".new") ~= target_version then
+            return rollbackBackups("target tree missing for " .. dir)
         end
-        if dirExists(self, old_path) then self.exec("rm -rf " .. shq(old_path)) end
     end
+
+    for i = 1, #self.managed_dirs do
+        local dir = self.managed_dirs[i]
+        local live = self.plugins_root .. "/" .. dir
+        local new_path = live .. ".new"
+        local old_path = live .. ".old"
+        if self:getInstalledVersion(dir) ~= target_version then
+            if dirExists(self, live) then
+                if not dirExists(self, old_path) then
+                    local _o, backup_code = self.exec("mv " .. shq(live) .. " " .. shq(old_path))
+                    if backup_code ~= 0 then return nil, "could not back up " .. dir end
+                else
+                    local _o, remove_code = self.exec("rm -rf " .. shq(live))
+                    if remove_code ~= 0 then return nil, "could not replace " .. dir end
+                end
+            end
+            local _o, install_code = self.exec("mv " .. shq(new_path) .. " " .. shq(live))
+            if install_code ~= 0 then return nil, "could not finish installing " .. dir end
+            logger.info("Grimmory: reconciled interrupted update for", dir)
+        elseif dirExists(self, new_path) then
+            self.exec("rm -rf " .. shq(new_path))
+        end
+    end
+
+    for i = 1, #self.managed_dirs do
+        if self:getInstalledVersion(self.managed_dirs[i]) ~= target_version then
+            return nil, "recovery left the plugin pair version-skewed"
+        end
+    end
+    for i = 1, #self.managed_dirs do
+        local dir = self.managed_dirs[i]
+        local _o, remove_code = self.exec("rm -rf " .. shq(self.plugins_root .. "/"
+            .. dir .. ".old"))
+        if remove_code ~= 0 then
+            return nil, "could not clean recovered backup for " .. dir
+        end
+    end
+    local _o, marker_code = self.exec("rm -f " .. shq(markerPath(self)))
+    if marker_code ~= 0 then
+        return nil, "could not clear recovered update marker"
+    end
+    return true
 end
 
 --- Remove both plugin directories (sync first, self last). When

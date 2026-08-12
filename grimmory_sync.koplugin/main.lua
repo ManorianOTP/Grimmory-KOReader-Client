@@ -20,6 +20,38 @@ local Sessions = require("sessions")
 local NetworkMgr = require("ui/network/manager")
 local Async = require("async")
 
+local PLUGIN_DIR = debug.getinfo(1, "S").source:sub(2):match("(.*[/\\])") or "./"
+local pair_reconcile_attempted = false
+
+-- The updater is owned by the companion UI plugin. During an interrupted
+-- replacement that directory may be live, `.new`, or `.old`, so load the
+-- newest available recovery implementation directly. Running this guard at
+-- the start of sync init prevents the sync engine from operating while the
+-- two installed trees are version-skewed on disk.
+local function reconcilePluginPair()
+    if pair_reconcile_attempted then return true end
+    pair_reconcile_attempted = true
+    local plugins_root = PLUGIN_DIR:gsub("[/\\]+$", ""):gsub("[/\\][^/\\]+$", "")
+    local base = plugins_root .. "/grimmory.koplugin"
+    local candidates = { base .. ".new/updater.lua", base .. "/updater.lua",
+        base .. ".old/updater.lua" }
+    for i = 1, #candidates do
+        local chunk = loadfile(candidates[i])
+        if chunk then
+            local loaded, Updater = pcall(chunk)
+            if loaded and type(Updater) == "table" and Updater.new then
+                local updater = Updater.new{ plugins_root = plugins_root }
+                local ok, recovered, err = pcall(updater.reconcile, updater)
+                if ok and recovered then return true end
+                logger.err("GrimmorySync: paired update recovery failed:",
+                    tostring(ok and err or recovered))
+                return nil
+            end
+        end
+    end
+    return true -- clean source/development layouts may omit the companion
+end
+
 -- 3s per-socket-operation bound (DL-004). Without it the pull GET inherits
 -- luasocket's 60s default and freezes book-open against an unreachable server.
 local SYNC_TIMEOUT_SECS = 3
@@ -592,6 +624,10 @@ function GrimmorySync:pendingCount()
 end
 
 function GrimmorySync:init()
+    if not reconcilePluginPair() then
+        self.enabled = false
+        return
+    end
     local settings = LuaSettings:open(
         DataStorage:getSettingsDir() .. "/grimmory.lua"
     )

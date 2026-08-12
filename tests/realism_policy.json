@@ -113,8 +113,8 @@
     {
       "id": "api-wire-contract-unit",
       "files": ["tests/api_spec.lua"],
-      "expectedCases": 31,
-      "caseSetSha256": "8d66944c4c684ad322b87d0db90ffda46e9ce556690836b5cadd579b3a2bbbcc",
+      "expectedCases": 32,
+      "caseSetSha256": "81a6ee044080c6d4251d577b13498a32a54f9879838df08f7979a18522757489",
       "class": "pure-logic-not-epub-dependent",
       "rationale": "These cases pin URL normalization, HTTP framing, DTO parsing, error typing, and byte streaming; they do not claim that canned bytes form a readable EPUB."
     },
@@ -146,8 +146,8 @@
     {
       "id": "download-registry-unit",
       "files": ["tests/downloads_spec.lua"],
-      "expectedCases": 11,
-      "caseSetSha256": "a742695a957c8e2aac7aa57fe0fc2d6f163dd9b8db8cb34b47f4734ed0cb9c79",
+      "expectedCases": 13,
+      "caseSetSha256": "de9801f3db309ab8ed7be95e6f0261049d0f10bb7b25530fd2ed312b1e625caa",
       "class": "pure-logic-not-epub-dependent",
       "rationale": "These cases pin destination sanitization and durable registry ownership; readable-byte download, hash, register, and open is a separate real-EPUB journey."
     },
@@ -257,10 +257,10 @@
     {
       "id": "updater-unit-and-local-pipeline",
       "files": ["tests/updater_spec.lua"],
-      "expectedCases": 27,
-      "caseSetSha256": "20c4ed8d968e8e425d831c7e69a3666dd76f6de5a7adc83c4417ae6bf3fa29ba",
+      "expectedCases": 34,
+      "caseSetSha256": "b637c70d7701a06478ba4306c66ec8ef9feb4d95bc498346bb5397f75f72cd8f",
       "class": "pure-logic-not-epub-dependent",
-      "rationale": "Archive validation, checksum enforcement, atomic swap, rollback, and uninstall behavior are independent of EPUB assets."
+      "rationale": "Archive validation, checksum enforcement, paired interruption recovery, rollback, and uninstall behavior are independent of EPUB assets."
     },
     {
       "id": "view-model-unit",

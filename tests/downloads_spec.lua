@@ -24,16 +24,25 @@ describe("Downloads", function()
         spec_helper.teardown()
     end)
 
-    local function make_downloads()
+    local function make_downloads(overrides)
         local dl_dir = DataStorage:getSettingsDir() .. "/dl"
         os.execute("mkdir -p '" .. dl_dir .. "'")
-        return Downloads.new{ download_dir = dl_dir }
+        local opts = { download_dir = dl_dir }
+        for k, v in pairs(overrides or {}) do opts[k] = v end
+        return Downloads.new(opts)
     end
 
-    local function touch(path)
+    local function touch(path, content)
         local f = assert(io.open(path, "w"))
-        f:write("epub-bytes")
+        f:write(content or "epub-bytes")
         f:close()
+    end
+
+    local function read_file(path)
+        local f = assert(io.open(path, "r"))
+        local content = f:read("*a")
+        f:close()
+        return content
     end
 
     describe("destPath", function()
@@ -126,6 +135,42 @@ describe("Downloads", function()
             local d = make_downloads()
             assert.is_nil(d:localPath(SERVER, { id = 42 }))
             assert.is_nil(d:localPath(SERVER, {}))
+        end)
+    end)
+
+    describe("publish", function()
+        it("replaces an existing file only when the validated temp rename succeeds", function()
+            local d = make_downloads()
+            local dest = d.download_dir .. "/x.epub"
+            local temp = dest .. ".part"
+            touch(dest, "previous-valid-book")
+            touch(temp, "complete-new-book")
+
+            assert.is_true(d:publish(SERVER, { id = 7 }, temp, dest))
+            assert.are.equal("complete-new-book", read_file(dest))
+            assert.is_nil(io.open(temp, "r"))
+            assert.are.equal(dest, d:localPath(SERVER, { id = 7 }))
+        end)
+
+        it("preserves the previous file and registry when replacement rename fails", function()
+            local d = make_downloads({
+                rename = function() return nil, "injected rename failure" end,
+            })
+            local dest = d.download_dir .. "/x.epub"
+            local temp = dest .. ".part"
+            touch(dest, "previous-valid-book")
+            touch(temp, "complete-new-book")
+            d:register(SERVER, { id = 7, title = "Previous edition" }, dest)
+
+            local ok, err = d:publish(
+                SERVER, { id = 7, title = "Unsuccessful replacement" }, temp, dest)
+            assert.is_nil(ok)
+            assert.matches("injected rename failure", err)
+            assert.are.equal("previous-valid-book", read_file(dest))
+            assert.are.equal("complete-new-book", read_file(temp))
+            local entry = d.registry:readSetting(SERVER .. "|7")
+            assert.are.equal("Previous edition", entry.title)
+            assert.are.equal(dest, entry.path)
         end)
     end)
 

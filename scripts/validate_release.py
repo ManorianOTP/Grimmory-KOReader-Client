@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the committed manifest against the two built plugin archives."""
+"""Validate a generated release manifest against two built plugin archives."""
 
 from __future__ import annotations
 
@@ -40,6 +40,8 @@ def validate_archive(path: Path, plugin_dir: str, version: str) -> None:
                 fail(f"unsafe archive path in {path.name}: {member.name}")
             if not posix.parts or posix.parts[0] != plugin_dir:
                 fail(f"unexpected archive root in {path.name}: {member.name}")
+            if not (member.isfile() or member.isdir()):
+                fail(f"unsupported archive member type in {path.name}: {member.name}")
 
         for required in REQUIRED_FILES:
             member_name = f"{plugin_dir}/{required}"
@@ -47,6 +49,8 @@ def validate_archive(path: Path, plugin_dir: str, version: str) -> None:
                 fail(f"{path.name} is missing {member_name}")
 
         meta_member = archive.getmember(f"{plugin_dir}/_meta.lua")
+        if not meta_member.isfile():
+            fail(f"{path.name} _meta.lua is not a regular file")
         meta = archive.extractfile(meta_member)
         if meta is None:
             fail(f"cannot read _meta.lua from {path.name}")
@@ -108,11 +112,12 @@ def validate(manifest_path: Path, build_dir: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--manifest", type=Path, default=Path("release/manifest.json"))
+    parser.add_argument("--manifest", type=Path)
     parser.add_argument("--build-dir", type=Path, required=True)
     args = parser.parse_args()
+    manifest_path = args.manifest or args.build_dir / "manifest.json"
     try:
-        validate(args.manifest, args.build_dir)
+        validate(manifest_path, args.build_dir)
     except (OSError, ValueError, json.JSONDecodeError, tarfile.TarError) as exc:
         print(f"release validation failed: {exc}", file=sys.stderr)
         return 1

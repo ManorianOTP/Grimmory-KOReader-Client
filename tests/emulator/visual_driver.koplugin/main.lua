@@ -1900,6 +1900,15 @@ function VisualDriver:_showReaderDownload(app, scenario)
         end
     end
     if not book_file then error("download fixture has no primary EPUB file") end
+    -- The journey downloads GRIMMORY_VISUAL_EPUB, which may be the tiny public
+    -- synthetic book or a much larger private companion. Its server-reported
+    -- size must describe those exact bytes so production truncation checks are
+    -- exercised honestly rather than bypassed with stale catalogue metadata.
+    local source_size = lfs.attributes(source_path, "size")
+    if not source_size or source_size < 1 then
+        error("download source EPUB has no readable size")
+    end
+    book_file.fileSizeKb = source_size / 1024
     self:_assert("download selects the mapped Grimmory file",
         selected_file_id == nil or tonumber(book_file.id) == selected_file_id,
         selected_file_id or "primary file", book_file.id or "absent")

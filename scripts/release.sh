@@ -5,11 +5,11 @@
 #   1. Runs the test suite (the release gate).
 #   2. Sets the given version in both plugins' _meta.lua.
 #   3. Builds a .tar.gz artifact per plugin (each extracts to its own dir).
-#   4. Writes release/manifest.json with versions, URLs, sha256, and sizes.
+#   4. Writes manifest.json beside the archives with URLs, sha256, and sizes.
 #
-# The in-app updater reads release/manifest.json from the main branch via
-# raw.githubusercontent.com, so commit the version bump + manifest to main, and
-# upload the two explicitly named artifacts to the matching GitHub release.
+# The in-app updater reads manifest.json from GitHub's latest-release download
+# URL. Upload the generated manifest and both explicitly named archives to the
+# matching release. No active manifest is committed before those files exist.
 #
 # Usage:
 #   scripts/release.sh <version>        # e.g. scripts/release.sh 1.1.0
@@ -42,7 +42,7 @@ done
 
 echo "==> Building artifacts into build/"
 BUILD_DIR="build/release-${VERSION}"
-mkdir -p "$BUILD_DIR" release
+mkdir -p "$BUILD_DIR"
 ENTRIES=()
 ARTIFACTS=()
 for dir in "${PLUGINS[@]}"; do
@@ -55,7 +55,8 @@ for dir in "${PLUGINS[@]}"; do
     echo "    ${tgz}  (${size} bytes, sha256 ${sha:0:12}…)"
 done
 
-echo "==> Writing release/manifest.json"
+MANIFEST="${BUILD_DIR}/manifest.json"
+echo "==> Writing ${MANIFEST}"
 {
     echo "{"
     echo "  \"version\": \"${VERSION}\","
@@ -64,19 +65,18 @@ echo "==> Writing release/manifest.json"
     echo "${ENTRIES[1]}"
     echo "  ]"
     echo "}"
-} > release/manifest.json
-cat release/manifest.json
+} > "$MANIFEST"
+cat "$MANIFEST"
 
 echo "==> Validating manifest and exact artifact set"
-python3 scripts/validate_release.py --manifest release/manifest.json --build-dir "$BUILD_DIR"
+python3 scripts/validate_release.py --manifest "$MANIFEST" --build-dir "$BUILD_DIR"
 
 cat <<EOF
 
 Next steps:
-  1. Review and commit the version bump + release/manifest.json on main:
-       git add grimmory.koplugin/_meta.lua grimmory_sync.koplugin/_meta.lua release/manifest.json
+  1. Review and commit the version bump through the normal pull-request flow:
+       git add grimmory.koplugin/_meta.lua grimmory_sync.koplugin/_meta.lua
        git commit -m "Release v${VERSION}"
-       git push origin main
-  2. Publish the artifacts so the manifest URLs resolve:
-       gh release create v${VERSION} "${ARTIFACTS[0]}" "${ARTIFACTS[1]}" --title "v${VERSION}" --notes-file CHANGELOG.md
+  2. After that commit is on the release branch, publish all three generated files:
+       gh release create v${VERSION} "${ARTIFACTS[0]}" "${ARTIFACTS[1]}" "${MANIFEST}" --title "v${VERSION}" --notes-file CHANGELOG.md
 EOF

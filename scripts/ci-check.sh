@@ -10,6 +10,7 @@ python3 -B -m unittest discover -s tests/visual -p 'test_*.py'
 python3 -B -m unittest discover -s tests/emulator -p 'test_*.py'
 node --test \
     tests/compatibility/browser_helpers.test.js \
+    tests/compatibility/metadata_exactness.test.js \
     tests/compatibility/verify-web-reader-checkpoints.test.js
 
 BYTECODE_DIR="$(mktemp -d)"

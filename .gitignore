@@ -20,11 +20,25 @@ Thumbs.db
 # Local MCP / tooling config
 .mcp.json
 
+# Local credentials and captured diagnostics
+.env
+.env.*
+!.env.example
+*.log
+*.har
+*.pcap
+*.pcapng
+*.sqlite
+*.sqlite3
+
 # Test harness local artifacts (see tests/.gitignore for fixtures/recorded)
 tests/.busted-cache/
 __pycache__/
 *.py[cod]
 node_modules/
+coverage/
+playwright-report/
+test-results/
 
 # Release build staging produced by scripts/release.sh
 /build/

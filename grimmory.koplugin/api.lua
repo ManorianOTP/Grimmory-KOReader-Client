@@ -355,7 +355,6 @@ function GrimmoryApi:post(url, body, token)
 
     local raw = table.concat(response_body)
     logger.dbg("Grimmory POST", redactToken(url), "→", code)
-    logger.dbg("Grimmory response body:", raw)
 
     if code ~= 200 then
         return nil, "HTTP " .. tostring(code) .. ": " .. raw
@@ -393,7 +392,6 @@ function GrimmoryApi:get(url, token)
 
     local raw = table.concat(response_body)
     logger.dbg("Grimmory GET", redactToken(url), "→", code)
-    logger.dbg("Grimmory response body:", raw)
 
     if code ~= 200 then
         return nil, "HTTP " .. tostring(code) .. ": " .. raw
@@ -408,7 +406,7 @@ function GrimmoryApi:get(url, token)
 end
 
 --- Authenticate with Grimmory and obtain access + refresh tokens. (ref: DL-007)
--- @param server_url string: base URL, e.g. "http://192.168.1.144:6060"
+-- @param server_url string: base URL, e.g. "https://books.example.com"
 -- @param username string
 -- @param password string
 -- @return string|nil: access token, or nil on error
@@ -759,9 +757,11 @@ function GrimmoryApi:downloadBook(server_url, book_id, token, dest_path,
     if expected_size_kb and expected_size_kb > 0 then
         local expected_bytes = expected_size_kb * 1024
         if actual_size < expected_bytes * 0.90 then
-            logger.warn("Grimmory: download may be truncated.",
+            logger.warn("Grimmory: download is substantially truncated.",
                 "Expected ~" .. tostring(expected_size_kb) .. "KB,",
                 "got " .. tostring(math.floor(actual_size / 1024)) .. "KB")
+            os.remove(dest_path)
+            return false, "Downloaded file is substantially smaller than expected"
         end
     end
 

@@ -61,6 +61,11 @@ describe("GrimmoryApi", function()
             assert.is_nil(err, tostring(err))
             assert.equals("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0dXNlciJ9.stub", token)
             assert.equals("refresh-stub-token-abc123", refresh)
+            local logger = require("logger")
+            assert.is_false(logger.has("dbg", token),
+                "access tokens must not be written to KOReader's debug log")
+            assert.is_false(logger.has("dbg", refresh),
+                "refresh tokens must not be written to KOReader's debug log")
         end)
 
         it("surfaces a typed error on 401", function()
@@ -602,6 +607,26 @@ describe("GrimmoryApi", function()
             canned:close()
             os.remove(dest)
             assert.equals(expected, got)
+        end)
+
+        it("rejects and removes a substantially truncated download", function()
+            fixture = spec_helper.start_http_fixture({{
+                method = "GET",
+                path = "/api/v1/books/7/download",
+                status = 200,
+                headers = { ["Content-Type"] = "application/epub+zip" },
+                expect_headers = { Authorization = "Bearer test-token" },
+                body_file = "download_book.bin",
+                repeat_ = 1,
+            }})
+            local tmpdir = os.getenv("TMPDIR") or "/tmp"
+            local dest = tmpdir .. "/grimmory_truncated_" .. tostring(os.time()) ..
+                "_" .. tostring(math.random(99999)) .. ".part"
+            local ok, err = GrimmoryApi:downloadBook(
+                fixture.base_url(), 7, "test-token", dest, 1024)
+            assert.is_false(ok)
+            assert.matches("substantially smaller", err)
+            assert.is_nil(io.open(dest, "rb"))
         end)
     end)
 

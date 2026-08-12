@@ -139,11 +139,16 @@ function Grimmory:init()
     -- wherever the pair is deployed.
     local plugins_root = PLUGIN_DIR:gsub("[/\\]+$", ""):gsub("[/\\][^/\\]+$", "")
     self.updater = Updater.new{ plugins_root = plugins_root }
-    -- Recover from a swap a previous power loss interrupted. Deferred past the
-    -- first paint and gated to once per process so it never slows a book open.
+    -- Recover a paired replacement before this plugin exposes any actions.
+    -- The sync plugin runs the same guard from its own init, so whichever
+    -- plugin KOReader initializes first repairs the pair before use.
     if not updater_reconcile_attempted then
         updater_reconcile_attempted = true
-        UIManager:scheduleIn(1, function() self.updater:reconcile() end)
+        local ok, recovered, recover_err = pcall(self.updater.reconcile, self.updater)
+        if not ok or not recovered then
+            logger.err("Grimmory: update recovery failed:",
+                tostring(ok and recover_err or recovered))
+        end
     end
 
     -- Fold a pre-multi-account login into the account store (idempotent), then
@@ -3209,9 +3214,12 @@ function Grimmory:_startBookDownload(book, book_file)
         end
         local ok, err = self.session:applyCallResult(payload)
         if ok then
-            os.remove(dest)
-            os.rename(tmp, dest)
-            self:registerDownload(book, dest, book_file)
+            ok, err = self.downloads:publish(
+                self.server_url, book, tmp, dest, book_file, function()
+                    self:registerDownload(book, dest, book_file)
+                end)
+        end
+        if ok then
             self:refreshDetailView(book)
         else
             os.remove(tmp)
@@ -3597,16 +3605,16 @@ function Grimmory:showBookDetail(book)
             })
         end
         if meta.amazonRating then
-            ratingRow("amazon", "a", "Amazon  " .. pct(meta.amazonRating) .. "%" .. cnt(meta.amazonReviewCount))
+            ratingRow("rating_store", "a", "Amazon  " .. pct(meta.amazonRating) .. "%" .. cnt(meta.amazonReviewCount))
         end
         if meta.goodreadsRating then
-            ratingRow("goodreads", "G", "Goodreads  " .. pct(meta.goodreadsRating) .. "%" .. cnt(meta.goodreadsReviewCount))
+            ratingRow("rating_community", "G", "Goodreads  " .. pct(meta.goodreadsRating) .. "%" .. cnt(meta.goodreadsReviewCount))
         end
         if meta.hardcoverRating then
-            ratingRow("hardcover", "H", "Hardcover  " .. pct(meta.hardcoverRating) .. "%" .. cnt(meta.hardcoverReviewCount))
+            ratingRow("rating_catalogue", "H", "Hardcover  " .. pct(meta.hardcoverRating) .. "%" .. cnt(meta.hardcoverReviewCount))
         end
         if meta.rating then
-            ratingRow("grimmory", "G", "Grimmory  " .. fmtNum(meta.rating) .. "/5")
+            ratingRow("library", "G", "Grimmory  " .. fmtNum(meta.rating) .. "/5")
         end
     end
 

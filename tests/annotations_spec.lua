@@ -132,7 +132,7 @@ describe("annotation conversion", function()
             grimmory_cfi = old_device_cfi,
             pos0 = "/body/DocFragment[1]/body/p[1]/text()[1].0",
             pos1 = "/body/DocFragment[1]/body/p[1]/text()[1].26",
-            text = "“My fantasies.” He winked.",
+            text = "“Test glyphs.” We counted.",
         }
         local local_items = AnnotationSync.fromLocal({ tracked }, {
             xpointerRangeToCFI = function() return corrected_cfi end,

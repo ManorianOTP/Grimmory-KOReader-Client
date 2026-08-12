@@ -7,6 +7,22 @@ release.
 
 ## [Unreleased]
 
+- Stopped writing raw HTTP response bodies—and therefore possible access or
+  refresh tokens and private library metadata—to KOReader's debug log.
+- Added locked Node dependency installation and commit-pinned actions to CI,
+  restored the complete 22-test JavaScript oracle gate, and made release
+  validation reject links and other non-file archive members.
+- Added security, contribution, release-status, and third-party provenance
+  guidance for a future public release.
+- Required SHA-256 for both updater downloads, rejected link and special-file
+  archive members before extraction, and added paired interruption recovery at
+  every replacement stage without claiming a filesystem-atomic swap.
+- Preserved an existing downloaded book until its validated replacement rename
+  succeeds, rejected substantially truncated files, and withheld failed
+  downloads from the registry.
+- Replaced undocumented Amazon, Goodreads, Hardcover, and Grimmory artwork with
+  original generic icons and replaced unverified fixture prose with text written
+  specifically for the Unicode regression cases.
 - Added opt-in, conflict-safe EPUB highlight/note sync and opt-in durable
   reading-session sync.
 - Added additive Grimmory shelf mirroring into scoped KOReader collections.
@@ -27,13 +43,14 @@ release.
   reader UI and independently resolves its CFI with Foliate, requiring the full
   KOReader, Grimmory, and DOM-range text to match byte-for-byte on the synthetic
   Unicode fixture and all eight configured real EPUBs.
-- Hardened Tailscale installation by checksum-verifying the pinned archive and
-  extracted binaries and rejecting traversal, links, unexpected members, and
-  post-extraction byte mismatches before either executable is installed.
+- Hardened Tailscale installation by checksum-verifying the manifest-selected
+  versioned archive and extracted binaries and rejecting traversal, links,
+  unexpected members, and post-extraction byte mismatches before either
+  executable is installed.
 
-## [2.0.0] - 2026-08-09
+## 2.0.0 - 2026-08-09 (not yet published)
 
-First Grimmory-native release.
+First Grimmory-native version.
 
 - Renamed both plugin directories, IDs, Lua symbols, menus, settings files,
   caches, queues, update staging, release artifacts, documentation, and user
@@ -50,10 +67,11 @@ First Grimmory-native release.
   XPointer/CFI converter; PDF/CBX use exact pages; FB2/MOBI/AZW3 use percentage.
 - Made queued progress account-, server-, book-, and file-aware, added safe
   background token rotation, and preserved credentials on transient failures.
-- Hardened the two-plugin updater with exact manifest membership, fail-closed
+- Hardened the two-plugin updater with exact manifest membership, manifest
   checksums, safe archive roots, retained backups, rollback, installed-version
-  verification, reproducible release validation, and CI gates.
-- Adopted the official Grimmory icon and upstream project links.
+  verification, release validation, and CI gates.
+- Added upstream project links. Interface artwork is original generic artwork;
+  no Grimmory or external rating-service logo is distributed.
 - This is intentionally a clean install with no migration of older client
   settings or plugin data.
 
@@ -80,9 +98,9 @@ cannot be updated in place to v2; use the clean-install transition in
   and a clean uninstall (optionally keeping saved settings for an easy reinstall).
 - Tailscale onboarding (install, connect, status, update) to reach a server that
   is not on your local network.
-- In-app self-updater — **BookLore ▸ Check for updates** downloads, verifies
-  (sha256), and swaps both plugins from a GitHub release, with crash-safe staging
-  and boot-time reconciliation.
+- In-app self-updater — **BookLore ▸ Check for updates** downloaded, verified
+  (sha256), and replaced both plugins from a GitHub release, with staging and
+  boot-time reconciliation.
 
 ### booklore_sync.koplugin
 
@@ -92,5 +110,4 @@ cannot be updated in place to v2; use the clean-install transition in
   server; a prompt appears when the server is ahead of the device.
 - Offline progress queue that flushes once connectivity returns.
 
-[2.0.0]: https://github.com/ManorianOTP/Grimmory-KOReader-Client/releases/tag/v2.0.0
 [1.0.0]: https://github.com/ManorianOTP/Grimmory-KOReader-Client/releases/tag/v1.0.0

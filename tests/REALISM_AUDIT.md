@@ -1,6 +1,6 @@
 # Test Realism Audit
 
-Status: complete (2026-08-11)
+Status: complete (reviewed 2026-08-13)
 
 This audit answers one narrow question for every test: does the test exercise
 the behavior its name appears to claim, and, where a synthetic EPUB or injected
@@ -136,23 +136,42 @@ starts and records the KOReader version/commit in results.
 
 ## Completion evidence
 
-The evidence below predates the outcome-contract hardening and remains useful
-visual history, but its result-schema-v1 JSON is no longer accepted as current
-companion evidence. A current green paired report must be regenerated with
-schema v2 and the tracked named-outcome inventories.
+The deterministic public gate was rerun on 2026-08-13: 339 Lua examples passed
+with 0 failures/errors/pending; 331 top-level Lua cases, 47 visual scenarios,
+34 JavaScript tests, and 120 Python tests were mapped exactly once; all 30
+visual Python tests, 90 emulator/tooling Python tests, and 22 public Node.js
+oracle tests passed. Every Lua file compiled and the packaged-source branding
+check passed. The 12 remaining JavaScript cases are the private full-server
+Playwright journeys; they are inventoried by the policy but are not counted as
+executed by the public Node unit-test command.
+
+The private release-audit evidence was refreshed on 2026-08-13. The ignored
+paired report used schema v2 and passed all 136
+real-EPUB captures (68 mapped scenario/book pairs in both orientations), while
+its deterministic control matched all 94 approved references. The full-server
+lane also passed 10 browser journeys, the isolated producer and consumer,
+9/9 exact progress/annotation checkpoints, all 19 KOReader journeys, unchanged
+source provenance, and 14 workflows across all 9 server books. Private source
+files and generated evidence remain ignored and are not part of this audit
+commit.
 
 - `reader_download_open` private companion report: 8 pairs passed, 0 failed;
   every real result used `real-epub-behavior`, `direct-private-epub`, the mapped
   book/file IDs, the validated asset SHA, and pinned KOReader provenance.
-- Final local CI: 286 Lua successes, 0 failures/errors/pending; 282 statically
-  discovered Lua cases and 47 visual scenarios mapped exactly once; 22 visual
-  Python tests and 56 emulator/tooling Python tests passed; every Lua file
-  compiled and the branding gate passed.
+- Historical pre-hardening local CI: 286 Lua successes, 0
+  failures/errors/pending; 282 statically discovered Lua cases and 47 visual
+  scenarios mapped exactly once; 22 visual Python tests and 56
+  emulator/tooling Python tests passed; every Lua file compiled and the
+  branding gate passed.
 - Privacy-safe reference refresh: all 94 current captures passed. Sixty-six
   references remained pixel-identical; the 28 intentional changes were exactly
   the 14 fictional book/content scenarios in portrait and landscape. Each was
   reviewed at original resolution before targeted approval, then a fresh strict
   run matched all 94 approved references.
+- Artwork-provenance refresh: all 94 public scenarios executed successfully;
+  the six portrait/landscape detail references affected by the three generic
+  rating glyphs were inspected at original resolution and approved explicitly,
+  after which all 94 captures matched pixel-for-pixel.
 - Provider-overlay companion run: 94 synthetic captures matched the approved
   references exactly and 136 real-EPUB captures passed (68 mapped
   scenario/book pairs in both orientations), for 230/230 total. Every real

@@ -35,12 +35,14 @@ end
 --   download_dir  string: destination directory for downloaded books
 --   registry      LuaSettings|nil: override for specs; defaults to the
 --                 shared on-disk registry grimmory_sync also reads
+--   rename        function|nil: injectable replacement rename for specs
 function Downloads.new(opts)
     local self = setmetatable({}, Downloads)
     self.download_dir = opts.download_dir
     self.registry = opts.registry or LuaSettings:open(
         DataStorage:getSettingsDir() .. "/grimmory_downloads.lua"
     )
+    self.rename = opts.rename or os.rename
     return self
 end
 
@@ -92,6 +94,24 @@ function Downloads:register(server_url, book, path, book_file)
         is_primary = is_primary,
     })
     self.registry:flush()
+end
+
+--- Publish a fully validated temporary download. POSIX rename replaces an
+-- existing destination in one operation, so the old valid file is never
+-- deleted first. A failed rename leaves both the old destination and registry
+-- untouched; the caller may then remove the temporary file.
+function Downloads:publish(server_url, book, temp_path, dest_path, book_file,
+        register_completed)
+    local ok, err = self.rename(temp_path, dest_path)
+    if not ok then
+        return nil, "could not replace downloaded file: " .. tostring(err)
+    end
+    if register_completed then
+        register_completed()
+    else
+        self:register(server_url, book, dest_path, book_file)
+    end
+    return true
 end
 
 -- Existing local files grouped by Grimmory book id for one server. Multiple
