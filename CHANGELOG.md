@@ -7,13 +7,32 @@ release.
 
 ## [Unreleased]
 
+- Corrected release, installation, update, security, and changelog guidance to
+  reflect the public v2.0.0 release and its exact two-plugin asset set.
+- Refreshed the complete documentation set with a clearer two-plugin versioning
+  contract, post-install verification, current sync settings, and a
+  documentation index.
+- Expanded troubleshooting for plugin discovery, annotation conflicts,
+  reading-session thresholds, shelf collections, interrupted updates, and
+  destructive uninstall behavior; corrected the scp path from Method C to
+  Method B.
+- Clarified that the pinned Grimmory v3.3.1 test stack is a reproducible API
+  baseline rather than a recommendation to run an outdated server patch, and
+  documented the security/privacy boundaries of logs, Tailscale, and local test
+  artifacts.
+
+## [2.0.0] - 2026-08-12
+
+First public Grimmory-native release. The two plugin archives and generated
+updater manifest were published together.
+
 - Stopped writing raw HTTP response bodies—and therefore possible access or
   refresh tokens and private library metadata—to KOReader's debug log.
 - Added locked Node dependency installation and commit-pinned actions to CI,
   restored the complete 22-test JavaScript oracle gate, and made release
   validation reject links and other non-file archive members.
 - Added security, contribution, release-status, and third-party provenance
-  guidance for a future public release.
+  guidance for the public release.
 - Required SHA-256 for both updater downloads, rejected link and special-file
   archive members before extraction, and added paired interruption recovery at
   every replacement stage without claiming a filesystem-atomic swap.
@@ -47,11 +66,6 @@ release.
   versioned archive and extracted binaries and rejecting traversal, links,
   unexpected members, and post-extraction byte mismatches before either
   executable is installed.
-
-## 2.0.0 - 2026-08-09 (not yet published)
-
-First Grimmory-native version.
-
 - Renamed both plugin directories, IDs, Lua symbols, menus, settings files,
   caches, queues, update staging, release artifacts, documentation, and user
   agents to Grimmory conventions.
@@ -110,4 +124,5 @@ cannot be updated in place to v2; use the clean-install transition in
   server; a prompt appears when the server is ahead of the device.
 - Offline progress queue that flushes once connectivity returns.
 
+[2.0.0]: https://github.com/ManorianOTP/Grimmory-KOReader-Client/releases/tag/v2.0.0
 [1.0.0]: https://github.com/ManorianOTP/Grimmory-KOReader-Client/releases/tag/v1.0.0

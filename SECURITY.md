@@ -10,6 +10,23 @@ sharing exploit details or logs.
 Do not attach an unredacted KOReader `crash.log`, settings file, Grimmory
 database export, or real EPUB to a public issue.
 
+When reporting privately, include the plugin version from both `_meta.lua`
+files, the KOReader version, the Grimmory server version, and the smallest
+redacted reproduction you can provide. Do not send passwords, access tokens,
+refresh tokens, private book content, or a complete settings directory.
+
+## Supported versions
+
+The supported Grimmory release line begins with public v2.0.0. Use the latest
+published v2 release unless a maintainer asks you to test `main`. The existing
+v1.0.0 release is the historical BookLore client and is not a supported
+Grimmory build.
+
+The compatibility stack's Grimmory v3.3.1 pin is a reproducible API baseline,
+not a production patch-level recommendation. Keep the server on a currently
+supported security-patched Grimmory release and report any compatibility
+regression separately.
+
 ## Deployment assumptions
 
 This is a client for a personally administered Kindle and Grimmory server, not
@@ -28,6 +45,10 @@ a hardened multi-user endpoint. In particular:
 - Downloaded book files, annotations, reading sessions, and library metadata
   are private user data. Review logs and generated test reports before sharing
   them.
+- Tailscale is optional third-party software. The plugin verifies the selected
+  archive and extracted binaries against Tailscale's package manifest, but
+  installing it still adds a network daemon to the Kindle. Review your tailnet
+  device and ACL policy, and remove devices you no longer use.
 
 The public test suite exercises authentication renewal, request serialization,
 archive paths and checksums, filename sanitization, offline queues, and conflict

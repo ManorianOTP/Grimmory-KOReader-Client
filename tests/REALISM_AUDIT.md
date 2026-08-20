@@ -1,6 +1,6 @@
 # Test Realism Audit
 
-Status: complete (reviewed 2026-08-13)
+Status: complete (public gates reviewed 2026-08-20; private evidence 2026-08-13)
 
 This audit answers one narrow question for every test: does the test exercise
 the behavior its name appears to claim, and, where a synthetic EPUB or injected
@@ -136,7 +136,7 @@ starts and records the KOReader version/commit in results.
 
 ## Completion evidence
 
-The deterministic public gate was rerun on 2026-08-13: 339 Lua examples passed
+The deterministic public gates were rerun on 2026-08-20: 339 Lua examples passed
 with 0 failures/errors/pending; 331 top-level Lua cases, 47 visual scenarios,
 34 JavaScript tests, and 120 Python tests were mapped exactly once; all 30
 visual Python tests, 90 emulator/tooling Python tests, and 22 public Node.js

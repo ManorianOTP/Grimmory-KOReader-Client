@@ -34,3 +34,13 @@ packages, Pillow, and Docker images are used as runtimes, development tools, or
 external services. They are not copied into this repository's plugin release
 archives, except for the SLAXML file identified above. Their own licenses and
 terms continue to apply.
+
+The optional on-device Tailscale installer downloads a manifest-selected
+Tailscale archive at install time. Neither that archive nor its executables are
+stored in this repository or bundled in the Grimmory plugin archives.
+
+Node packages installed under `tests/compatibility/node_modules`, downloaded
+KOReader emulator runtimes, Docker images, real EPUB companions, and generated
+test reports are local build inputs or artifacts. They are excluded from the
+two plugin release archives and are not covered by this repository's MIT
+license merely because they were used during testing.

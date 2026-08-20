@@ -10,6 +10,39 @@ Finally, a private companion lane repeats every relevant synthetic scene with
 gitignored real EPUBs, including full reader, sync, annotation, session,
 download, registry, and shelf-collection journeys.
 
+## Public test commands
+
+Run commands from the repository root. The shell entry points require Linux or
+WSL; `scripts/test.sh` prints the missing Lua dependencies if setup is
+incomplete.
+
+```bash
+# Fast Lua suite (or append one tests/*_spec.lua path for a focused run)
+scripts/test.sh
+
+# Complete deterministic gate: Lua, realism policy, Python, Node, and compile checks
+npm ci --ignore-scripts --prefix tests/compatibility
+scripts/ci-check.sh
+
+# Pinned KOReader UI in portrait and landscape
+bash scripts/run-koreader-visual-tests.sh --output build/visual/local
+```
+
+The visual output directory must be new or empty. The private real-EPUB and
+full-server lanes are optional release evidence and are described below; they
+are not prerequisites for an ordinary public contribution.
+
+Related guides:
+
+- [`REALISM_AUDIT.md`](REALISM_AUDIT.md) — classification and evidence limits
+- [`visual/README.md`](visual/README.md) — screenshot comparison and approval
+- [`emulator/GRIMMORY_FIXTURE_SERVER.md`](emulator/GRIMMORY_FIXTURE_SERVER.md)
+  — deterministic and real-server fixtures
+- [`emulator/GRIMMORY_REAL_SERVER_ACCEPTANCE.md`](emulator/GRIMMORY_REAL_SERVER_ACCEPTANCE.md)
+  — isolated full-server lifecycle
+- [`compatibility/METADATA_REALISM.md`](compatibility/METADATA_REALISM.md) —
+  provider-metadata provenance
+
 ## Architecture
 
 Each spec file maps to one subsystem:
@@ -36,7 +69,8 @@ IDs and responses make failures reproducible. The private download companion
 streams the exact selected EPUB bytes through that server. A slower optional
 lane starts the official pinned Grimmory image plus MariaDB and imports the
 private books for API compatibility checks; it does not approve screenshots.
-See `emulator/GRIMMORY_FIXTURE_SERVER.md`.
+The Grimmory v3.3.1 pin is a reproducibility baseline, not a production-server
+patch recommendation. See `emulator/GRIMMORY_FIXTURE_SERVER.md`.
 
 ### One-command private full-server acceptance
 

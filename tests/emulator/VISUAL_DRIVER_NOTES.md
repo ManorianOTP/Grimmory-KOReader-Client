@@ -3,6 +3,13 @@
 This directory contains a test-only KOReader plugin. It is deliberately outside
 both production `.koplugin` directories, so release packaging cannot include it.
 
+The supported entry point is
+`bash scripts/run-koreader-visual-tests.sh --output <new-directory>`; it creates
+fresh profiles, starts the fixture server, captures both orientations, verifies
+source provenance, and cleans up. The manual contract below is primarily for
+driver debugging. See [`../visual/README.md`](../visual/README.md) for reference
+review and approval.
+
 ## Contract
 
 Copy these three directories into an isolated KOReader emulator's `plugins/`

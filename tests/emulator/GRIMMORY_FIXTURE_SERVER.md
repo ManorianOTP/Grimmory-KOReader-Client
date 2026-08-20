@@ -137,6 +137,11 @@ image with MariaDB 11.4.8. It is valuable for occasional API compatibility
 checks, but it is not used to approve screenshots: database-generated IDs,
 scanner timing, and metadata extraction make it less reproducible.
 
+The v3.3.1 tag is the repository's reviewed compatibility baseline. It is not a
+recommendation to deploy that patch level in production; production servers
+should follow current Grimmory security and upgrade guidance. Changing this
+test pin requires refreshing the server-contract and full acceptance evidence.
+
 The commands below are retained as a small manual smoke-test shortcut. The
 acceptance suite uses the safer isolated lifecycle documented in
 [`GRIMMORY_REAL_SERVER_ACCEPTANCE.md`](GRIMMORY_REAL_SERVER_ACCEPTANCE.md): it
@@ -156,6 +161,11 @@ starts the pinned containers, creates the local fixture account and library,
 and waits until all eight imports appear. `real-down` stops the services but
 keeps their ignored local database. It never touches a user's existing
 Grimmory installation.
+
+Use the isolated acceptance lifecycle for release evidence. This manual
+shortcut deliberately retains data after `real-down`; remove its ignored
+`build/grimmory-real` directory only after confirming no fixture containers
+still use those bind mounts.
 
 ## Automated checks
 
