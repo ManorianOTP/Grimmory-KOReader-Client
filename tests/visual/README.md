@@ -5,12 +5,26 @@ The normal command runs every named screen in the pinned KOReader release, in
 portrait and landscape, then performs a pixel-exact comparison:
 
 ```sh
-bash scripts/run-koreader-visual-tests.sh
+bash scripts/run-koreader-visual-tests.sh --output build/visual/local
 ```
 
 The first run downloads and checksum-verifies KOReader; later runs reuse the
 external cache. The command prints the capture, JSON, log, and HTML-report
-locations. On Windows, run it through WSL.
+locations. The chosen output directory must be new or empty. On Windows, run it
+through WSL.
+
+For a focused, non-approving capture while developing one screen:
+
+```sh
+bash scripts/run-koreader-visual-tests.sh \
+  --scenario connection_pending \
+  --orientation portrait \
+  --capture-only \
+  --output build/visual/connection-pending
+```
+
+Use `--list` to print the executable scenario catalogue. A focused run does not
+replace the full portrait-and-landscape matrix required for UI review.
 
 Every run fingerprints the exact production-plugin and visual-driver source
 trees used to create it. The fingerprint is recorded in every scenario JSON
@@ -21,6 +35,10 @@ present.
 The comparison and approval tool can also be used separately. It does **not**
 capture KOReader itself; the emulator runner writes the named PNG files it
 reads.
+
+Approved references contain only the fictional public fixture. Private covers,
+titles, screenshots, and companion reports must remain in ignored build output
+and must never be bootstrapped into `tests/visual/references/`.
 
 Pillow is the only Python dependency:
 

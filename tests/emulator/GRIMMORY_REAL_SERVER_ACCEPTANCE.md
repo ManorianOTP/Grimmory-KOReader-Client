@@ -4,6 +4,12 @@ This lane runs the actual Grimmory web application and MariaDB. It complements
 the fast Python protocol fixture; it does not replace deterministic Lua tests
 or pixel baselines.
 
+It is destructive only to the unique Docker project and ignored runtime
+directory that it creates. Never repoint its generated Compose file or runtime
+metadata at a personal Grimmory database or book directory. The pinned Grimmory
+v3.3.1 image is a reproducible compatibility baseline, not production server
+patch guidance.
+
 ## What the lifecycle guarantees
 
 Every run:

@@ -3,6 +3,10 @@
 `tests/fixtures/recorded/` is gitignored and contains local-only real-book
 fixtures for realism testing.
 
+Use a neutral directory name rather than a title or author. The directory,
+unpacked EPUB, `samples.json`, and any source logs are private local evidence;
+verify `git status --ignored` before assuming a new path is excluded.
+
 ## How to populate
 
 1. Open a Grimmory book on the Kindle and capture an XPointer and corresponding
@@ -33,4 +37,6 @@ books; this recorded lane is the exact-pair regression gate for CFIs captured
 from a device.
 
 Recorded fixtures may contain licensed book content; do not commit them. The
-repository `.gitignore` excludes this directory.
+repository `.gitignore` excludes this directory. Redact usernames, server URLs,
+book metadata, and unrelated log lines when copying an XPointer/CFI pair into
+`samples.json`.

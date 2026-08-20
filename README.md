@@ -15,9 +15,11 @@ e-ink client.
 > - **`grimmory.koplugin`** — log in, browse/search/filter your library, download books, and (optionally) get on your network over Tailscale.
 > - **`grimmory_sync.koplugin`** — syncs progress and, when enabled, EPUB annotations and reading sessions.
 
-> **Release status:** Grimmory v2 is not published yet. The repository's
-> existing `v1.0.0` GitHub release is the legacy BookLore client; install the
-> current Grimmory plugin folders from source until a v2 release is published.
+> **Current release:** [v2.0.0](https://github.com/ManorianOTP/Grimmory-KOReader-Client/releases/tag/v2.0.0)
+> is the first public Grimmory release. Install both version-matched plugin
+> archives from that release as described in [INSTALL.md](INSTALL.md). The
+> older `v1.0.0` release is the legacy BookLore client and is not a Grimmory
+> package.
 
 ![Synthetic KOReader library dashboard used by the visual regression suite](tests/visual/references/portrait/dashboard_real_library.png)
 
@@ -64,9 +66,9 @@ e-ink client.
   extracted executables, and rejects unsafe archive paths, links, unexpected
   members, or bytes that do not match their checksums. The selected Tailscale
   version is not pinned in this repository.
-- **In-app updates** — after a public Grimmory release is available,
-  **Grimmory ▸ Check for updates** downloads, checksum-verifies, and installs
-  the complete two-plugin release together. A transaction marker and retained
+- **In-app updates** — **Grimmory ▸ Check for updates** downloads,
+  checksum-verifies, and installs the complete two-plugin release together. A
+  transaction marker and retained
   backups let startup recovery finish or roll back an interrupted replacement;
   the operation is not described as filesystem-atomic.
 
@@ -77,9 +79,12 @@ You need all four of these before installing:
 1. **A jailbroken Kindle running KOReader.** Developed and used on a Kindle
    Paperwhite; other KOReader-capable Kindles should work but are untested.
    See [KindleModding](https://kindlemodding.org/) for jailbreak + KOReader.
-2. **A running Grimmory server** you can sign into. This client is contract-
-   tested against Grimmory v3.3.1; older releases may not provide the App
-   progress, pagination, and selected-file APIs used here. See the
+2. **A running Grimmory server** you can sign into. The reproducible
+   compatibility harness is pinned to Grimmory v3.3.1; that is the tested API
+   baseline, not a recommendation to remain on an old server patch. Use a
+   currently supported, security-patched Grimmory release. Older releases may
+   not provide the App progress, pagination, selected-file, annotation, and
+   reading-session APIs used here. See the
    [Grimmory project](https://github.com/grimmory-tools/grimmory).
 3. **Network access from the Kindle to that server** — either both on the same
    Wi-Fi/LAN, or over Tailscale (which the app can set up for you).
@@ -88,8 +93,9 @@ You need all four of these before installing:
 ## Quick start
 
 1. **Install the plugins** — see [INSTALL.md](INSTALL.md). The simplest path is
-   USB drag-and-drop: copy the two `*.koplugin` folders into
-   `koreader/plugins/` on the Kindle and restart KOReader.
+   USB drag-and-drop: download and extract both v2.0.0 plugin archives, copy the
+   two `*.koplugin` folders into `koreader/plugins/` on the Kindle, and restart
+   KOReader.
 2. **Log in** — in KOReader: **Menu ▸ Grimmory ▸ Login**. Enter your server URL
    and your Grimmory username and password. Prefer an HTTPS URL. A bare LAN
    address such as `192.168.1.50:6060` is accepted and gets `http://` added,
@@ -97,6 +103,10 @@ You need all four of these before installing:
 3. **Browse** — **Menu ▸ Grimmory ▸ Browse Library**. Tap a book to see details
    and download its primary file, or choose a format when the book has several.
    Open the downloaded book to read; your progress syncs automatically.
+4. **Choose optional sync features** — tap the Wi-Fi icon in a Grimmory screen
+   to open **Connection & Sync**. Progress sync is always active for matched
+   downloads; EPUB annotations and reading sessions are opt-in. Shelf-to-
+   collection mirroring is on by default.
 
 This client intentionally makes its direct App-API sync the sole writer for
 Kindle-to-web-reader progress. Do not also enable Grimmory's native KOReader /
@@ -104,14 +114,15 @@ KOSync web-reader bridge for the same books: two writers can race and produce
 conflicting prompts or positions.
 
 Not on the same network as your server? Set up Tailscale first:
-**Menu ▸ Grimmory ▸ Tailscale ▸ Install → Connect** and scan the QR code with
-your phone to authenticate.
+**Menu ▸ Grimmory ▸ Tailscale ▸ Install Tailscale**, then **Connect**, and scan
+the QR code with your phone to authenticate.
 
 ## Updating
 
-After installing Grimmory v2 or later, and once a public release is available:
-**Menu ▸ Grimmory ▸ Check for updates**. If a newer version is published it is
-downloaded, verified, and installed for both plugins; restart KOReader to apply.
+After installing v2.0.0 or later, use **Menu ▸ Grimmory ▸ Check for updates**.
+If a newer version is published, it is downloaded, verified, and installed for
+both plugins; restart KOReader to apply. If no newer release exists, the plugin
+reports that you already have the latest version.
 
 The old BookLore updater is not a supported route to Grimmory. Existing
 BookLore users must follow the exact clean-install transition in
@@ -127,7 +138,9 @@ accounts, change the download folder, sign out, or uninstall both plugins
 Tap the Wi-Fi icon in any Grimmory view for **Connection & Sync**. Shelf
 collections are enabled by default. Annotation and reading-session sync are
 opt-in; their switches live in that panel alongside **Sync all now** and the
-per-book pending list.
+per-book pending list. Mirrored collections are named `Grimmory — <shelf>` and
+contain only locally downloaded books. A deleted remote shelf is retained
+locally rather than deleting a collection that may contain manual edits.
 
 ## Troubleshooting
 
@@ -137,10 +150,22 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for the common issues
 For deployment assumptions and private vulnerability reporting, see
 [SECURITY.md](SECURITY.md).
 
+## Documentation
+
+- [Installation and migration](INSTALL.md)
+- [Troubleshooting](TROUBLESHOOTING.md)
+- [Changelog](CHANGELOG.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy and deployment assumptions](SECURITY.md)
+- [Third-party notices](THIRD_PARTY_NOTICES.md)
+- [Test architecture and commands](tests/README.md)
+- [Test-realism audit](tests/REALISM_AUDIT.md)
+
 ## Engineering evidence
 
-The public, deterministic gate currently comprises 339 passing Lua examples,
-120 Python harness/tooling tests, and 22 Node.js browser-oracle unit tests. The
+At the current source baseline, the public deterministic gate comprises 339
+Lua examples, 120 Python harness/tooling tests, and 22 Node.js browser-oracle
+unit tests. The
 realism policy independently inventories 331 top-level Lua cases, all 47 visual
 scenarios, those 120 Python tests, and 34 JavaScript cases (the 22 public unit
 tests plus 12 private full-server Playwright journeys). These are deliberately
@@ -175,8 +200,9 @@ passed its browser, KOReader, checkpoint, provenance, and parity gates. These
 private reports remain ignored build artifacts and should be regenerated from
 the release candidate before each publication.
 To build and validate exactly two release archives plus their generated
-release manifest, run
-`scripts/release.sh <version>`.
+release manifest, run `scripts/release.sh <version>`. The script updates both
+plugin metadata versions in lockstep; review that version change and all three
+generated release files before publishing.
 
 ## License
 

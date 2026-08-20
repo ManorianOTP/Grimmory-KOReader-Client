@@ -3,6 +3,12 @@
 Metadata has two deliberately different test lanes. They must not be described
 as interchangeable.
 
+This document describes ignored local evidence, not a recipe for exporting a
+personal library. Source EPUBs, provider responses, covers, identifiers,
+credentials, screenshots, and generated reports must remain under ignored
+`build/` storage. See the repository [security guidance](../../SECURITY.md)
+before sharing any artifact.
+
 ## Provider-real full-server lane
 
 The acceptance harness imports one synthetic EPUB and the eight private EPUBs
@@ -113,6 +119,11 @@ EPUB companion remains mandatory for every book-dependent journey, but a test
 must never invent a real-book value merely to make the stress case richer.
 
 ## Commands
+
+Run these from the repository root against the disposable acceptance runtime
+created by
+[`GRIMMORY_REAL_SERVER_ACCEPTANCE.md`](../emulator/GRIMMORY_REAL_SERVER_ACCEPTANCE.md).
+The commands intentionally do not target an existing personal Grimmory server.
 
 Normal runs never contact metadata providers. If the private cache genuinely
 needs refreshing, first create an ignored plan at

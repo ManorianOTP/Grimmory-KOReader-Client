@@ -14,6 +14,7 @@ pitfall. These are the regression gate for cfi.lua. (ref: DL-003)
 | `utf16_surrogate/` | CREngine XPointer offsets count `lChar32` Unicode scalars; an astral scalar maps to 2 epub.js UTF-16 units |
 | `unicode_offsets/` | Literal Kindle smart-punctuation failures plus emoji, decomposed combining marks, and flattened inline Unicode offsets |
 | `mixed_siblings/` | Mixed text+element siblings: only element siblings count toward CFI step index |
+| `nested_inline/` | Nested inline elements preserve the complete element/text path and character offset in both directions |
 | `self_closing_anchor/` | Empty page-landmark anchors remain element siblings during CFI/XPointer translation |
 | `multi_docfragment/` | Multi-chapter EPUB where spine index > 1 requires correct SYNTHETIC element count |
 
@@ -23,6 +24,8 @@ pitfall. These are the regression gate for cfi.lua. (ref: DL-003)
 2. Create `tests/fixtures/synthetic/<name>/OEBPS/content.opf` with a `<spine>`
 3. Create one or more XHTML chapter files under `OEBPS/`
 4. Add a `describe` block in `tests/cfi_spec.lua`
+5. Add the new top-level cases to `tests/realism_policy.json` with one reviewed
+   disposition each, then run `python3 -B scripts/check-test-realism.py`
 
 No zip step required: `tests/support/epub_reader.lua` reads the directory tree
 directly, bypassing the minizip FFI. (ref: DL-002)
